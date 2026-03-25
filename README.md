@@ -6,7 +6,7 @@
 <p align="center">
   <a href="https://pypi.org/project/accrue/"><img src="https://img.shields.io/pypi/v/accrue?color=blue" alt="PyPI"></a>
   <a href="https://pypi.org/project/accrue/"><img src="https://img.shields.io/pypi/pyversions/accrue" alt="Python"></a>
-  <a href="https://github.com/accrue-team/accrue/blob/main/LICENSE"><img src="https://img.shields.io/github/license/accrue-team/accrue" alt="License"></a>
+  <a href="https://github.com/matt-house-e/accrue/blob/main/LICENSE"><img src="https://img.shields.io/github/license/matt-house-e/accrue" alt="License"></a>
 </p>
 
 ---
@@ -146,7 +146,7 @@ With `batch=True`, halve the API costs. Cached steps re-run in seconds.
 ## Contributing
 
 ```bash
-git clone https://github.com/accrue-team/accrue.git
+git clone https://github.com/matt-house-e/accrue.git
 cd accrue
 pip install -e ".[dev]"
 pytest
