@@ -1,0 +1,8 @@
+Category,Field,Prompt,Type,Enum,Examples,Default
+account_qualification,industry,Classify the company's primary industry,String,"Fintech, Developer Tools, Productivity, Design, Infrastructure, Other",,
+account_qualification,icp_fit,Rate fit as a B2B SaaS prospect for a sales intelligence platform,String,"Strong Fit, Moderate Fit, Weak Fit",,
+account_qualification,employee_estimate,Estimate the number of employees,Number,,,
+account_qualification,segment,"Classify the company's market segment based on likely revenue and team size",String,"Enterprise, Mid-Market, SMB",,
+competitive_intel,competitive_position,Rate competitive position in their market,String,"Market Leader, Challenger, Niche Player",,
+competitive_intel,key_competitors,List top 3 competitors,List[String],,,
+competitive_intel,growth_stage,Classify the company's current growth stage,String,"Early Stage, Growth, Mature, Public",,

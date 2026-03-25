@@ -1,0 +1,109 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "accrue"
+version = "1.0.0"
+authors = [
+  { name="Matthew House", email="matt.house.e@gmail.com" },
+]
+description = "A composable pipeline engine for structured data enrichment using LLMs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "pandas>=2.0.0",
+    "openai>=1.66.0",
+    "pydantic>=2.0.0",
+    "tqdm>=4.65.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40.0"]
+google = ["google-genai>=1.0.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.25.0",
+    "pytest-mock>=3.10",
+    "ruff>=0.14.0",
+    "pre-commit>=4.0",
+    "ipykernel>=6.0",
+]
+all = [
+    "accrue[anthropic]",
+    "accrue[google]",
+    "accrue[dev]",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/matt-house-e/accrue"
+"Bug Reports" = "https://github.com/matt-house-e/accrue/issues"
+"Source" = "https://github.com/matt-house-e/accrue"
+"Documentation" = "https://github.com/matt-house-e/accrue#readme"
+
+[tool.hatch.version]
+path = "accrue/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["accrue"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "accrue/",
+    "accrue/py.typed",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+# Development tools configuration
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E203"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402", "F401"]
+"examples/*.ipynb" = ["E402", "E501"]
+"tests/*.py" = ["F841", "E731"]
+"tests/integration/*.py" = ["E402", "E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["accrue"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["tests/integration"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--disable-warnings",
+    "-v"
+]
+asyncio_mode = "auto"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+    "asyncio: marks tests as async",
+]
