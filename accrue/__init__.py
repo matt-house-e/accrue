@@ -39,7 +39,7 @@ from .steps import FunctionStep, LLMStep, Step, StepContext, StepResult
 from .steps.providers.base import BatchCapableLLMClient, BatchRequest, BatchResult
 from .utils.web_search import web_search
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __author__ = "Accrue Team"
 
 __all__ = [
