@@ -60,6 +60,17 @@ pip install accrue[anthropic]  # Claude
 pip install accrue[google]     # Gemini
 ```
 
+## Claude Code Skill
+
+If you use [Claude Code](https://claude.ai/claude-code), Accrue ships with a built-in `/accrue` skill that guides you through building pipelines interactively. It designs fields, picks models, estimates costs, and writes your script -- you just review and run.
+
+```
+> /accrue
+> I have 500 companies in accounts.csv, I need to qualify them for ICP fit
+```
+
+The skill walks you through field design, model selection, pipeline architecture, and configuration before writing a production-ready script. See [Using the Claude Code Skill](docs/getting-started/claude-code-skill.md) for details.
+
 ## Why Accrue
 
 You have a spreadsheet of companies, leads, or entities. You need structured fields added to every row -- classifications, summaries, scores, extracted data. You could write a `for` loop and call the OpenAI API, but then you're building retry logic, rate limiting, caching, progress tracking, and crash recovery. You could use Clay, but you'd pay $500/month for something you can't version-control.
@@ -139,6 +150,7 @@ With `batch=True`, halve the API costs. Cached steps re-run in seconds.
 | Section | Description |
 |---------|-------------|
 | [Getting Started](docs/getting-started/quickstart.md) | Installation, first pipeline, core concepts |
+| [Claude Code Skill](docs/getting-started/claude-code-skill.md) | Interactive pipeline builder via `/accrue` |
 | [Guides](docs/guides/) | Field specs, providers, caching, batch API, grounding, hooks, errors, configuration |
 | [Cookbook](docs/cookbook/) | End-to-end examples: [company enrichment](docs/cookbook/company-enrichment.md), [lead scoring](docs/cookbook/lead-scoring.md), [content analysis](docs/cookbook/content-analysis.md), [batch processing](docs/cookbook/batch-processing.md) |
 | [API Reference](docs/reference/api.md) | Complete reference for every public export |
