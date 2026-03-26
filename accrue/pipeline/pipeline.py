@@ -115,8 +115,10 @@ class PipelineResult:
 
         # Rows
         status_color = GREEN if errors == 0 else YELLOW
-        lines.append(f"  {status_color}{BOLD}{ok}{RESET}/{total} rows enriched"
-                      + (f"  {RED}{errors} errors{RESET}" if errors else ""))
+        lines.append(
+            f"  {status_color}{BOLD}{ok}{RESET}/{total} rows enriched"
+            + (f"  {RED}{errors} errors{RESET}" if errors else "")
+        )
 
         # Per-step breakdown
         if self.cost.steps:
@@ -146,9 +148,11 @@ class PipelineResult:
             token_str = f"{tokens / 1_000:.1f}k"
         else:
             token_str = str(tokens)
-        lines.append(f"  {DIM}tokens:{RESET} {token_str} total  "
-                      f"{DIM}({self.cost.total_prompt_tokens:,} in / "
-                      f"{self.cost.total_completion_tokens:,} out){RESET}")
+        lines.append(
+            f"  {DIM}tokens:{RESET} {token_str} total  "
+            f"{DIM}({self.cost.total_prompt_tokens:,} in / "
+            f"{self.cost.total_completion_tokens:,} out){RESET}"
+        )
 
         # Errors
         if self.errors:
