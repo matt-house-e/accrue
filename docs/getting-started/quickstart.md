@@ -76,5 +76,6 @@ result = pipeline.run(data, config=EnrichmentConfig(enable_caching=True))
 
 ## Next steps
 
+- [Claude Code Skill](claude-code-skill.md) -- let `/accrue` build your pipeline interactively
 - [Core Concepts](core-concepts.md) -- understand the execution model
 - [Guides](../guides/) -- field specs, providers, conditional steps, batch API
