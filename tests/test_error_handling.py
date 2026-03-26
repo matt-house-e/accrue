@@ -162,5 +162,5 @@ class TestEnricherWithErrors:
 
         assert "f" in result.columns
         assert result.at[0, "f"] == "f_value_0"
-        assert result.at[1, "f"] is None  # failed row
+        assert pd.isna(result.at[1, "f"])  # failed row
         assert result.at[2, "f"] == "f_value_2"

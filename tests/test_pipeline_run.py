@@ -130,7 +130,7 @@ class TestPipelineRunAsync:
         assert len(result.errors) == 1
         assert result.errors[0].row_index == 1
         assert result.data.at[0, "f"] == "ok"
-        assert result.data.at[1, "f"] is None  # sentinel
+        assert pd.isna(result.data.at[1, "f"])  # sentinel
 
 
 # -- Pipeline.runner() ------------------------------------------------------
