@@ -4,6 +4,10 @@ A programmatic enrichment engine built on composable, column-oriented
 pipeline steps with Pydantic validation, checkpointing, and async concurrency.
 """
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # Set up default logging when package is imported
 from .utils.logger import setup_logging
 

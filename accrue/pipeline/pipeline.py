@@ -93,6 +93,80 @@ class PipelineResult:
         """True if any rows produced errors during pipeline execution."""
         return len(self.errors) > 0
 
+    def summary(self) -> str:
+        """Return a formatted summary of the pipeline run."""
+        DIM = "\033[2m"
+        BOLD = "\033[1m"
+        GREEN = "\033[32m"
+        RED = "\033[31m"
+        YELLOW = "\033[33m"
+        CYAN = "\033[36m"
+        RESET = "\033[0m"
+
+        total = len(self.data)
+        errors = len(self.errors)
+        ok = total - errors
+
+        lines: list[str] = []
+        lines.append("")
+        lines.append(f"{DIM}{'─' * 50}{RESET}")
+        lines.append(f"{BOLD}  Pipeline Complete{RESET}")
+        lines.append(f"{DIM}{'─' * 50}{RESET}")
+
+        # Rows
+        status_color = GREEN if errors == 0 else YELLOW
+        lines.append(
+            f"  {status_color}{BOLD}{ok}{RESET}/{total} rows enriched"
+            + (f"  {RED}{errors} errors{RESET}" if errors else "")
+        )
+
+        # Per-step breakdown
+        if self.cost.steps:
+            lines.append("")
+            for name, usage in self.cost.steps.items():
+                mode = f" {DIM}(batch){RESET}" if usage.execution_mode == "batch" else ""
+                cache_info = ""
+                if usage.cache_hits > 0:
+                    pct = usage.cache_hit_rate * 100
+                    cache_info = f"  {DIM}cache: {pct:.0f}%{RESET}"
+                skip_info = ""
+                if usage.rows_skipped > 0:
+                    skip_info = f"  {DIM}skipped: {usage.rows_skipped}{RESET}"
+                lines.append(
+                    f"  {CYAN}{name}{RESET}  "
+                    f"{DIM}{usage.model or 'cached'}{RESET}{mode}"
+                    f"  {usage.rows_processed} rows"
+                    f"{cache_info}{skip_info}"
+                )
+
+        # Tokens
+        lines.append("")
+        tokens = self.cost.total_tokens
+        if tokens >= 1_000_000:
+            token_str = f"{tokens / 1_000_000:.1f}M"
+        elif tokens >= 1_000:
+            token_str = f"{tokens / 1_000:.1f}k"
+        else:
+            token_str = str(tokens)
+        lines.append(
+            f"  {DIM}tokens:{RESET} {token_str} total  "
+            f"{DIM}({self.cost.total_prompt_tokens:,} in / "
+            f"{self.cost.total_completion_tokens:,} out){RESET}"
+        )
+
+        # Errors
+        if self.errors:
+            lines.append("")
+            shown = self.errors[:5]
+            for err in shown:
+                lines.append(f"  {RED}✗{RESET} Row {err.row_index}: {err.error}")
+            if errors > 5:
+                lines.append(f"  {DIM}... and {errors - 5} more{RESET}")
+
+        lines.append(f"{DIM}{'─' * 50}{RESET}")
+        lines.append("")
+        return "\n".join(lines)
+
 
 class Pipeline:
     """Orchestrates a DAG of steps with column-oriented execution.
