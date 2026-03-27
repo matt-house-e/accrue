@@ -433,12 +433,19 @@ class LLMStep:
         content = response.content
         parsed = json.loads(content)
 
+        # Extract __ internal fields before Pydantic validation (which
+        # rejects them due to extra="forbid").  They bypass schema
+        # validation but are still passed between steps.
+        internal_values = {k: v for k, v in parsed.items() if k.startswith("__")}
+        parsed_clean = {k: v for k, v in parsed.items() if not k.startswith("__")}
+
         if self._use_structured_outputs:
             dynamic_model = build_response_model(self._field_specs)
-            validated = dynamic_model.model_validate(parsed)
+            validated = dynamic_model.model_validate(parsed_clean)
         else:
-            validated = self.schema.model_validate(parsed)
+            validated = self.schema.model_validate(parsed_clean)
         all_values = validated.model_dump()
+        all_values.update(internal_values)
 
         values = {k: v for k, v in all_values.items() if k in self.fields}
         values = self._apply_defaults(values)

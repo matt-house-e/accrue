@@ -46,6 +46,23 @@ LLMStep("analyze", fields={...}, model="claude-sonnet-4-6", client=AnthropicClie
 
 Set `ANTHROPIC_API_KEY` in .env.
 
+**Corporate proxy / custom SSL:** If behind a corporate proxy (e.g., Zscaler) that re-signs HTTPS, pass a custom `httpx` client with the corporate CA bundle. **Always pass `api_key` explicitly** when using a custom `http_client` — the SDK won't auto-read env vars with a custom client:
+
+```python
+import os, ssl, httpx
+from dotenv import load_dotenv
+from accrue.providers import AnthropicClient
+
+load_dotenv(override=True)  # Load .env BEFORE constructing clients
+
+ssl_ctx = ssl.create_default_context(cafile="ca-bundle.pem")
+client = AnthropicClient(
+    api_key=os.environ["ANTHROPIC_API_KEY"],
+    http_client=httpx.AsyncClient(verify=ssl_ctx),
+)
+LLMStep("analyze", fields={...}, model="claude-sonnet-4-6", client=client)
+```
+
 ### Google
 
 ```bash
@@ -140,10 +157,10 @@ LLMStep("research", fields={...}, grounding=GroundingConfig(
 | Provider | Grounding Implementation | Structured Outputs |
 |----------|------------------------|-------------------|
 | OpenAI | Responses API web search | Works normally |
-| Anthropic | Citations (document-grounded) | **Disabled** (incompatible) |
+| Anthropic | `web_search_20250305` server tool (real web search) | **Disabled** (incompatible with web search tool) |
 | Google | Google Search | **Disabled** (incompatible) |
 
-**Critical tradeoff:** On Anthropic and Google, enabling grounding disables structured outputs. The LLM returns JSON in a text block instead of structured tool output. Accrue handles parsing, but quality may be slightly lower. Flag this to the user.
+**All three providers support real web search.** The tradeoff: on Anthropic and Google, enabling grounding disables structured outputs. The LLM returns JSON in a text block instead of structured tool output. Accrue handles parsing, but quality may be slightly lower. Flag this to the user.
 
 ### Citations
 

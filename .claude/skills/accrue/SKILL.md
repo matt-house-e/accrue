@@ -1,6 +1,6 @@
 ---
 name: accrue
-description: "Build data enrichment pipelines with Accrue. Use when the user wants to enrich a CSV or dataset with LLM-generated fields — company research, lead qualification, classification, extraction, tagging. Guides field design, model selection, prompt crafting, and pipeline configuration. Trigger on: enrich, qualify leads, research companies, classify data, enrich CSV, build pipeline, data enrichment, ICP scoring, account qualification."
+description: "Build data enrichment pipelines with Accrue. Use when the user wants to enrich a CSV or dataset with LLM-generated fields — classification, extraction, tagging, research, scoring, or any structured data generation. Works for any domain: sales, finance, healthcare, legal, HR, e-commerce, research, etc. Trigger on: enrich, classify data, enrich CSV, build pipeline, data enrichment, extract fields, tag records, score rows, research dataset."
 ---
 
 # Accrue Pipeline Builder
@@ -23,6 +23,12 @@ Accrue must be installed before any pipeline can run. This phase ensures the env
    pip install "accrue[all]"         # All providers
    ```
    If `pip` is unavailable, try `uv pip install` instead. Ensure Python 3.10+ is being used.
+
+   **Cowork / VM environments:** The VM may route traffic through a SOCKS proxy. If you see `ImportError: Using SOCKS proxy, but the 'socksio' package is not installed`, install it:
+   ```bash
+   pip install socksio "httpx[socks]"
+   ```
+   Do this **before** installing accrue or any provider extras, since the install itself needs network access.
 3. **Check for API keys.** Accrue auto-loads `.env` via python-dotenv. Verify the relevant key exists:
    - OpenAI → `OPENAI_API_KEY`
    - Anthropic → `ANTHROPIC_API_KEY`
@@ -30,16 +36,57 @@ Accrue must be installed before any pipeline can run. This phase ensures the env
 
    If no `.env` file exists and no key is set in the environment, **stop and ask the user** before proceeding. Do not attempt to run a pipeline without a valid API key.
 
+4. **Check which API providers are reachable.** Corporate proxies may block certain API endpoints. Test connectivity before building the pipeline:
+   ```bash
+   curl -s -o /dev/null -w "%{http_code}" https://api.anthropic.com/  # Expect 200 or 401
+   curl -s -o /dev/null -w "%{http_code}" https://api.openai.com/     # 403 = blocked
+   ```
+   If a provider is blocked (403), **do not use models from that provider.** Use only reachable providers for all steps in the pipeline.
+
+5. **Ensure API keys are loaded.** Accrue auto-loads `.env` via `python-dotenv`, but in Cowork VMs the working directory may differ from where `.env` lives. **Always explicitly load `.env` at the top of the script with `override=True`:**
+   ```python
+   from pathlib import Path
+   from dotenv import load_dotenv
+   load_dotenv(Path(__file__).parent / ".env", override=True)
+   ```
+
+6. **Handle corporate proxy SSL.** If a `ca-bundle.pem` exists in the project directory, the corporate proxy re-signs HTTPS traffic. Pass a custom SSL context to the provider client. **Always pass `api_key` explicitly when using a custom `http_client`** — the SDK won't auto-read env vars with a custom client:
+   ```python
+   import os, ssl, httpx
+   from accrue.providers import AnthropicClient
+
+   ssl_ctx = ssl.create_default_context(cafile="ca-bundle.pem")
+   client = AnthropicClient(
+       api_key=os.environ["ANTHROPIC_API_KEY"],
+       http_client=httpx.AsyncClient(verify=ssl_ctx),
+   )
+   # Use this client in all LLMSteps
+   LLMStep("enrich", ..., client=client)
+   ```
+   This is the proper approach — do NOT use `verify=False` or patch `_client` directly.
+
+7. **Fix cache directory for mounted/remote filesystems.** Accrue's SQLite cache defaults to `.accrue/` in the working directory. In Cowork VMs and other environments where the project folder is mounted with restricted I/O, SQLite will fail with disk I/O errors. **Always point the cache to local temp space:**
+   ```python
+   import tempfile
+   config = EnrichmentConfig(
+       enable_caching=True,
+       cache_dir=tempfile.mkdtemp(prefix="accrue_"),
+       # ... other config
+   )
+   ```
+   This writes cache to the VM's local `/tmp/` which has no I/O restrictions. The tradeoff: cache won't persist between Cowork sessions, but that's fine since the VM environment is ephemeral anyway.
+
 ## Phase 1: Understand the Enrichment
 
 1. **Read the input data.** Find and read any CSV/data file. Check columns, row count, sample 3-5 rows.
 2. **Ask the goal.** "What are you trying to accomplish with this enrichment?" and "Who consumes this data?"
 3. **Match to an archetype** (propose if the user is vague):
-   - **Account qualification** — ICP fit, industry, employee count, signals
-   - **Lead research** — role relevance, seniority, personalization hooks
-   - **Company intelligence** — tech stack, funding, news, competitors
-   - **Content extraction** — structured data from unstructured text
-   - **Classification/tagging** — categorize existing data into buckets
+   - **Classification/tagging** — categorize records into buckets (sentiment, topic, priority, risk level)
+   - **Content extraction** — structured data from unstructured text (invoices, resumes, reviews, articles)
+   - **Research & enrichment** — add context from model knowledge or web search (company info, product details, people)
+   - **Scoring & qualification** — rate records against criteria (lead fit, risk assessment, relevance ranking)
+   - **Summarization** — condense long text into structured fields (abstracts, one-liners, key takeaways)
+   - *B2B examples: account qualification, lead research, company intelligence — but Accrue works for any domain*
 4. **Check data quality.** Flag: duplicates, missing key columns, dirty values. Suggest cleanup before enriching.
 5. **Flag cost early.** Row count drives cost. >1000 rows: mention batch mode. >5000 rows: discuss workers and checkpointing.
 
@@ -61,34 +108,46 @@ For each field, define using Accrue's 7-key spec. Read [api.md](references/api.m
 - **Include boundary examples.** For classification, show the edge cases and how to resolve them.
 - **Use bad_examples.** Steer away from vague outputs: `bad_examples: ["It depends", "N/A", "Various"]`.
 
-### Suggest Fields by Archetype
+### Example Field Sets by Archetype
 
-**Account qualification:**
+These are starting points — adapt to the user's domain and data.
+
+**Classification/tagging (any domain):**
+| Field | Type | Notes |
+|-------|------|-------|
+| category | enum | 5-15 categories + Other, tailored to the domain |
+| sentiment | enum | Positive / Neutral / Negative |
+| priority | enum | High / Medium / Low |
+| confidence | enum | High / Medium / Low — how certain the LLM is |
+
+**Content extraction:**
+| Field | Type | Notes |
+|-------|------|-------|
+| key_entities | List[String] | People, orgs, products mentioned |
+| summary | str | One sentence, under 25 words |
+| structured_data | JSON | Domain-specific extracted fields |
+
+**Research & enrichment:**
+| Field | Type | Notes |
+|-------|------|-------|
+| description | str | One sentence summary of the entity |
+| key_facts | List[String] | 3-5 notable facts |
+| source_quality | enum | High / Medium / Low — how much the LLM knows about this entity |
+
+**Scoring & qualification:**
+| Field | Type | Notes |
+|-------|------|-------|
+| score | enum | Strong / Moderate / Weak (or numeric) |
+| reasoning | str | One sentence explaining the score |
+| signals | List[String] | Evidence supporting the score |
+
+**B2B examples** (sales, marketing, GTM):
 | Field | Type | Notes |
 |-------|------|-------|
 | industry | enum | 8-12 categories + Other |
-| employee_count | str | "150+", "5000+" format |
-| annual_revenue | str | "$X.XM" or "$X.XB" format |
 | icp_fit | enum | Strong Fit / Moderate Fit / Weak Fit |
-| summary | str | One sentence, for sales team |
-| signals | List[String] | Recent funding, hiring, product launches |
-
-**Lead research:**
-| Field | Type | Notes |
-|-------|------|-------|
-| role_relevance | enum | Decision Maker / Influencer / End User / Not Relevant |
-| seniority | enum | C-Suite / VP / Director / Manager / IC |
-| department | enum | Engineering / Sales / Marketing / Product / Other |
-| personalization_hook | str | One sentence, specific to this person |
-
-**Company intelligence:**
-| Field | Type | Notes |
-|-------|------|-------|
-| tech_stack | List[String] | Known technologies |
-| funding_stage | enum | Pre-seed through IPO + Bootstrapped + Unknown |
-| recent_news | str | Under 50 words, most recent significant event |
-| competitors | List[String] | Top 3 competitors |
-| business_model | enum | SaaS / Marketplace / Services / Hardware / Other |
+| employee_count | str | "150+", "5000+" format |
+| personalization_hook | str | One sentence, specific to this person/company |
 
 Present fields as a table. Iterate with the user until confirmed.
 
@@ -165,7 +224,7 @@ Read [prompts.md](references/prompts.md) for model-specific cookbook guidance, t
 - **Skip when:** Classification from provided context, well-known entities, text transformation
 - **Tradeoff:** Grounding disables structured outputs on Anthropic/Google. Flag this to the user.
 - For OpenAI: `grounding=True` uses Responses API web search
-- For Anthropic: `grounding=True` uses citations (document-grounded, not web search)
+- For Anthropic: `grounding=True` uses `web_search_20250305` server tool (real web search, with citations)
 - For Google: `grounding=True` uses Google Search
 
 ### Provider kwargs
