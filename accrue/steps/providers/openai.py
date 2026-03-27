@@ -45,9 +45,11 @@ class OpenAIClient:
         self,
         api_key: str | None = None,
         base_url: str | None = None,
+        http_client: Any | None = None,
     ):
         self._api_key = api_key
         self._base_url = base_url
+        self._http_client = http_client
         self._client: Any = None
 
     def _get_client(self) -> Any:
@@ -58,6 +60,8 @@ class OpenAIClient:
             kwargs: dict[str, Any] = {"api_key": key}
             if self._base_url:
                 kwargs["base_url"] = self._base_url
+            if self._http_client is not None:
+                kwargs["http_client"] = self._http_client
             self._client = AsyncOpenAI(**kwargs)
         return self._client
 

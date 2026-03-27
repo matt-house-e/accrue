@@ -23,8 +23,13 @@ class GoogleClient:
     combination is unsupported on Gemini 2.x models.
     """
 
-    def __init__(self, api_key: str | None = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        http_client: Any | None = None,
+    ):
         self._api_key = api_key
+        self._http_client = http_client
         self._client: Any = None
 
     def _get_client(self) -> Any:
@@ -34,7 +39,10 @@ class GoogleClient:
             except ImportError:
                 raise ImportError("google-genai package required: pip install accrue[google]")
             key = self._api_key or os.environ.get("GOOGLE_API_KEY")
-            self._client = genai.Client(api_key=key)
+            kwargs: dict[str, Any] = {"api_key": key}
+            if self._http_client is not None:
+                kwargs["http_options"] = {"client": self._http_client}
+            self._client = genai.Client(**kwargs)
         return self._client
 
     async def complete(

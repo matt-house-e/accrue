@@ -30,8 +30,13 @@ class AnthropicClient:
     ``output_config.format`` are disabled (incompatible with citations).
     """
 
-    def __init__(self, api_key: str | None = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        http_client: Any | None = None,
+    ):
         self._api_key = api_key
+        self._http_client = http_client
         self._client: Any = None
 
     def _get_client(self) -> Any:
@@ -41,7 +46,16 @@ class AnthropicClient:
             except ImportError:
                 raise ImportError("anthropic package required: pip install accrue[anthropic]")
             key = self._api_key or os.environ.get("ANTHROPIC_API_KEY")
-            self._client = AsyncAnthropic(api_key=key)
+            if not key:
+                raise StepError(
+                    "No Anthropic API key found. Pass api_key= to "
+                    "AnthropicClient() or set ANTHROPIC_API_KEY in the "
+                    "environment before constructing the client."
+                )
+            kwargs: dict[str, Any] = {"api_key": key}
+            if self._http_client is not None:
+                kwargs["http_client"] = self._http_client
+            self._client = AsyncAnthropic(**kwargs)
         return self._client
 
     async def complete(

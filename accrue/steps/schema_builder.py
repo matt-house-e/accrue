@@ -42,12 +42,16 @@ def build_response_model(
     """
     field_definitions: dict[str, Any] = {}
 
+    from pydantic import Field
+
     for name, spec in field_specs.items():
+        # Skip __ internal fields — Pydantic forbids leading underscores.
+        # These fields are still included in the prompt and parsed from the
+        # raw JSON response, but they bypass schema validation.
+        if name.startswith("__"):
+            continue
         annotation = _resolve_type(spec)
         description = _build_description(spec)
-        # create_model expects (annotation, default) or (annotation, FieldInfo)
-        from pydantic import Field
-
         field_definitions[name] = (annotation, Field(description=description))
 
     model = create_model(
