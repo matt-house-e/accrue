@@ -304,6 +304,48 @@ class TestParseResponse:
         with pytest.raises(json.JSONDecodeError):
             step.parse_response(response)
 
+    def test_strips_markdown_fences_with_json_hint(self):
+        """Claude Haiku with grounding wraps JSON in ```json...``` fences."""
+        step = LLMStep(
+            name="s",
+            fields={"market_size": "Estimate TAM"},
+            client=AsyncMock(spec=["complete"]),
+        )
+        response = _mock_llm_response('```json\n{"market_size": "$5B"}\n```')
+        result = step.parse_response(response)
+        assert result.values == {"market_size": "$5B"}
+
+    def test_strips_markdown_fences_without_hint(self):
+        step = LLMStep(
+            name="s",
+            fields={"market_size": "Estimate TAM"},
+            client=AsyncMock(spec=["complete"]),
+        )
+        response = _mock_llm_response('```\n{"market_size": "$5B"}\n```')
+        result = step.parse_response(response)
+        assert result.values == {"market_size": "$5B"}
+
+    def test_strips_fences_with_surrounding_whitespace(self):
+        step = LLMStep(
+            name="s",
+            fields={"market_size": "Estimate TAM"},
+            client=AsyncMock(spec=["complete"]),
+        )
+        response = _mock_llm_response('\n  ```json\n{"market_size": "$5B"}\n```  \n')
+        result = step.parse_response(response)
+        assert result.values == {"market_size": "$5B"}
+
+    def test_unfenced_json_unchanged(self):
+        """Regression: bare JSON must still parse (no fence-handling regression)."""
+        step = LLMStep(
+            name="s",
+            fields={"market_size": "Estimate TAM"},
+            client=AsyncMock(spec=["complete"]),
+        )
+        response = _mock_llm_response('{"market_size": "$5B"}')
+        result = step.parse_response(response)
+        assert result.values == {"market_size": "$5B"}
+
     def test_default_enforcement(self):
         step = LLMStep(
             name="s",
