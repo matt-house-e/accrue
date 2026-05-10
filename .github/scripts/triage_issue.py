@@ -91,7 +91,9 @@ def main() -> int:
         )
         return 1
 
-    row = result.data.iloc[0].to_dict()
+    # Pipeline.run() preserves input type: we pass list[dict], we get
+    # list[dict] back. (See PipelineResult.data type annotation.)
+    row = result.data[0]
     labels: list[str] = []
 
     kind = row.get("kind", "").strip().lower()
