@@ -224,6 +224,16 @@ class TestCostOutlier:
         ctx = _ctx(cost=cost)
         assert BUILTIN_HEURISTICS["cost_outlier"](ctx) == []
 
+    def test_silent_on_single_step_pipeline(self):
+        # A 1-step pipeline always has 100% of cost in the only step; flagging
+        # it adds no information.  Real cost outliers need >=2 steps to compare.
+        cost = CostSummary(
+            total_tokens=50_000,
+            steps={"only": StepUsage(total_tokens=50_000)},
+        )
+        ctx = _ctx(cost=cost)
+        assert BUILTIN_HEURISTICS["cost_outlier"](ctx) == []
+
 
 # -- run_heuristics ----------------------------------------------------------
 
@@ -382,3 +392,14 @@ class TestPipelineResultReport:
         # FunctionStep doesn't register field_specs (no FieldSpec), so no enum
         # heuristic — but the structure should still render.
         assert "categorise" in out or "No flagged patterns" in out
+
+    def test_end_to_end_with_list_of_dicts(self):
+        """report() runs on a pipeline whose input was a list[dict]."""
+        pipeline = Pipeline([FunctionStep("tag", fn=lambda ctx: {"tag": "x"}, fields=["tag"])])
+        rows = [{"company": f"c{i}"} for i in range(5)]
+        result = pipeline.run(rows)
+
+        # Sanity: data round-tripped as list[dict], not a DataFrame.
+        assert isinstance(result.data, list)
+        out = result.report()
+        assert "Pipeline Run Report" in out

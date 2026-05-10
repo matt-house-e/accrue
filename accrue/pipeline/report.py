@@ -370,6 +370,10 @@ def _cost_outlier(ctx: ReportContext) -> list[Finding]:
     findings: list[Finding] = []
     if not ctx.cost or not ctx.cost.steps:
         return findings
+    # Skip single-step pipelines: by definition the only step holds 100%
+    # of cost, so flagging it carries no information.
+    if len(ctx.cost.steps) < 2:
+        return findings
     total = ctx.cost.total_tokens
     if total < 1000:
         return findings
