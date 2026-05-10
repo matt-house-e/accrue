@@ -59,11 +59,13 @@ pipeline = Pipeline([
 ])
 ```
 
-The provider is auto-detected from the `gemini-` model prefix. **Install:** `pip install accrue[google]`. **Auth:** set `GOOGLE_API_KEY`. Override with `client=GoogleClient(...)` for non-default options.
+The provider is auto-detected from the `gemini-` model prefix. No explicit `client=` import needed.
 
 **Install:** `pip install accrue[google]`
 
-**Auth:** Set `GOOGLE_API_KEY` or pass `api_key=` to `GoogleClient()`.
+**Auth:** Set `GOOGLE_API_KEY` (or pass `api_key=` to `LLMStep`).
+
+**Custom client (optional):** Pass `client=GoogleClient(...)` to override auto-detection with non-default options.
 
 **Grounding:** Supports native Google Search grounding via the `grounding` parameter on LLMStep.
 
