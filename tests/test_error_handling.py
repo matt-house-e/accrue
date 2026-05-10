@@ -35,7 +35,7 @@ class TestPerRowErrors:
         p = Pipeline([_failing_step("s", ["f"], fail_indices={1})])
         rows = [{"__idx": 0}, {"__idx": 1}, {"__idx": 2}]
 
-        results, errors, cost = await p.execute(rows, all_fields={})
+        results, errors, cost, _ = await p.execute(rows, all_fields={})
 
         assert len(results) == 3
         assert results[0]["f"] == "f_value_0"
@@ -50,7 +50,7 @@ class TestPerRowErrors:
         p = Pipeline([_failing_step("s", ["f"], fail_indices={0, 2, 4})])
         rows = [{"__idx": i} for i in range(5)]
 
-        results, errors, cost = await p.execute(rows, all_fields={})
+        results, errors, cost, _ = await p.execute(rows, all_fields={})
 
         assert len(errors) == 3
         failed_indices = {e.row_index for e in errors}
@@ -65,7 +65,7 @@ class TestPerRowErrors:
         p = Pipeline([_failing_step("s", ["f"], fail_indices={0, 1, 2})])
         rows = [{"__idx": i} for i in range(3)]
 
-        results, errors, cost = await p.execute(rows, all_fields={})
+        results, errors, cost, _ = await p.execute(rows, all_fields={})
 
         assert len(errors) == 3
         assert all(r["f"] is None for r in results)
@@ -75,7 +75,7 @@ class TestPerRowErrors:
         p = Pipeline([_failing_step("s", ["f"], fail_indices=set())])
         rows = [{"__idx": i} for i in range(3)]
 
-        results, errors, cost = await p.execute(rows, all_fields={})
+        results, errors, cost, _ = await p.execute(rows, all_fields={})
 
         assert errors == []
         assert all(r["f"] is not None for r in results)
@@ -115,7 +115,7 @@ class TestMultiStepErrors:
         )
         rows = [{"__idx": 0}, {"__idx": 1}]
 
-        results, errors, cost = await p.execute(rows, all_fields={})
+        results, errors, cost, _ = await p.execute(rows, all_fields={})
 
         # Row 0: step a succeeded, step b sees the value
         assert results[0]["f1"] == "f1_value_0"

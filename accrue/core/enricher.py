@@ -171,7 +171,7 @@ class Enricher:
 
         # Execute pipeline
         try:
-            accumulated, errors, cost = await self.pipeline.execute(
+            accumulated, errors, cost, _step_elapsed = await self.pipeline.execute(
                 rows=rows,
                 all_fields=fields_dict,
                 config=self.config,

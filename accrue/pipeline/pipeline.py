@@ -74,11 +74,19 @@ class PipelineResult:
         data: Enriched DataFrame or list[dict] (matches input type).
         cost: Aggregated token usage across all steps and rows.
         errors: Per-row errors (empty if all rows succeeded).
+        pipeline_elapsed_seconds: Wall time for the whole run, in seconds.
+        step_elapsed_seconds: Per-step wall time keyed by step name.
+        field_specs: Field-spec dicts collected from steps, used by
+            :meth:`report` to drive heuristics (enum collapse, length
+            anomaly, …).  Empty for FunctionStep-only pipelines.
     """
 
     data: pd.DataFrame | list[dict[str, Any]]
     cost: CostSummary = field(default_factory=CostSummary)
     errors: list[RowError] = field(default_factory=list)
+    pipeline_elapsed_seconds: float = 0.0
+    step_elapsed_seconds: dict[str, float] = field(default_factory=dict)
+    field_specs: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def success_rate(self) -> float:
@@ -166,6 +174,61 @@ class PipelineResult:
         lines.append(f"{DIM}{'─' * 50}{RESET}")
         lines.append("")
         return "\n".join(lines)
+
+    def report(
+        self,
+        format: str = "markdown",
+        path: str | None = None,
+        disable: list[str] | None = None,
+    ) -> str:
+        """Build a heuristic-driven run report — the kind you paste into Slack.
+
+        Unlike :meth:`summary` (a terminal-friendly one-liner), ``report``
+        runs each builtin heuristic over the result and headlines any
+        suspicious patterns: enum collapse, numeric clipping, refusal
+        phrases, retry storms, cache thrash, length anomalies, cost
+        outliers.  Each finding names a probable cause and a suggested
+        action — heuristics, not statistics.
+
+        Args:
+            format: ``"markdown"`` (default) or ``"html"``.  Markdown is
+                pasteable into Slack/GitHub; HTML is a self-contained
+                document for sharing or saving.
+            path: If given, also write the rendered report to this path.
+            disable: Heuristic codes to skip (e.g.
+                ``["cache_thrash", "cost_outlier"]``).  Builtin codes:
+                ``enum_collapse``, ``numeric_clipping``, ``length_anomaly``,
+                ``retry_storm``, ``cache_thrash``, ``refusal_pattern``,
+                ``cost_outlier``.
+
+        Returns:
+            The rendered report as a string.
+        """
+        from .report import ReportContext, render_html, render_markdown, run_heuristics
+
+        ctx = ReportContext(
+            data=self.data,
+            cost=self.cost,
+            errors=self.errors,
+            field_specs=self.field_specs,
+            pipeline_elapsed_seconds=self.pipeline_elapsed_seconds,
+            step_elapsed_seconds=self.step_elapsed_seconds,
+        )
+        findings = run_heuristics(ctx, disable=disable)
+
+        fmt = format.lower()
+        if fmt == "markdown":
+            text = render_markdown(ctx, findings)
+        elif fmt == "html":
+            text = render_html(ctx, findings)
+        else:
+            raise ValueError(f"Unknown report format {format!r}; expected 'markdown' or 'html'.")
+
+        if path is not None:
+            from pathlib import Path
+
+            Path(path).write_text(text, encoding="utf-8")
+        return text
 
 
 class Pipeline:
@@ -307,10 +370,11 @@ class Pipeline:
         accumulated = None
         errors: list[RowError] = []
         cost = CostSummary()
+        step_elapsed: dict[str, float] = {}
 
         try:
             # Execute
-            accumulated, errors, cost = await self.execute(
+            accumulated, errors, cost, step_elapsed = await self.execute(
                 rows=rows,
                 all_fields=all_fields,
                 config=config,
@@ -341,10 +405,24 @@ class Pipeline:
                     if not key.startswith("__"):
                         merged[key] = value
                 result_rows.append(merged)
-            return PipelineResult(data=result_rows, cost=cost, errors=errors)
+            return PipelineResult(
+                data=result_rows,
+                cost=cost,
+                errors=errors,
+                pipeline_elapsed_seconds=elapsed,
+                step_elapsed_seconds=step_elapsed,
+                field_specs=all_fields,
+            )
         else:
             df_out = self._build_result_df(data, accumulated, config)
-            return PipelineResult(data=df_out, cost=cost, errors=errors)
+            return PipelineResult(
+                data=df_out,
+                cost=cost,
+                errors=errors,
+                pipeline_elapsed_seconds=elapsed,
+                step_elapsed_seconds=step_elapsed,
+                field_specs=all_fields,
+            )
 
     def runner(self, config: EnrichmentConfig | None = None) -> Any:
         """Create a reusable :class:`Enricher` runner for this pipeline.
@@ -507,7 +585,7 @@ class Pipeline:
         cache_manager: Any = None,
         on_partial_checkpoint: Callable[[str, list[dict], int], None] | None = None,
         hooks: EnrichmentHooks | None = None,
-    ) -> tuple[list[dict[str, Any]], list[RowError], CostSummary]:
+    ) -> tuple[list[dict[str, Any]], list[RowError], CostSummary, dict[str, float]]:
         """Execute the pipeline across all rows (column-oriented).
 
         Args:
@@ -522,9 +600,11 @@ class Pipeline:
             hooks: Optional EnrichmentHooks for lifecycle events.
 
         Returns:
-            Tuple of (accumulated results, row errors, cost summary).
+            Tuple of (accumulated results, row errors, cost summary,
+            step_elapsed_seconds dict).
         """
         hooks = hooks or EnrichmentHooks()
+        step_elapsed: dict[str, float] = {}
 
         max_workers = config.max_workers if config is not None else 3
         on_error = config.on_error if config is not None else "continue"
@@ -597,6 +677,7 @@ class Pipeline:
                     steps_to_run, step_results_list
                 ):
                     all_errors.extend(step_errors)
+                    step_elapsed[step_name] = elapsed_s
                     if usage:
                         step_usage_map[step_name] = usage
 
@@ -636,7 +717,7 @@ class Pipeline:
             steps=step_usage_map,
         )
 
-        return accumulated, all_errors, cost
+        return accumulated, all_errors, cost, step_elapsed
 
     async def _execute_step(
         self,
