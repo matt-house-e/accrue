@@ -18,6 +18,7 @@ import os
 import sys
 
 from accrue import LLMStep, Pipeline
+from accrue.providers import AnthropicClient
 
 
 def main() -> int:
@@ -28,11 +29,15 @@ def main() -> int:
         print("error: ISSUE_TITLE env var is empty", file=sys.stderr)
         return 1
 
+    # accrue's LLMStep defaults to OpenAIClient regardless of model name
+    # (see accrue/steps/llm.py::_resolve_client). We pass AnthropicClient
+    # explicitly so this works against ANTHROPIC_API_KEY only.
     pipeline = Pipeline(
         [
             LLMStep(
                 "triage",
                 model="claude-haiku-4-5-20251001",
+                client=AnthropicClient(),
                 fields={
                     "kind": {
                         "prompt": (
@@ -73,8 +78,17 @@ def main() -> int:
         ]
     )
 
+    # Surface row-level errors so silent LLM failures don't masquerade
+    # as "pipeline produced no rows".
+    if result.errors:
+        for err in result.errors[:5]:
+            print(f"row error: {err!r}", file=sys.stderr)
+
     if not result.success_rate:
-        print("error: pipeline produced no rows", file=sys.stderr)
+        print(
+            "error: pipeline produced no successful rows (see row errors above)",
+            file=sys.stderr,
+        )
         return 1
 
     row = result.data.iloc[0].to_dict()
