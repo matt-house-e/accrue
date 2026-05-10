@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **`EnrichmentConfig.enable_caching` now defaults to `True`** (was `False`). Re-runs of unchanged inputs no longer re-pay the API cost. Opt out with `EnrichmentConfig(enable_caching=False)` for one-off runs.
+- **`LLMStep` auto-detects provider from model name.** `claude-*` → `AnthropicClient`, `gemini-*` → `GoogleClient`, anything else (or any model with `base_url` set) → `OpenAIClient`. Previously every Claude/Gemini user had to pass `client=AnthropicClient()` or `client=GoogleClient()` explicitly. Explicit `client=` still wins. (#23)
 
 ### Fixed
 - `LLMStep.parse_response` now strips markdown code fences before `json.loads`. Fixes parse failures with Claude Haiku + grounding tools, where the structured-output constraint is disabled and the model wraps JSON in ` ``` ` fences. (#7)

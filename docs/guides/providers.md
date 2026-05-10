@@ -24,21 +24,23 @@ OpenAI uses the Responses API natively, which enables web search and structured 
 ## Anthropic
 
 ```python
-from accrue.providers import AnthropicClient
 from accrue import Pipeline, LLMStep
 
 pipeline = Pipeline([
     LLMStep("analyze",
         fields={"summary": "Summarize the company"},
         model="claude-sonnet-4-5-20250929",
-        client=AnthropicClient(),
     ),
 ])
 ```
 
+The provider is auto-detected from the `claude-` model prefix. No explicit `client=` import needed.
+
 **Install:** `pip install accrue[anthropic]`
 
-**Auth:** Set `ANTHROPIC_API_KEY` or pass `api_key=` to `AnthropicClient()`.
+**Auth:** Set `ANTHROPIC_API_KEY` (or pass `api_key=` to `LLMStep`).
+
+**Custom client (optional):** For non-default Anthropic SDK options pass `client=AnthropicClient(...)` explicitly — overrides auto-detection.
 
 **Prompt caching:** Accrue automatically adds `cache_control: {"type": "ephemeral"}` to system messages. On repeated calls with the same system prompt, Anthropic caches the prompt tokens for roughly 90% savings on system prompt input costs. No configuration required.
 
@@ -47,17 +49,17 @@ pipeline = Pipeline([
 ## Google
 
 ```python
-from accrue.providers import GoogleClient
 from accrue import Pipeline, LLMStep
 
 pipeline = Pipeline([
     LLMStep("analyze",
         fields={"summary": "Summarize the company"},
         model="gemini-2.5-flash",
-        client=GoogleClient(),
     ),
 ])
 ```
+
+The provider is auto-detected from the `gemini-` model prefix. **Install:** `pip install accrue[google]`. **Auth:** set `GOOGLE_API_KEY`. Override with `client=GoogleClient(...)` for non-default options.
 
 **Install:** `pip install accrue[google]`
 
