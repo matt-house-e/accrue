@@ -34,9 +34,27 @@ except ImportError:
 
 logger = get_logger(__name__)
 
+
 # ---------------------------------------------------------------------------
 # Refusal detection for default enforcement
 # ---------------------------------------------------------------------------
+def _strip_markdown_fences(content: str) -> str:
+    """Strip surrounding markdown code fences if present.
+
+    Some Claude models (notably Haiku with grounding tools) wrap JSON
+    in ``` ... ``` fences when not constrained by structured outputs.
+    Safe to call on unfenced content — returns it unchanged.
+    """
+    s = content.strip()
+    if not s.startswith("```"):
+        return content
+    lines = s.split("\n")
+    lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
 REFUSAL_PATTERNS = frozenset(
     {
         "unable to determine",
@@ -431,7 +449,7 @@ class LLMStep:
                 validation.
         """
         content = response.content
-        parsed = json.loads(content)
+        parsed = json.loads(_strip_markdown_fences(content))
 
         # Extract __ internal fields before Pydantic validation (which
         # rejects them due to extra="forbid").  They bypass schema
