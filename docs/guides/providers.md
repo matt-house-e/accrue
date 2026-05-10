@@ -145,7 +145,6 @@ The `provider_kwargs` parameter is an escape hatch for provider-specific feature
 LLMStep("deep_analysis",
     fields={"analysis": "Detailed strategic analysis"},
     model="claude-sonnet-4-5-20250929",
-    client=AnthropicClient(),
     provider_kwargs={"thinking": {"type": "adaptive"}},
 )
 
