@@ -86,8 +86,7 @@ def main() -> int:
 
     if not result.success_rate:
         print(
-            "error: pipeline produced no successful rows "
-            "(see row errors above)",
+            "error: pipeline produced no successful rows (see row errors above)",
             file=sys.stderr,
         )
         return 1
