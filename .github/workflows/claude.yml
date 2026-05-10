@@ -1,0 +1,38 @@
+name: Claude (mention bot)
+
+# Lets contributors invoke an agent by commenting "@claude <ask>" on any
+# issue, PR, or review. v1 auto-detects mode from the event context, so
+# no `mode:` input is needed. The default trigger phrase is "@claude".
+#
+# Docs: https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened, assigned]
+
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # The action picks up CLAUDE.md, AGENTS.md, and .claude/commands/
+          # automatically when it spins up Claude Code in the runner.
+          claude_args: |
+            --max-turns 20
