@@ -80,7 +80,7 @@ def main() -> int:
 
     # Surface row-level errors so silent LLM failures don't masquerade
     # as "pipeline produced no rows".
-    if result.has_errors():
+    if result.errors:
         for err in result.errors[:5]:
             print(f"row error: {err!r}", file=sys.stderr)
 
