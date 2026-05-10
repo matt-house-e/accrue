@@ -5,7 +5,7 @@
 ```python
 from accrue import Pipeline, EnrichmentConfig
 
-config = EnrichmentConfig(max_workers=20, enable_caching=True)
+config = EnrichmentConfig(max_workers=20)
 result = pipeline.run(data, config=config)
 ```
 
@@ -22,7 +22,7 @@ result = pipeline.run(data, config=config)
 | `on_error` | `"continue"` | `"continue"` collects errors; `"raise"` fails fast |
 | `log_level` | `"INFO"` | Logging level |
 | `enable_progress_bar` | `True` | Show tqdm progress bar |
-| `enable_caching` | `False` | SQLite input-hash cache |
+| `enable_caching` | `True` | SQLite input-hash cache (set `False` for one-off runs) |
 | `cache_ttl` | `3600` | Cache TTL in seconds |
 | `cache_dir` | `".accrue"` | Directory for `cache.db` |
 | `enable_checkpointing` | `False` | Step-level crash recovery |

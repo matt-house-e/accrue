@@ -185,6 +185,22 @@ class TestConfigBatchFields:
         assert config.max_retries == 5
 
 
+# -- EnrichmentConfig caching defaults --------------------------------------
+
+
+class TestConfigCachingDefaults:
+    def test_enable_caching_defaults_to_true(self):
+        """Caching is on by default — re-running a pipeline against
+        unchanged inputs should not re-pay the API cost. Opt out
+        explicitly with EnrichmentConfig(enable_caching=False)."""
+        config = EnrichmentConfig()
+        assert config.enable_caching is True
+
+    def test_enable_caching_can_be_disabled(self):
+        config = EnrichmentConfig(enable_caching=False)
+        assert config.enable_caching is False
+
+
 # -- LLMStep batch param ----------------------------------------------------
 
 
