@@ -7,6 +7,18 @@ You are shipping issue #$ARGUMENTS in the accrue repo.
 
 Follow the full lifecycle. Be conservative — small PRs beat big ones.
 
+## 0. Overview first
+
+Before any planning, branching, or code, post a brief feature overview to the user so they can grok the change instantly without reading the PR body or diff. Keep it under 8 lines:
+
+```
+**What it does:** <one sentence>
+**Value:** <one or two sentences — who benefits, what gets simpler>
+**Before / After:** <minimal code snippet showing the API change>
+```
+
+Then continue.
+
 ## 1. Understand
 
 - `gh issue view $ARGUMENTS --comments` — read the issue and any discussion.
