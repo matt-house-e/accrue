@@ -71,8 +71,14 @@ class EnrichmentConfig:
     """Automatically resume from checkpoint on re-run."""
 
     # === Caching ===
-    enable_caching: bool = False
-    """Enable input-hash cache to skip redundant API calls."""
+    enable_caching: bool = True
+    """Enable input-hash cache to skip redundant API calls.
+
+    Defaults to True since re-running a pipeline against unchanged
+    inputs should not re-pay the API cost. Opt out with
+    ``EnrichmentConfig(enable_caching=False)`` for one-off runs or
+    when you want a guaranteed fresh result.
+    """
 
     cache_ttl: int = 3600
     """Cache time-to-live in seconds."""
