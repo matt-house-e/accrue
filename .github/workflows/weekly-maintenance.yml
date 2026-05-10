@@ -1,0 +1,57 @@
+name: Weekly maintenance (scheduled)
+
+# Runs every Sunday at 02:00 UTC, plus on-demand via the Actions tab.
+# Sweeps: stale issues, doc/code drift, security advisories. Posts one
+# summary issue with findings.
+#
+# Pattern: https://github.com/anthropics/claude-code-action/blob/main/docs/solutions.md#scheduled-maintenance
+
+on:
+  schedule:
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+
+            Run weekly maintenance for the accrue repo. Read CLAUDE.md
+            and AGENTS.md before starting.
+
+            Tasks:
+            1. **Stale issues** — find open issues with no activity in
+               90+ days. List them with title and last-comment date.
+            2. **Doc/code drift** — pick three random public symbols
+               exported from accrue/__init__.py and confirm each appears
+               in either README.md, docs/getting-started/, or
+               docs/guides/. Flag any that don't.
+            3. **Version coherence** — confirm pyproject.toml's version
+               matches accrue/__init__.py's __version__. Flag mismatch.
+            4. **CHANGELOG presence** — if CHANGELOG.md doesn't exist,
+               note that it's missing.
+            5. **Examples sanity** — for each file under examples/,
+               read the imports and confirm every imported name still
+               exists in accrue's public API. Don't run them.
+
+            Post a single issue titled "Weekly maintenance — <date>"
+            summarising findings as a checklist. If everything is clean,
+            still post the issue with "All checks passed" so the run is
+            visible. Use `gh issue create`.
+          claude_args: |
+            --max-turns 25
+            --allowedTools "Read,Grep,Glob,Bash(gh issue:*),Bash(git:*),Bash(grep:*),Bash(find:*)"
