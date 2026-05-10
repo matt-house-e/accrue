@@ -71,7 +71,7 @@ Avoid redundant API calls on re-runs. Cached results are stored in a local SQLit
 ```python
 from accrue import EnrichmentConfig
 
-result = pipeline.run(data, config=EnrichmentConfig(enable_caching=True))
+result = pipeline.run(data)  # caching is on by default
 ```
 
 ## Next steps

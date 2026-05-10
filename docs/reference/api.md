@@ -346,7 +346,7 @@ class EnrichmentConfig:
     checkpoint_interval: int = 0
 
     # Caching
-    enable_caching: bool = False
+    enable_caching: bool = True
     cache_ttl: int = 3600
     cache_dir: str = ".accrue"
 
@@ -371,7 +371,7 @@ class EnrichmentConfig:
 | `checkpoint_dir` | `None` | Directory for checkpoint files. `None` uses a temp directory. |
 | `auto_resume` | `True` | Automatically resume from checkpoint on re-run. |
 | `checkpoint_interval` | `0` | Save partial step progress every N rows. `0` disables. |
-| `enable_caching` | `False` | Enable input-hash SQLite cache to skip redundant API calls. |
+| `enable_caching` | `True` | Enable input-hash SQLite cache to skip redundant API calls. Set `False` for one-off runs or when you need a guaranteed-fresh result. |
 | `cache_ttl` | `3600` | Cache time-to-live in seconds. |
 | `cache_dir` | `".accrue"` | Directory for `cache.db`. |
 | `batch_poll_interval` | `60.0` | Seconds between batch job status checks. |

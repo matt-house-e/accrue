@@ -13,8 +13,8 @@ pipeline = Pipeline([
     LLMStep("analyze", fields={"summary": "Summarize the company"}, model="gpt-4.1-mini"),
 ])
 
-config = EnrichmentConfig(enable_caching=True)
-result = pipeline.run(data, config=config)
+# Caching is on by default — no config flag needed.
+result = pipeline.run(data)
 ```
 
 Re-running the same pipeline with the same data skips cached rows entirely. No API calls are made for rows that already have results.
@@ -77,7 +77,7 @@ FunctionStep("stock_price", fn=get_price, fields=["price"], cache=False)
 FunctionStep("score", fn=score_v2, fields=["score"], cache_version="v2")
 ```
 
-A step with `cache=False` always makes the API call (or runs the function), even when `enable_caching=True` in the config. A step with `cache=True` only caches if the global config also has `enable_caching=True`.
+A step with `cache=False` always makes the API call (or runs the function), even when caching is enabled at the config level. A step with `cache=True` only caches when the global config has `enable_caching=True` (the default).
 
 ### Clear cache
 
@@ -164,7 +164,7 @@ EnrichmentConfig.for_batch()        # Batch API settings with caching and checkp
 
 ## Gotchas
 
-- Caching is off by default (`enable_caching=False`). You must opt in via config. The `cache=True` default on individual steps only means "this step is cacheable"; it does not enable the cache system.
+- Caching is on by default (`enable_caching=True`). To run without caching — typically for one-off runs or when you need a guaranteed-fresh result — pass `EnrichmentConfig(enable_caching=False)`. The `cache=True` default on individual steps only means "this step is cacheable"; it does not by itself enable or disable the cache system.
 - `cache_version` is a FunctionStep feature. LLMStep cache keys are derived from prompts, model, temperature, and field specs, so they auto-invalidate when those change. There is no `cache_version` on LLMStep.
 - Cache TTL is checked lazily on read. Expired entries are not proactively deleted. Call `CacheManager.cleanup_expired()` if you need to reclaim disk space.
 - The cache directory (`.accrue/`) should be gitignored. Add `.accrue/` to your `.gitignore`.
