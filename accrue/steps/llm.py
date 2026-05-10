@@ -448,8 +448,8 @@ class LLMStep:
             pydantic.ValidationError: If the parsed JSON fails schema
                 validation.
         """
-        content = _strip_markdown_fences(response.content)
-        parsed = json.loads(content)
+        content = response.content
+        parsed = json.loads(_strip_markdown_fences(content))
 
         # Extract __ internal fields before Pydantic validation (which
         # rejects them due to extra="forbid").  They bypass schema
