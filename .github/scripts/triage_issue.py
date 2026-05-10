@@ -18,7 +18,6 @@ import os
 import sys
 
 from accrue import LLMStep, Pipeline
-from accrue.providers import AnthropicClient
 
 
 def main() -> int:
@@ -29,15 +28,11 @@ def main() -> int:
         print("error: ISSUE_TITLE env var is empty", file=sys.stderr)
         return 1
 
-    # accrue's LLMStep defaults to OpenAIClient regardless of model name
-    # (see accrue/steps/llm.py::_resolve_client). We pass AnthropicClient
-    # explicitly so this works against ANTHROPIC_API_KEY only.
     pipeline = Pipeline(
         [
             LLMStep(
                 "triage",
                 model="claude-haiku-4-5-20251001",
-                client=AnthropicClient(),
                 fields={
                     "kind": {
                         "prompt": (
