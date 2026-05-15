@@ -177,7 +177,7 @@ class PipelineResult:
 
     def report(
         self,
-        format: str = "markdown",
+        output_format: str = "markdown",
         path: str | None = None,
         disable: list[str] | None = None,
     ) -> str:
@@ -191,7 +191,7 @@ class PipelineResult:
         action — heuristics, not statistics.
 
         Args:
-            format: ``"markdown"`` (default) or ``"html"``.  Markdown is
+            output_format: ``"markdown"`` (default) or ``"html"``.  Markdown is
                 pasteable into Slack/GitHub; HTML is a self-contained
                 document for sharing or saving.
             path: If given, also write the rendered report to this path.
@@ -216,13 +216,15 @@ class PipelineResult:
         )
         findings = run_heuristics(ctx, disable=disable)
 
-        fmt = format.lower()
+        fmt = output_format.lower()
         if fmt == "markdown":
             text = render_markdown(ctx, findings)
         elif fmt == "html":
             text = render_html(ctx, findings)
         else:
-            raise ValueError(f"Unknown report format {format!r}; expected 'markdown' or 'html'.")
+            raise ValueError(
+                f"Unknown report format {output_format!r}; expected 'markdown' or 'html'."
+            )
 
         if path is not None:
             from pathlib import Path

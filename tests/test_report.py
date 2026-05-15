@@ -130,6 +130,18 @@ class TestLengthAnomaly:
         )
         assert BUILTIN_HEURISTICS["length_anomaly"](ctx) == []
 
+    def test_fires_when_outputs_too_long(self):
+        # Hint: 80-120 words → target_mid 100. Outputs ~250 words → ratio 2.5, above 2.0.
+        words = " ".join(["w"] * 250)
+        df = pd.DataFrame({"summary": [words] * 10})
+        ctx = _ctx(
+            data=df,
+            field_specs={"summary": {"prompt": "x", "type": "String", "format": "80-120 words"}},
+        )
+        out = BUILTIN_HEURISTICS["length_anomaly"](ctx)
+        assert len(out) == 1
+        assert "verbose" in out[0].message
+
 
 # -- retry_storm -------------------------------------------------------------
 
@@ -343,13 +355,13 @@ class TestPipelineResultReport:
             data=pd.DataFrame({"x": [1, 2]}),
             pipeline_elapsed_seconds=0.5,
         )
-        out = r.report(format="html")
+        out = r.report(output_format="html")
         assert out.startswith("<!doctype html>")
 
     def test_unknown_format_raises(self):
         r = PipelineResult(data=pd.DataFrame({"x": [1]}))
         with pytest.raises(ValueError, match="Unknown report format"):
-            r.report(format="json")
+            r.report(output_format="json")
 
     def test_path_writes_file(self, tmp_path):
         r = PipelineResult(
@@ -357,7 +369,7 @@ class TestPipelineResultReport:
             pipeline_elapsed_seconds=0.1,
         )
         target = tmp_path / "run.html"
-        out = r.report(format="html", path=str(target))
+        out = r.report(output_format="html", path=str(target))
         assert target.exists()
         assert target.read_text() == out
 
