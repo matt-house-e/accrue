@@ -117,10 +117,6 @@ def setup_logging(
     root_logger.setLevel(numeric_level)
     root_logger.addHandler(handler)
 
-    # Quiet down noisy third-party loggers
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("requests").setLevel(logging.WARNING)
-
 
 def get_logger(name: str) -> logging.Logger:
     """
