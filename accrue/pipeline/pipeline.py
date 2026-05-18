@@ -66,6 +66,64 @@ def _build_skip_values(step: Any) -> dict[str, Any]:
     return values
 
 
+def _merge_results_into_df(
+    df: pd.DataFrame,
+    accumulated: list[dict[str, Any]],
+    *,
+    overwrite_fields: bool,
+) -> pd.DataFrame:
+    """Merge per-row accumulated results into a copy of df, column-wise.
+
+    accumulated: list of dicts, one per row, possibly missing keys.
+    overwrite_fields: True => new value wins; False => existing non-null
+                      DataFrame value wins.
+    Filters out keys starting with "__" (internal fields).
+    Preserves df.index and untouched-column dtypes.
+
+    Raises ValueError if df has duplicate column names.
+    """
+    # Detect duplicate column names upfront
+    col_counts: dict[str, int] = {}
+    for col in df.columns:
+        col_counts[col] = col_counts.get(col, 0) + 1
+    dups = [col for col, count in col_counts.items() if count > 1]
+    if dups:
+        raise ValueError(f"DataFrame contains duplicate column names: {dups}")
+
+    # Collect every field name across all rows (preserving insertion order)
+    field_names: list[str] = []
+    seen: set[str] = set()
+    for row in accumulated:
+        for k in row:
+            if not k.startswith("__") and k not in seen:
+                seen.add(k)
+                field_names.append(k)
+
+    if not field_names:
+        return df.copy()
+
+    # Build a new-columns dict[str, list], aligned to df.index
+    n = len(df)
+    new_cols: dict[str, list[Any]] = {f: [None] * n for f in field_names}
+    for i, row_result in enumerate(accumulated):
+        for k in field_names:
+            if k in row_result:
+                new_cols[k][i] = row_result[k]
+
+    new_df = pd.DataFrame(new_cols, index=df.index)
+
+    df_out = df.copy()
+    for col in field_names:
+        new_series = new_df[col]
+        if col in df_out.columns and not overwrite_fields:
+            # existing non-null, non-empty wins; use where to keep existing
+            existing = df_out[col]
+            df_out[col] = existing.where(existing.notna() & (existing != ""), other=new_series)
+        else:
+            df_out[col] = new_series
+    return df_out
+
+
 @dataclass
 class PipelineResult:
     """Result from Pipeline.run() / Pipeline.run_async().
@@ -417,18 +475,7 @@ class Pipeline:
         overwrite_fields = True
         if config is not None:
             overwrite_fields = config.overwrite_fields
-
-        df_out = df.copy()
-        for idx in range(len(df_out)):
-            for key, value in accumulated[idx].items():
-                if key.startswith("__"):
-                    continue
-                if not overwrite_fields and key in df_out.columns:
-                    existing = df_out.at[df_out.index[idx], key]
-                    if pd.notna(existing) and existing != "":
-                        continue
-                df_out.at[df_out.index[idx], key] = value
-        return df_out
+        return _merge_results_into_df(df, accumulated, overwrite_fields=overwrite_fields)
 
     # -- validation & DAG build -----------------------------------------
 

@@ -12,6 +12,7 @@ from typing import Any
 import pandas as pd
 
 from ..pipeline import Pipeline
+from ..pipeline.pipeline import _merge_results_into_df
 from ..utils.logger import get_logger
 from .checkpoint import CheckpointManager
 from .config import EnrichmentConfig
@@ -192,19 +193,8 @@ class Enricher:
                 error_summary[err.step_name] = error_summary.get(err.step_name, 0) + 1
             logger.warning("Pipeline completed with %d row errors: %s", len(errors), error_summary)
 
-        # Write results back to DataFrame
-        df_out = df.copy()
-        for idx in range(len(df_out)):
-            for key, value in accumulated[idx].items():
-                # Filter __ internal fields
-                if key.startswith("__"):
-                    continue
-                # Respect overwrite_fields
-                if not overwrite_fields and key in df_out.columns:
-                    existing = df_out.at[df_out.index[idx], key]
-                    if pd.notna(existing) and existing != "":
-                        continue
-                df_out.at[df_out.index[idx], key] = value
+        # Write results back to DataFrame (column-wise, O(n) not O(n²))
+        df_out = _merge_results_into_df(df, accumulated, overwrite_fields=overwrite_fields)
 
         # Cleanup checkpoint on success
         self._checkpoint.cleanup(data_identifier, category)
