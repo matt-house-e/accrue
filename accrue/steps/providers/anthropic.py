@@ -55,6 +55,9 @@ class AnthropicClient:
             kwargs: dict[str, Any] = {"api_key": key}
             if self._http_client is not None:
                 kwargs["http_client"] = self._http_client
+            # max_retries=0: disable SDK-level retry so LLMStep's retry loop
+            # is the single source of truth and retries are not double-stacked.
+            kwargs["max_retries"] = 0
             self._client = AsyncAnthropic(**kwargs)
         return self._client
 
@@ -137,9 +140,13 @@ class AnthropicClient:
                 status_code=408,
             ) from exc
         except APIError as exc:
+            exc_status = getattr(exc, "status_code", None)
+            # Promote generic 429 to is_rate_limit (covers cases where RateLimitError
+            # is not raised but status_code is 429)
             raise LLMAPIError(
                 f"Anthropic API error for model '{model}': {exc}",
-                status_code=getattr(exc, "status_code", None),
+                status_code=exc_status,
+                is_rate_limit=(exc_status == 429),
             ) from exc
 
         # Extract text from potentially multi-block response

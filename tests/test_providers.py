@@ -50,6 +50,147 @@ class TestLLMAPIError:
         e = LLMAPIError("rate limited", retry_after=2.5, is_rate_limit=True)
         assert e.retry_after == 2.5
 
+    # -- retryable property ------------------------------------------------
+
+    def test_retryable_rate_limit_flag(self):
+        e = LLMAPIError("rate limited", is_rate_limit=True)
+        assert e.retryable is True
+
+    def test_retryable_status_429(self):
+        e = LLMAPIError("429 error", status_code=429)
+        assert e.retryable is True
+
+    def test_retryable_status_408(self):
+        e = LLMAPIError("timeout", status_code=408)
+        assert e.retryable is True
+
+    def test_retryable_status_500(self):
+        e = LLMAPIError("internal server error", status_code=500)
+        assert e.retryable is True
+
+    def test_retryable_status_503(self):
+        e = LLMAPIError("service unavailable", status_code=503)
+        assert e.retryable is True
+
+    def test_not_retryable_status_400(self):
+        e = LLMAPIError("bad request", status_code=400)
+        assert e.retryable is False
+
+    def test_not_retryable_status_401(self):
+        e = LLMAPIError("unauthorized", status_code=401)
+        assert e.retryable is False
+
+    def test_not_retryable_status_403(self):
+        e = LLMAPIError("forbidden", status_code=403)
+        assert e.retryable is False
+
+    def test_not_retryable_status_404(self):
+        e = LLMAPIError("not found", status_code=404)
+        assert e.retryable is False
+
+    def test_not_retryable_status_422(self):
+        e = LLMAPIError("unprocessable", status_code=422)
+        assert e.retryable is False
+
+    def test_not_retryable_no_status(self):
+        e = LLMAPIError("generic error")
+        assert e.retryable is False
+
+    def test_retryable_override_true(self):
+        """explicit retryable=True overrides the auto-logic."""
+        e = LLMAPIError("bad req", status_code=400, retryable=True)
+        assert e.retryable is True
+
+    def test_retryable_override_false(self):
+        """explicit retryable=False overrides the auto-logic."""
+        e = LLMAPIError("rate limited", status_code=429, is_rate_limit=True, retryable=False)
+        assert e.retryable is False
+
+    def test_third_party_429_promoted(self):
+        """Generic APIError with status_code=429 is treated as rate-limit retryable."""
+        e = LLMAPIError("429 from third-party server", status_code=429, is_rate_limit=True)
+        assert e.retryable is True
+        assert e.is_rate_limit is True
+
+
+# -- SDK max_retries=0 checks ---------------------------------------------
+
+
+class TestSDKMaxRetries:
+    """Verify that provider clients pass max_retries=0 to their SDKs."""
+
+    @patch("openai.AsyncOpenAI")
+    def test_openai_client_max_retries_zero(self, mock_cls):
+        """OpenAIClient constructs AsyncOpenAI with max_retries=0."""
+        client = OpenAIClient(api_key="key")
+        client._get_client()
+        call_kwargs = mock_cls.call_args.kwargs
+        assert call_kwargs["max_retries"] == 0
+
+    @patch("openai.AsyncOpenAI")
+    def test_openai_client_with_base_url_max_retries_zero(self, mock_cls):
+        """OpenAIClient (base_url) also passes max_retries=0."""
+        client = OpenAIClient(api_key="key", base_url="http://localhost:11434/v1")
+        client._get_client()
+        call_kwargs = mock_cls.call_args.kwargs
+        assert call_kwargs["max_retries"] == 0
+
+    def test_anthropic_client_max_retries_zero(self):
+        """AnthropicClient constructs AsyncAnthropic with max_retries=0."""
+        import sys
+        from unittest.mock import MagicMock
+
+        mock_mod = MagicMock()
+        mock_mod.AsyncAnthropic = MagicMock()
+        sys.modules.setdefault("anthropic", mock_mod)
+
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        client = AnthropicClient(api_key="test-key")
+        client._get_client()
+
+        call_kwargs = mock_mod.AsyncAnthropic.call_args.kwargs
+        assert call_kwargs["max_retries"] == 0
+
+
+# -- Third-party 429 promoted to is_rate_limit ----------------------------
+
+
+class TestThirdParty429Promotion:
+    """Generic APIError with status_code=429 is promoted to is_rate_limit."""
+
+    @pytest.mark.asyncio
+    async def test_chat_completions_generic_429_promoted(self):
+        """A third-party OpenAI-compatible server returning 429 via generic APIError
+        is wrapped with is_rate_limit=True so the retry loop treats it as retryable."""
+        from openai import APIError
+
+        # Simulate a third-party server raising APIError (not RateLimitError) with 429
+        exc = APIError(
+            message="too many requests",
+            request=MagicMock(),
+            body=None,
+        )
+        exc.status_code = 429
+
+        mock_inner = MagicMock()
+        mock_inner.chat.completions.create = AsyncMock(side_effect=exc)
+
+        client = OpenAIClient(api_key="test", base_url="http://third-party:8080/v1")
+        client._client = mock_inner
+
+        with pytest.raises(LLMAPIError) as exc_info:
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="my-model",
+                temperature=0.0,
+                max_tokens=10,
+            )
+
+        assert exc_info.value.status_code == 429
+        assert exc_info.value.is_rate_limit is True
+        assert exc_info.value.retryable is True
+
 
 # -- LLMClient protocol check -------------------------------------------
 
@@ -71,7 +212,7 @@ class TestOpenAIClientResponses:
         client = OpenAIClient(api_key="key123")
         assert client._client is None
         inner = client._get_client()
-        mock_cls.assert_called_once_with(api_key="key123")
+        mock_cls.assert_called_once_with(api_key="key123", max_retries=0)
         assert inner is mock_cls.return_value
 
     @pytest.mark.asyncio
@@ -399,7 +540,9 @@ class TestOpenAIClientChatCompletions:
     def test_base_url_passed_to_sdk(self, mock_cls):
         client = OpenAIClient(api_key="key", base_url="http://localhost:11434/v1")
         client._get_client()
-        mock_cls.assert_called_once_with(api_key="key", base_url="http://localhost:11434/v1")
+        mock_cls.assert_called_once_with(
+            api_key="key", base_url="http://localhost:11434/v1", max_retries=0
+        )
 
     @pytest.mark.asyncio
     async def test_complete_uses_chat_completions(self):
