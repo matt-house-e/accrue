@@ -108,6 +108,13 @@ class AnthropicClient:
         # Structured outputs: Anthropic uses output_config.format (GA)
         # json_schema → constrained decoding; json_object → no equivalent, skip
         # IMPORTANT: output_config.format is incompatible with web search citations
+        if anthropic_tools and response_format and response_format.get("type") == "json_schema":
+            logger.warning(
+                "Anthropic grounding (web search tools) is incompatible with strict "
+                "structured outputs; structured output schema will not be enforced for "
+                "this request. Consider running a separate non-grounded LLMStep over "
+                "the grounded context, or disable grounding for this step."
+            )
         if not anthropic_tools and response_format and response_format.get("type") == "json_schema":
             inner = response_format.get("json_schema", {})
             schema = inner.get("schema", {})
@@ -183,6 +190,15 @@ class AnthropicClient:
             The Anthropic batch ID.
         """
         client = self._get_client()
+
+        # Validate custom_id uniqueness before touching the network
+        seen: set[str] = set()
+        for req in requests:
+            if not req.custom_id:
+                raise ValueError("BatchRequest.custom_id must be non-empty")
+            if req.custom_id in seen:
+                raise ValueError(f"Duplicate custom_id in batch: {req.custom_id!r}")
+            seen.add(req.custom_id)
 
         anthropic_requests = []
         for req in requests:
@@ -261,38 +277,47 @@ class AnthropicClient:
         client = self._get_client()
         start = time.monotonic()
 
-        while True:
-            try:
-                batch = await client.messages.batches.retrieve(batch_id)
-            except Exception as exc:
-                raise StepError(
-                    f"Anthropic batch status check failed for {batch_id}: {exc}",
-                    step_name="batch",
-                ) from exc
+        try:
+            while True:
+                try:
+                    batch = await client.messages.batches.retrieve(batch_id)
+                except Exception as exc:
+                    raise StepError(
+                        f"Anthropic batch status check failed for {batch_id}: {exc}",
+                        step_name="batch",
+                    ) from exc
 
-            status = batch.processing_status
-            elapsed = time.monotonic() - start
+                status = batch.processing_status
+                elapsed = time.monotonic() - start
 
-            if status == "ended":
-                logger.info("Anthropic batch %s ended (%.0fs elapsed)", batch_id, elapsed)
-                return await self._collect_batch_results(client, batch_id)
+                if status == "ended":
+                    logger.info("Anthropic batch %s ended (%.0fs elapsed)", batch_id, elapsed)
+                    return await self._collect_batch_results(client, batch_id)
 
-            if elapsed > timeout:
-                raise StepError(
-                    f"Anthropic batch {batch_id} timed out after {elapsed:.0f}s "
-                    f"(status={status}). Check the Anthropic dashboard with "
-                    f"batch ID {batch_id}.",
-                    step_name="batch",
+                if elapsed > timeout:
+                    raise StepError(
+                        f"Anthropic batch {batch_id} timed out after {elapsed:.0f}s "
+                        f"(status={status}). Check the Anthropic dashboard with "
+                        f"batch ID {batch_id}.",
+                        step_name="batch",
+                    )
+
+                logger.info(
+                    "Anthropic batch %s status=%s (%.0fs elapsed), next check in %.0fs",
+                    batch_id,
+                    status,
+                    elapsed,
+                    poll_interval,
                 )
-
-            logger.info(
-                "Anthropic batch %s status=%s (%.0fs elapsed), next check in %.0fs",
-                batch_id,
-                status,
-                elapsed,
-                poll_interval,
-            )
-            await asyncio.sleep(poll_interval)
+                await asyncio.sleep(poll_interval)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # User cancelled — best-effort cancel the upstream batch to avoid
+            # orphaning a billable job.
+            try:
+                await self.cancel_batch(batch_id)
+            except Exception:
+                pass  # cancel_batch is best-effort; don't mask the original interruption
+            raise
 
     async def cancel_batch(self, batch_id: str) -> None:
         """Best-effort cancel an Anthropic batch.
