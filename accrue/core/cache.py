@@ -185,6 +185,34 @@ def compute_cache_key(**components: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _step_schema_hash(step: Any) -> str:
+    """Return a memoised SHA-256 hash of the LLMStep's response JSON schema.
+
+    The hash is cached on ``step._cached_schema_hash`` so it is computed at
+    most once per step instance regardless of how many rows are processed.
+    If the step has no ``_field_specs`` (e.g. list-fields form), returns an
+    empty string so the cache key remains stable for those steps.
+    """
+    cached = getattr(step, "_cached_schema_hash", None)
+    if cached is not None:
+        return cached
+
+    field_specs = getattr(step, "_field_specs", None)
+    if not field_specs:
+        step._cached_schema_hash = ""
+        return ""
+
+    # Late import to avoid circular dependency: cache.py ← steps/schema_builder.py
+    from accrue.steps.schema_builder import build_json_schema  # noqa: PLC0415
+
+    schema_dict = build_json_schema(field_specs)
+    digest = hashlib.sha256(
+        json.dumps(schema_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    step._cached_schema_hash = digest
+    return digest
+
+
 def _compute_step_cache_key(
     step: Any,
     row: dict[str, Any],
@@ -206,6 +234,11 @@ def _compute_step_cache_key(
             grounding_hash = hashlib.sha256(
                 grounding_cfg.model_dump_json().encode("utf-8")
             ).hexdigest()
+        # provider_kwargs: canonical JSON hash (empty dict and None are equivalent)
+        pk = getattr(step, "provider_kwargs", None) or {}
+        provider_kwargs_hash = hashlib.sha256(
+            json.dumps(pk, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()
         return compute_cache_key(
             step_name=step.name,
             row=row,
@@ -213,11 +246,14 @@ def _compute_step_cache_key(
             field_specs=step_fields,
             model=step.model,
             temperature=getattr(step, "temperature", None),
+            max_tokens=getattr(step, "max_tokens", None),
             system_prompt_hash=hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
             system_prompt_header_hash=hashlib.sha256(
                 system_prompt_header.encode("utf-8")
             ).hexdigest(),
             grounding_hash=grounding_hash,
+            schema_hash=_step_schema_hash(step),
+            provider_kwargs_hash=provider_kwargs_hash,
         )
     else:
         # FunctionStep path
