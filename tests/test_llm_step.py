@@ -481,6 +481,82 @@ class TestDefaultEnforcement:
         result = await step.run(_make_ctx())
         assert result.values["f1"] is None
 
+    @pytest.mark.asyncio
+    async def test_enum_member_refusal_pattern_kept(self):
+        """A refusal-pattern value that is a declared enum member is NOT replaced."""
+        # Arrange
+        resp = _mock_llm_response(json.dumps({"status": "unknown"}))
+        mock_client = _make_mock_client(resp)
+        step = LLMStep(
+            name="llm",
+            fields={
+                "status": {"prompt": "classify", "enum": ["known", "unknown"], "default": "REVIEW"},
+            },
+            client=mock_client,
+        )
+        # Act
+        result = await step.run(_make_ctx())
+        # Assert — "unknown" is a valid enum value; default must NOT be applied
+        assert result.values["status"] == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_enum_non_member_refusal_pattern_replaced(self):
+        """A refusal-pattern value NOT in the enum still falls back to default."""
+        # Arrange
+        resp = _mock_llm_response(json.dumps({"status": "n/a"}))
+        mock_client = _make_mock_client(resp)
+        step = LLMStep(
+            name="llm",
+            fields={
+                "status": {"prompt": "classify", "enum": ["known", "unknown"], "default": "REVIEW"},
+            },
+            client=mock_client,
+        )
+        # Act
+        result = await step.run(_make_ctx())
+        # Assert — "n/a" is not in the enum, so the default applies
+        assert result.values["status"] == "REVIEW"
+
+    @pytest.mark.asyncio
+    async def test_enum_member_match_is_case_insensitive(self):
+        """Enum membership check is case-insensitive: "unknown" matches "Unknown"."""
+        # Arrange — enum uses title-case, model returns lowercase
+        resp = _mock_llm_response(json.dumps({"status": "unknown"}))
+        mock_client = _make_mock_client(resp)
+        step = LLMStep(
+            name="llm",
+            fields={
+                "status": {
+                    "prompt": "classify",
+                    "enum": ["Known", "Unknown"],
+                    "default": "REVIEW",
+                },
+            },
+            client=mock_client,
+        )
+        # Act
+        result = await step.run(_make_ctx())
+        # Assert — case-insensitive match keeps the model output unchanged
+        assert result.values["status"] == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_no_enum_refusal_still_replaced(self):
+        """Regression: field with no enum + refusal output keeps the original behaviour."""
+        # Arrange
+        resp = _mock_llm_response(json.dumps({"score": "unknown"}))
+        mock_client = _make_mock_client(resp)
+        step = LLMStep(
+            name="llm",
+            fields={
+                "score": {"prompt": "rate 1-10", "default": "N/A"},
+            },
+            client=mock_client,
+        )
+        # Act
+        result = await step.run(_make_ctx())
+        # Assert — no enum defined, so the default is applied as before
+        assert result.values["score"] == "N/A"
+
 
 # -- retries on validation/parse error -----------------------------------
 
