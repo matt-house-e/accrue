@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -320,3 +321,50 @@ class TestCancelBatch:
 
         # Should not raise
         await adapter.cancel_batch("batch-abc")
+
+
+# -- custom_id uniqueness ----------------------------------------------------
+
+
+class TestSubmitBatchCustomIdValidation:
+    @pytest.mark.asyncio
+    async def test_duplicate_custom_id_raises(self):
+        adapter = OpenAIClient(api_key="test")
+        adapter._client = MagicMock()
+
+        req_a = _make_batch_request(0)
+        req_b = _make_batch_request(0)  # same index → same custom_id "row-0"
+
+        with pytest.raises(ValueError, match="Duplicate custom_id"):
+            await adapter.submit_batch([req_a, req_b])
+
+    @pytest.mark.asyncio
+    async def test_empty_custom_id_raises(self):
+        adapter = OpenAIClient(api_key="test")
+        adapter._client = MagicMock()
+
+        req = _make_batch_request(0)
+        req.custom_id = ""
+
+        with pytest.raises(ValueError, match="custom_id must be non-empty"):
+            await adapter.submit_batch([req])
+
+
+# -- CancelledError cleanup --------------------------------------------------
+
+
+class TestPollBatchCancelledError:
+    @pytest.mark.asyncio
+    async def test_cancelled_error_triggers_cancel_batch(self):
+        """CancelledError during polling must call cancel_batch before re-raising."""
+        mock_client = MagicMock()
+        mock_client.batches.retrieve = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_client.batches.cancel = AsyncMock()
+
+        adapter = OpenAIClient(api_key="test")
+        adapter._client = mock_client
+
+        with pytest.raises(asyncio.CancelledError):
+            await adapter.poll_batch("batch-abc", poll_interval=0.01)
+
+        mock_client.batches.cancel.assert_called_once_with("batch-abc")

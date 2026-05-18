@@ -273,3 +273,90 @@ class TestAnthropicCancelBatch:
 
         # Should not raise
         await client.cancel_batch("msgbatch_abc")
+
+
+# -- custom_id uniqueness ----------------------------------------------------
+
+
+class TestAnthropicSubmitBatchCustomIdValidation:
+    @pytest.mark.asyncio
+    async def test_duplicate_custom_id_raises(self):
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        client = AnthropicClient(api_key="test")
+        client._client = MagicMock()
+
+        req_a = _make_batch_request(0)
+        req_b = _make_batch_request(0)  # same index → same custom_id "row-0"
+
+        with pytest.raises(ValueError, match="Duplicate custom_id"):
+            await client.submit_batch([req_a, req_b])
+
+
+# -- CancelledError cleanup --------------------------------------------------
+
+
+class TestAnthropicPollBatchCancelledError:
+    @pytest.mark.asyncio
+    async def test_cancelled_error_triggers_cancel_batch(self):
+        """CancelledError during polling must call cancel_batch before re-raising."""
+        import asyncio
+
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        mock_inner = MagicMock()
+        mock_inner.messages.batches.retrieve = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_inner.messages.batches.cancel = AsyncMock()
+
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+
+        with pytest.raises((asyncio.CancelledError, BaseException)):
+            await client.poll_batch("msgbatch_abc", poll_interval=0.01)
+
+        mock_inner.messages.batches.cancel.assert_called_once_with("msgbatch_abc")
+
+
+# -- grounding + json_schema warning -----------------------------------------
+
+
+class TestAnthropicGroundingSchemaWarning:
+    @pytest.mark.asyncio
+    async def test_grounding_plus_json_schema_logs_warning(self, caplog):
+        """When both grounding tools and json_schema are set, a WARNING is emitted."""
+        import logging
+
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        mock_inner = MagicMock()
+
+        # Build a minimal successful response object
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text='{"result": "ok"}')],
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+        )
+        mock_inner.messages.create = AsyncMock(return_value=mock_response)
+
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+
+        tools = [{"type": "web_search"}]
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"schema": {"type": "object"}, "name": "result"},
+        }
+
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            await client.complete(
+                messages=[{"role": "user", "content": "search for something"}],
+                model="claude-sonnet-4-20250514",
+                temperature=0.2,
+                max_tokens=1000,
+                response_format=response_format,
+                tools=tools,
+            )
+
+        warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("grounding" in msg and "structured output" in msg for msg in warning_messages), (
+            f"Expected grounding+schema warning, got: {warning_messages}"
+        )
