@@ -634,15 +634,15 @@ class LLMStep:
                 )
 
             except LLMAPIError as exc:
+                if not exc.retryable:
+                    raise
                 last_api_error = exc
                 if api_attempt < api_max_retries:
-                    # Exponential backoff with jitter
-                    delay = retry_base_delay * (2**api_attempt)
-                    # Respect Retry-After header if available
+                    # Full random jitter: uniform(0, base * 2^attempt)
+                    delay = random.uniform(0, retry_base_delay * (2**api_attempt))
+                    # Respect Retry-After header: use it as a floor
                     if exc.retry_after is not None:
-                        delay = max(delay, exc.retry_after)
-                    # Add jitter (0-25% of delay)
-                    delay += random.uniform(0, delay * 0.25)
+                        delay = max(delay, float(exc.retry_after))
                     logger.warning(
                         "LLMStep '%s' API error (attempt %d/%d), retrying in %.1fs: %s",
                         self.name,

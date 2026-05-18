@@ -62,6 +62,9 @@ class OpenAIClient:
                 kwargs["base_url"] = self._base_url
             if self._http_client is not None:
                 kwargs["http_client"] = self._http_client
+            # max_retries=0: disable SDK-level retry so LLMStep's retry loop
+            # is the single source of truth and retries are not double-stacked.
+            kwargs["max_retries"] = 0
             self._client = AsyncOpenAI(**kwargs)
         return self._client
 
@@ -163,9 +166,12 @@ class OpenAIClient:
                 status_code=408,
             ) from exc
         except APIError as exc:
+            exc_status = getattr(exc, "status_code", None)
+            # Promote generic 429 to is_rate_limit (covers third-party OpenAI-compatible servers)
             raise LLMAPIError(
                 f"OpenAI API error for model '{model}': {exc}",
-                status_code=getattr(exc, "status_code", None),
+                status_code=exc_status,
+                is_rate_limit=(exc_status == 429),
             ) from exc
 
         # Extract content
@@ -236,9 +242,12 @@ class OpenAIClient:
                 status_code=408,
             ) from exc
         except APIError as exc:
+            exc_status = getattr(exc, "status_code", None)
+            # Promote generic 429 to is_rate_limit (covers third-party OpenAI-compatible servers)
             raise LLMAPIError(
                 f"OpenAI API error for model '{model}': {exc}",
-                status_code=getattr(exc, "status_code", None),
+                status_code=exc_status,
+                is_rate_limit=(exc_status == 429),
             ) from exc
 
         content = response.choices[0].message.content or ""

@@ -92,11 +92,34 @@ class LLMAPIError(Exception):
         status_code: int | None = None,
         retry_after: float | None = None,
         is_rate_limit: bool = False,
+        retryable: bool | None = None,
     ):
         super().__init__(message)
         self.status_code = status_code
         self.retry_after = retry_after
         self.is_rate_limit = is_rate_limit
+        self._retryable_override = retryable
+
+    @property
+    def retryable(self) -> bool:
+        """True when the error is safe to retry.
+
+        Retryable: rate-limit (429), timeout (408), and any 5xx server error.
+        Non-retryable: 400 (bad request / context_length_exceeded), 401 (auth),
+        403 (permission denied), 404 (not found), 422 (unprocessable), etc.
+        An explicit ``retryable=True/False`` passed to the constructor overrides
+        the automatic logic.
+        """
+        if self._retryable_override is not None:
+            return self._retryable_override
+        if self.is_rate_limit:
+            return True
+        if self.status_code is not None:
+            if self.status_code in {408, 429}:
+                return True
+            if self.status_code >= 500:
+                return True
+        return False
 
 
 # ---------------------------------------------------------------------------
