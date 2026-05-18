@@ -36,46 +36,59 @@ class CacheManager:
         self._cache_dir = Path(cache_dir)
         self._ttl = ttl
         self._conn: sqlite3.Connection | None = None
-        self._write_lock = threading.Lock()
+        # RLock so write-protected methods can call _ensure_connection (which
+        # itself acquires the lock for the one-time setup) without deadlocking.
+        self._write_lock = threading.RLock()
 
     def _ensure_connection(self) -> sqlite3.Connection:
         if self._conn is not None:
             return self._conn
 
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
-        db_path = self._cache_dir / "cache.db"
+        with self._write_lock:
+            # Double-checked locking: another thread may have completed setup
+            # while we were waiting on the lock.
+            if self._conn is not None:
+                return self._conn
 
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.execute("PRAGMA cache_size=-8000")  # 8 MB
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+            db_path = self._cache_dir / "cache.db"
 
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS cache (
-                key        TEXT PRIMARY KEY,
-                step_name  TEXT NOT NULL,
-                value      TEXT NOT NULL,
-                created_at REAL NOT NULL,
-                expires_at REAL
-            )
-        """)
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_step ON cache(step_name)")
-        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_expires ON cache(expires_at)")
+            conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA cache_size=-8000")  # 8 MB
 
-        # Meta table for tracking lazy cleanup
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS cache_meta (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-        """)
-        self._conn.commit()
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS cache (
+                    key        TEXT PRIMARY KEY,
+                    step_name  TEXT NOT NULL,
+                    value      TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_step ON cache(step_name)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_expires ON cache(expires_at)")
 
-        # Lazy TTL cleanup: run once per process, gated by a meta marker
-        self._maybe_cleanup_on_init()
+            # Meta table for tracking lazy cleanup
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS cache_meta (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """)
+            conn.commit()
 
-        return self._conn
+            # Publish the fully-initialized connection only after DDL + commit
+            # so other threads never observe a half-constructed schema.
+            self._conn = conn
+
+            # Lazy TTL cleanup: run once per process, gated by a meta marker.
+            # Safe to call here because _write_lock is reentrant.
+            self._maybe_cleanup_on_init()
+
+            return self._conn
 
     def _maybe_cleanup_on_init(self) -> None:
         """Run cleanup_expired() once per process if it hasn't run recently."""
