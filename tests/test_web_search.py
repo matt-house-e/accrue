@@ -24,6 +24,7 @@ from accrue.utils.web_search import web_search
 def _set_openai_key(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key-for-mocking")
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
