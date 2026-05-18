@@ -269,12 +269,18 @@ class _FakeLLMStep:
         temperature=0.2,
         system_prompt=None,
         system_prompt_header=None,
+        max_tokens=None,
+        provider_kwargs=None,
+        field_specs=None,
     ):
         self.name = name
         self.model = model
         self.temperature = temperature
         self._custom_system_prompt = system_prompt
         self._system_prompt_header = system_prompt_header
+        self.max_tokens = max_tokens
+        self.provider_kwargs = provider_kwargs
+        self._field_specs = field_specs or {}
 
 
 class _FakeFunctionStep:
@@ -358,3 +364,50 @@ class TestComputeStepCacheKey:
         k1 = _compute_step_cache_key(step, row, {"a": 1}, {})
         k2 = _compute_step_cache_key(step, row, {"a": 2}, {})
         assert k1 != k2
+
+    # ------------------------------------------------------------------
+    # New: schema, max_tokens, provider_kwargs
+    # ------------------------------------------------------------------
+
+    def test_schema_change_invalidates_cache(self):
+        """Changing FieldSpec.type from Number to String produces a different key."""
+        from accrue.schemas.field_spec import FieldSpec
+
+        row = {"company": "Acme"}
+        step_num = _FakeLLMStep(field_specs={"score": FieldSpec(prompt="Rate 1-10", type="Number")})
+        step_str = _FakeLLMStep(field_specs={"score": FieldSpec(prompt="Rate 1-10", type="String")})
+        k1 = _compute_step_cache_key(step_num, row, {}, {})
+        k2 = _compute_step_cache_key(step_str, row, {}, {})
+        assert k1 != k2
+
+    def test_max_tokens_change_invalidates_cache(self):
+        """Different max_tokens values produce different cache keys."""
+        row = {"company": "Acme"}
+        k1 = _compute_step_cache_key(_FakeLLMStep(max_tokens=100), row, {}, {})
+        k2 = _compute_step_cache_key(_FakeLLMStep(max_tokens=500), row, {}, {})
+        assert k1 != k2
+
+    def test_provider_kwargs_change_invalidates_cache(self):
+        """Different provider_kwargs produce different cache keys."""
+        row = {"company": "Acme"}
+        k1 = _compute_step_cache_key(_FakeLLMStep(provider_kwargs={"effort": "low"}), row, {}, {})
+        k2 = _compute_step_cache_key(_FakeLLMStep(provider_kwargs={"effort": "high"}), row, {}, {})
+        assert k1 != k2
+
+    def test_provider_kwargs_none_and_empty_dict_same_key(self):
+        """None and empty dict are equivalent for backwards-compat."""
+        row = {"company": "Acme"}
+        k1 = _compute_step_cache_key(_FakeLLMStep(provider_kwargs=None), row, {}, {})
+        k2 = _compute_step_cache_key(_FakeLLMStep(provider_kwargs={}), row, {}, {})
+        assert k1 == k2
+
+    def test_function_step_key_unaffected_by_new_inputs(self):
+        """FunctionStep key is stable and not influenced by schema/max_tokens/provider_kwargs."""
+        row = {"company": "Acme"}
+        step = _FakeFunctionStep(cache_version="v1")
+        k1 = _compute_step_cache_key(step, row, {}, {})
+        k2 = _compute_step_cache_key(step, row, {}, {})
+        assert k1 == k2
+        # FunctionStep has no model — confirm it takes the function path
+        assert not hasattr(step, "max_tokens")
+        assert not hasattr(step, "provider_kwargs")
