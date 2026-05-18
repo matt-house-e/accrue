@@ -638,7 +638,14 @@ class Pipeline:
                     )
                     for step_name in steps_to_run
                 ]
-                step_results_list = await asyncio.gather(*level_coros)
+                gathered = await asyncio.gather(*level_coros, return_exceptions=True)
+
+                # Surface the first exception (after siblings have been awaited)
+                first_exc = next((r for r in gathered if isinstance(r, BaseException)), None)
+                if first_exc is not None:
+                    raise first_exc
+
+                step_results_list = gathered
 
                 for step_name, (step_errors, usage, elapsed_s) in zip(
                     steps_to_run, step_results_list
@@ -818,65 +825,79 @@ class Pipeline:
 
             tasks = [asyncio.create_task(tracked_row(i)) for i in range(num_rows)]
             completed_count = 0
-            for coro in asyncio.as_completed(tasks):
-                idx, result_or_none, exc = await coro
+            try:
+                for coro in asyncio.as_completed(tasks):
+                    idx, result_or_none, exc = await coro
 
-                if exc is not None:
-                    row_error = RowError(
-                        row_index=idx,
-                        step_name=step.name,
-                        error=exc,
-                    )
-                    errors.append(row_error)
-                    results[idx] = {f: None for f in step.fields}
-                    logger.warning(
-                        "Row %d failed in step '%s': %s",
-                        idx,
-                        step.name,
-                        exc,
-                    )
-
-                    # Fire on_row_complete for error
-                    await _fire_hook(
-                        hooks.on_row_complete,
-                        RowCompleteEvent(
-                            step_name=step.name,
+                    if exc is not None:
+                        row_error = RowError(
                             row_index=idx,
-                            values={f: None for f in step.fields},
+                            step_name=step.name,
                             error=exc,
-                            from_cache=False,
-                            skipped=row_was_skipped[idx],
-                        ),
-                    )
+                        )
+                        errors.append(row_error)
+                        results[idx] = {f: None for f in step.fields}
+                        logger.warning(
+                            "Row %d failed in step '%s': %s",
+                            idx,
+                            step.name,
+                            exc,
+                        )
 
-                    if on_error == "raise":
-                        step_values[step.name] = results
-                        # Cancel remaining tasks
-                        for t in tasks:
-                            t.cancel()
-                        raise exc
-                else:
-                    results[idx] = result_or_none.values
-                    if result_or_none.usage:
-                        usage_list.append(result_or_none.usage)
+                        # Fire on_row_complete for error
+                        await _fire_hook(
+                            hooks.on_row_complete,
+                            RowCompleteEvent(
+                                step_name=step.name,
+                                row_index=idx,
+                                values={f: None for f in step.fields},
+                                error=exc,
+                                from_cache=False,
+                                skipped=row_was_skipped[idx],
+                            ),
+                        )
 
-                    # Fire on_row_complete for success
-                    await _fire_hook(
-                        hooks.on_row_complete,
-                        RowCompleteEvent(
-                            step_name=step.name,
-                            row_index=idx,
-                            values=result_or_none.values,
-                            error=None,
-                            from_cache=row_from_cache[idx],
-                            skipped=row_was_skipped[idx],
-                        ),
-                    )
+                        if on_error == "raise":
+                            step_values[step.name] = results
+                            # Cancel and drain remaining tasks before raising
+                            for t in tasks:
+                                if not t.done():
+                                    t.cancel()
+                            await asyncio.gather(*tasks, return_exceptions=True)
+                            raise exc
+                    else:
+                        results[idx] = result_or_none.values
+                        if result_or_none.usage:
+                            usage_list.append(result_or_none.usage)
 
-                completed_count += 1
-                row_bar.update(1)
-                if completed_count % checkpoint_interval == 0:
+                        # Fire on_row_complete for success
+                        await _fire_hook(
+                            hooks.on_row_complete,
+                            RowCompleteEvent(
+                                step_name=step.name,
+                                row_index=idx,
+                                values=result_or_none.values,
+                                error=None,
+                                from_cache=row_from_cache[idx],
+                                skipped=row_was_skipped[idx],
+                            ),
+                        )
+
+                    completed_count += 1
+                    row_bar.update(1)
+                    if completed_count % checkpoint_interval == 0:
+                        on_partial_checkpoint(step.name, results, completed_count)
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                # Drain all in-flight tasks so they don't race teardown
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                # Persist whatever was accumulated so resume works
+                step_values[step.name] = results
+                if on_partial_checkpoint is not None and completed_count > 0:
                     on_partial_checkpoint(step.name, results, completed_count)
+                raise
         else:
 
             async def _tracked_row(idx: int):
@@ -920,8 +941,11 @@ class Pipeline:
 
                     if on_error == "raise":
                         step_values[step.name] = results
+                        # Cancel and drain remaining tasks before raising
                         for t in tasks:
-                            t.cancel()
+                            if not t.done():
+                                t.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
                         raise exc
                 else:
                     results[idx] = result_or_none.values

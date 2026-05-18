@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pandas as pd
 import pytest
 
@@ -164,3 +166,107 @@ class TestEnricherWithErrors:
         assert result.at[0, "f"] == "f_value_0"
         assert pd.isna(result.at[1, "f"])  # failed row
         assert result.at[2, "f"] == "f_value_2"
+
+
+# -- Cancellation / drain correctness ----------------------------------------
+
+
+class TestCancellationFlushesPartialState:
+    @pytest.mark.asyncio
+    async def test_cancellation_flushes_step_values_and_calls_checkpoint(self):
+        """CancelledError mid-step persists accumulated results and invokes on_partial_checkpoint.
+
+        Strategy: rows sleep for increasing durations so cancellation lands when
+        some are done and others are still in-flight, guaranteeing completed_count > 0.
+        """
+        partial_calls: list[tuple[str, int]] = []
+
+        def on_partial(step_name: str, results: list, count: int) -> None:
+            partial_calls.append((step_name, count))
+
+        # Rows sleep idx * 0.05s — row 0 is instant, row 9 sleeps 0.45s.
+        # With max_workers=10 all start at once; rows 0-2 complete by ~0.10s.
+        async def staggered_fn(ctx):
+            idx = ctx.row.get("__idx", 0)
+            await asyncio.sleep(idx * 0.05)
+            return {"f": idx}
+
+        step = FunctionStep("slow", fn=staggered_fn, fields=["f"])
+        p = Pipeline([step])
+        rows = [{"__idx": i} for i in range(10)]
+        # checkpoint_interval=2: callback fires after rows 2, 4, … complete
+        config = EnrichmentConfig(checkpoint_interval=2, max_workers=10)
+
+        async def run():
+            return await p.execute(
+                rows,
+                all_fields={},
+                config=config,
+                on_partial_checkpoint=on_partial,
+            )
+
+        task = asyncio.create_task(run())
+        # Rows 0-2 complete in ~0.0–0.10s; cancel after they're done but before 9 finishes
+        await asyncio.sleep(0.12)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # At least one checkpoint call happened (rows 0-2 done → completed_count hit 2)
+        assert len(partial_calls) >= 1, "on_partial_checkpoint was never called after cancellation"
+        assert all(name == "slow" for name, _ in partial_calls)
+
+
+class TestLevelGatherSiblingsAwaited:
+    @pytest.mark.asyncio
+    async def test_on_error_raise_does_not_leave_orphaned_tasks(self):
+        """Parallel steps at the same level: one fails, siblings are awaited not dropped."""
+        finished_b: list[bool] = []
+
+        async def fast_fail(ctx):
+            raise StepError("deliberate", step_name="step_a")
+
+        async def slow_b(ctx):
+            await asyncio.sleep(0.05)
+            finished_b.append(True)
+            return {"b": 1}
+
+        p = Pipeline(
+            [
+                FunctionStep("step_a", fn=fast_fail, fields=["a"]),
+                FunctionStep("step_b", fn=slow_b, fields=["b"]),
+            ]
+        )
+        rows = [{"x": 1}]
+        config = EnrichmentConfig(on_error="raise", max_workers=2)
+
+        with pytest.raises(StepError, match="deliberate"):
+            await p.execute(rows, all_fields={}, config=config)
+
+        # After the raise, all tasks created inside _execute_step must be done
+        remaining = [t for t in asyncio.all_tasks() if not t.done()]
+        step_tasks = [t for t in remaining if "tracked_row" in repr(t) or "process_row" in repr(t)]
+        assert step_tasks == [], f"Orphaned step tasks found: {step_tasks}"
+
+
+class TestOnErrorContinueRegression:
+    @pytest.mark.asyncio
+    async def test_continue_mode_collects_errors_and_succeeds(self):
+        """on_error='continue' keeps going; success_rate reflects failures."""
+        p = Pipeline([_failing_step("s", ["f"], fail_indices={1, 3})])
+        rows = [{"__idx": i} for i in range(5)]
+        config = EnrichmentConfig(on_error="continue")
+
+        results, errors, cost = await p.execute(rows, all_fields={}, config=config)
+
+        assert len(errors) == 2
+        failed = {e.row_index for e in errors}
+        assert failed == {1, 3}
+        # Successful rows still have values
+        assert results[0]["f"] == "f_value_0"
+        assert results[2]["f"] == "f_value_2"
+        assert results[4]["f"] == "f_value_4"
+        # Failed rows get None sentinel
+        assert results[1]["f"] is None
+        assert results[3]["f"] is None
