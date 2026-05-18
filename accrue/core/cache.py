@@ -9,9 +9,14 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# How often to re-run TTL cleanup on init (seconds).
+_CLEANUP_INTERVAL = 86400  # 1 day
 
 
 class CacheManager:
@@ -31,6 +36,7 @@ class CacheManager:
         self._cache_dir = Path(cache_dir)
         self._ttl = ttl
         self._conn: sqlite3.Connection | None = None
+        self._write_lock = threading.Lock()
 
     def _ensure_connection(self) -> sqlite3.Connection:
         if self._conn is not None:
@@ -39,8 +45,9 @@ class CacheManager:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         db_path = self._cache_dir / "cache.db"
 
-        self._conn = sqlite3.connect(str(db_path))
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA cache_size=-8000")  # 8 MB
 
@@ -55,8 +62,47 @@ class CacheManager:
         """)
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_step ON cache(step_name)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_expires ON cache(expires_at)")
+
+        # Meta table for tracking lazy cleanup
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS cache_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
         self._conn.commit()
+
+        # Lazy TTL cleanup: run once per process, gated by a meta marker
+        self._maybe_cleanup_on_init()
+
         return self._conn
+
+    def _maybe_cleanup_on_init(self) -> None:
+        """Run cleanup_expired() once per process if it hasn't run recently."""
+        assert self._conn is not None
+        row = self._conn.execute(
+            "SELECT value FROM cache_meta WHERE key = 'last_cleanup'"
+        ).fetchone()
+
+        should_clean = True
+        if row is not None:
+            try:
+                last_ts = datetime.fromisoformat(row[0])
+                age = (datetime.now(timezone.utc) - last_ts).total_seconds()
+                if age < _CLEANUP_INTERVAL:
+                    should_clean = False
+            except ValueError:
+                pass  # Malformed timestamp — clean anyway
+
+        if should_clean:
+            self.cleanup_expired()
+            now_iso = datetime.now(timezone.utc).isoformat()
+            with self._write_lock:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO cache_meta (key, value) VALUES ('last_cleanup', ?)",
+                    (now_iso,),
+                )
+                self._conn.commit()
 
     def get(self, key: str) -> dict | None:
         """Look up a cached value by key. Returns None on miss or expiry."""
@@ -68,8 +114,9 @@ class CacheManager:
 
         value_json, expires_at = row
         if expires_at is not None and time.time() > expires_at:
-            conn.execute("DELETE FROM cache WHERE key = ?", (key,))
-            conn.commit()
+            with self._write_lock:
+                conn.execute("DELETE FROM cache WHERE key = ?", (key,))
+                conn.commit()
             return None
 
         return json.loads(value_json)
@@ -80,35 +127,39 @@ class CacheManager:
         now = time.time()
         expires_at = (now + self._ttl) if self._ttl > 0 else None
 
-        conn.execute(
-            "INSERT OR REPLACE INTO cache (key, step_name, value, created_at, expires_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (key, step_name, json.dumps(value, default=str), now, expires_at),
-        )
-        conn.commit()
+        with self._write_lock:
+            conn.execute(
+                "INSERT OR REPLACE INTO cache (key, step_name, value, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (key, step_name, json.dumps(value, default=str), now, expires_at),
+            )
+            conn.commit()
 
     def delete_step(self, step_name: str) -> int:
         """Delete all cache entries for a step. Returns count deleted."""
         conn = self._ensure_connection()
-        cursor = conn.execute("DELETE FROM cache WHERE step_name = ?", (step_name,))
-        conn.commit()
+        with self._write_lock:
+            cursor = conn.execute("DELETE FROM cache WHERE step_name = ?", (step_name,))
+            conn.commit()
         return cursor.rowcount
 
     def delete_all(self) -> int:
         """Delete all cache entries. Returns count deleted."""
         conn = self._ensure_connection()
-        cursor = conn.execute("DELETE FROM cache")
-        conn.commit()
+        with self._write_lock:
+            cursor = conn.execute("DELETE FROM cache")
+            conn.commit()
         return cursor.rowcount
 
     def cleanup_expired(self) -> int:
         """Remove all expired entries. Returns count deleted."""
         conn = self._ensure_connection()
-        cursor = conn.execute(
-            "DELETE FROM cache WHERE expires_at IS NOT NULL AND expires_at < ?",
-            (time.time(),),
-        )
-        conn.commit()
+        with self._write_lock:
+            cursor = conn.execute(
+                "DELETE FROM cache WHERE expires_at IS NOT NULL AND expires_at < ?",
+                (time.time(),),
+            )
+            conn.commit()
         return cursor.rowcount
 
     def close(self) -> None:

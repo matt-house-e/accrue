@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import sqlite3
+import threading
+import time
 from unittest.mock import patch
 
 from accrue.core.cache import (
@@ -117,6 +121,98 @@ class TestCacheManager:
         mgr.set("k1", "step_a", {"v": 1})
         mgr.close()
         mgr.close()  # Should not raise
+
+    # ------------------------------------------------------------------
+    # Concurrency / thread-safety tests
+    # ------------------------------------------------------------------
+
+    def test_concurrent_set_from_two_threads(self, tmp_path):
+        """Two threads sharing a CacheManager can both call .set() safely."""
+        mgr = CacheManager(cache_dir=str(tmp_path), ttl=3600)
+        errors: list[Exception] = []
+
+        def worker(key: str) -> None:
+            try:
+                mgr.set(key, "step_a", {"key": key})
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futs = [pool.submit(worker, f"key_{i}") for i in range(2)]
+            concurrent.futures.wait(futs)
+
+        assert errors == [], f"Unexpected errors: {errors}"
+        assert mgr.get("key_0") == {"key": "key_0"}
+        assert mgr.get("key_1") == {"key": "key_1"}
+        mgr.close()
+
+    def test_cross_thread_get_no_programming_error(self, tmp_path):
+        """Connection opened in thread A, .get() from thread B — no ProgrammingError."""
+        mgr = CacheManager(cache_dir=str(tmp_path), ttl=3600)
+        # Force connection open on the main thread
+        mgr.set("tk", "step_a", {"v": 99})
+
+        result: list = []
+        errors: list[Exception] = []
+
+        def reader() -> None:
+            try:
+                result.append(mgr.get("tk"))
+            except sqlite3.ProgrammingError as exc:
+                errors.append(exc)
+
+        t = threading.Thread(target=reader)
+        t.start()
+        t.join()
+
+        assert errors == [], f"ProgrammingError raised: {errors}"
+        assert result == [{"v": 99}]
+        mgr.close()
+
+    def test_busy_timeout_pragma_is_set(self, tmp_path):
+        """PRAGMA busy_timeout is 5000 ms."""
+        mgr = CacheManager(cache_dir=str(tmp_path), ttl=3600)
+        conn = mgr._ensure_connection()
+        value = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert value == 5000
+        mgr.close()
+
+    def test_ttl_cleanup_on_init_removes_expired_rows(self, tmp_path):
+        """Expired rows inserted directly are removed when a fresh CacheManager is opened."""
+        # Seed a db with an already-expired row via a raw connection
+        db_path = tmp_path / "cache.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cache (
+                key        TEXT PRIMARY KEY,
+                step_name  TEXT NOT NULL,
+                value      TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                expires_at REAL
+            )
+        """)
+        # expires_at in the past
+        conn.execute(
+            "INSERT INTO cache (key, step_name, value, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("expired_key", "step_x", '{"v":1}', time.time() - 7200, time.time() - 3600),
+        )
+        conn.commit()
+        conn.close()
+
+        # Fresh CacheManager should trigger cleanup on first connection
+        mgr = CacheManager(cache_dir=str(tmp_path), ttl=3600)
+        # Trigger _ensure_connection via a benign .get()
+        mgr.get("unrelated_key")
+
+        # Verify expired row is gone via direct DB read
+        raw = sqlite3.connect(str(db_path))
+        row = raw.execute("SELECT key FROM cache WHERE key = 'expired_key'").fetchone()
+        raw.close()
+
+        assert row is None, "Expired row should have been cleaned up on init"
+        mgr.close()
 
 
 # ---------------------------------------------------------------------------
