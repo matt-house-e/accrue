@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import pandas as pd
 import pytest
 
 from accrue.core.exceptions import PipelineError
-from accrue.pipeline.pipeline import Pipeline
+from accrue.pipeline.pipeline import Pipeline, _merge_results_into_df
 from accrue.steps.base import StepContext, StepResult
 from accrue.steps.function import FunctionStep
 
@@ -325,3 +326,62 @@ class TestPipelineHelpers:
         p = Pipeline([FunctionStep("a", fn=lambda ctx: {}, fields=["f1"])])
         with pytest.raises(KeyError):
             p.get_step("missing")
+
+
+# -- _merge_results_into_df helper -------------------------------------------
+
+
+class TestMergeResultsIntoDf:
+    def test_untouched_columns_preserve_dtype(self):
+        """Columns not in accumulated results keep their original dtype."""
+        df = pd.DataFrame({"id": [1, 2, 3], "name": ["a", "b", "c"]})
+        accumulated = [{"score": 0.1}, {"score": 0.2}, {"score": 0.3}]
+        df_out = _merge_results_into_df(df, accumulated, overwrite_fields=True)
+        assert df_out["id"].dtype == df["id"].dtype
+        assert df_out["name"].dtype == df["name"].dtype
+
+    def test_new_columns_aligned_to_original_index(self):
+        """Result columns align to the original non-default index."""
+        df = pd.DataFrame({"val": ["x", "y", "z"]}, index=[10, 20, 30])
+        accumulated = [{"tag": "a"}, {"tag": "b"}, {"tag": "c"}]
+        df_out = _merge_results_into_df(df, accumulated, overwrite_fields=True)
+        assert list(df_out.index) == [10, 20, 30]
+        assert list(df_out["tag"]) == ["a", "b", "c"]
+
+    def test_overwrite_false_keeps_existing_non_null(self):
+        """overwrite_fields=False: existing non-null value wins."""
+        df = pd.DataFrame({"f": ["existing", "also_existing"]})
+        accumulated = [{"f": "new"}, {"f": "new"}]
+        df_out = _merge_results_into_df(df, accumulated, overwrite_fields=False)
+        assert list(df_out["f"]) == ["existing", "also_existing"]
+
+    def test_overwrite_false_fills_nan(self):
+        """overwrite_fields=False: NaN and empty string are replaced by new value."""
+        df = pd.DataFrame({"f": [None, "", "kept"]})
+        accumulated = [{"f": "filled_nan"}, {"f": "filled_empty"}, {"f": "new"}]
+        df_out = _merge_results_into_df(df, accumulated, overwrite_fields=False)
+        assert df_out["f"].iloc[0] == "filled_nan"
+        assert df_out["f"].iloc[1] == "filled_empty"
+        assert df_out["f"].iloc[2] == "kept"
+
+    def test_overwrite_true_always_overwrites(self):
+        """overwrite_fields=True: new value wins even when existing is non-null."""
+        df = pd.DataFrame({"f": ["old", "also_old"]})
+        accumulated = [{"f": "new1"}, {"f": "new2"}]
+        df_out = _merge_results_into_df(df, accumulated, overwrite_fields=True)
+        assert list(df_out["f"]) == ["new1", "new2"]
+
+    def test_internal_fields_filtered(self):
+        """Keys starting with __ are not written to the output DataFrame."""
+        df = pd.DataFrame({"x": [1]})
+        accumulated = [{"__web_context": "secret", "summary": "kept"}]
+        df_out = _merge_results_into_df(df, accumulated, overwrite_fields=True)
+        assert "summary" in df_out.columns
+        assert "__web_context" not in df_out.columns
+
+    def test_duplicate_column_names_raises(self):
+        """Input DataFrame with duplicate column names raises ValueError."""
+        df = pd.DataFrame([[1, 2]], columns=["a", "a"])
+        accumulated = [{"b": "val"}]
+        with pytest.raises(ValueError, match="duplicate column names"):
+            _merge_results_into_df(df, accumulated, overwrite_fields=True)
