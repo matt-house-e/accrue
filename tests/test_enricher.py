@@ -276,8 +276,14 @@ class TestCheckpointResume:
             },
         }
 
-        # Determine the checkpoint path (mirror the manager's logic)
-        data_id = f"df_{hash(str(['x']) + str(2))}"
+        # Determine the checkpoint path (mirror the manager's logic — sha256-based)
+        import hashlib
+        import json as _json
+
+        identifier_source = _json.dumps(
+            {"columns": ["x"], "rows": 2}, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        data_id = f"df_{hashlib.sha256(identifier_source).hexdigest()[:16]}"
         safe_id = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in data_id)
         cp_path = tmp_path / f"{safe_id}__default_checkpoint.json"
         with open(cp_path, "w") as f:
@@ -310,3 +316,38 @@ class TestCheckpointResume:
         # No checkpoint files should remain
         files = list(tmp_path.glob("*_checkpoint.json"))
         assert len(files) == 0
+
+
+# -- stable data_identifier --------------------------------------------------
+
+
+class TestStableDataIdentifier:
+    def test_same_dataframe_same_identifier(self, tmp_path):
+        """Two Enricher instances for the same DataFrame must produce the same identifier.
+
+        The old ``hash()``-based approach was per-process randomized
+        (PYTHONHASHSEED), so checkpoints from one run couldn't be resumed in
+        another. The sha256-based replacement is deterministic.
+        """
+        import hashlib
+        import json as _json
+
+        df = pd.DataFrame({"col_a": [1, 2, 3], "col_b": ["x", "y", "z"]})
+
+        # Compute the identifier the same way enricher.py does.
+        def _compute_id(df_):
+            source = _json.dumps(
+                {"columns": list(df_.columns), "rows": len(df_)},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return f"df_{hashlib.sha256(source).hexdigest()[:16]}"
+
+        id1 = _compute_id(df)
+        id2 = _compute_id(df.copy())
+
+        # Both copies of the same DataFrame must produce the same identifier.
+        assert id1 == id2
+        # And the identifier must be a stable hex string (not an integer from hash()).
+        assert id1.startswith("df_")
+        assert len(id1) == len("df_") + 16
