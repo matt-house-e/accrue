@@ -7,6 +7,8 @@ for repeated execution with checkpointing.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from typing import Any
 
 import pandas as pd
@@ -95,7 +97,12 @@ class Enricher:
             overwrite_fields = self.config.overwrite_fields
 
         if data_identifier is None:
-            data_identifier = f"df_{hash(str(df.columns.tolist()) + str(len(df)))}"
+            identifier_source = json.dumps(
+                {"columns": list(df.columns), "rows": len(df)},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            data_identifier = f"df_{hashlib.sha256(identifier_source).hexdigest()[:16]}"
 
         category = "_default"
 
