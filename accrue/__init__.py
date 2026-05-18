@@ -4,14 +4,9 @@ A programmatic enrichment engine built on composable, column-oriented
 pipeline steps with Pydantic validation, checkpointing, and async concurrency.
 """
 
-from dotenv import load_dotenv
+import logging as _logging
 
-load_dotenv()
-
-# Set up default logging when package is imported
-from .utils.logger import setup_logging
-
-setup_logging(level="WARNING", format_type="console", include_timestamp=False)
+_logging.getLogger("accrue").addHandler(_logging.NullHandler())
 
 # Public API
 from .core import (
@@ -37,9 +32,10 @@ from .schemas.field_spec import FieldSpec
 from .schemas.grounding import GroundingConfig
 from .steps import FunctionStep, LLMStep, Step, StepContext, StepResult
 from .steps.providers.base import BatchCapableLLMClient, BatchRequest, BatchResult
+from .utils.logger import setup_logging
 from .utils.web_search import web_search
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __author__ = "Accrue Team"
 
 __all__ = [
@@ -64,6 +60,7 @@ __all__ = [
     "FieldSpec",
     "GroundingConfig",
     # Utilities
+    "setup_logging",
     "web_search",
     # Batch API
     "BatchCapableLLMClient",
