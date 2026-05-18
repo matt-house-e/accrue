@@ -1,0 +1,73 @@
+name: Accrue triage (dogfood)
+
+# When an issue is opened, run an accrue pipeline against its title+body
+# to classify type / repro-needed / good-first-issue, then apply matching
+# labels via the gh CLI. This is the meta move: accrue maintains accrue.
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install accrue from source (with Anthropic provider)
+        run: pip install -e ".[anthropic]"
+
+      - name: Run triage pipeline
+        id: triage
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          set -euo pipefail
+          LABELS=$(python .github/scripts/triage_issue.py)
+          echo "labels=$LABELS" >> "$GITHUB_OUTPUT"
+          echo "Suggested labels: $LABELS"
+
+      - name: Apply labels (filtered to existing)
+        if: steps.triage.outputs.labels != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          SUGGESTED: ${{ steps.triage.outputs.labels }}
+        run: |
+          set -euo pipefail
+          # Pull the repo's actual labels so we don't fail on a missing one.
+          mapfile -t REPO_LABELS < <(gh label list --limit 100 --json name --jq '.[].name')
+          IFS=',' read -ra WANT <<< "$SUGGESTED"
+          TO_APPLY=()
+          for label in "${WANT[@]}"; do
+            for existing in "${REPO_LABELS[@]}"; do
+              if [ "$label" = "$existing" ]; then
+                TO_APPLY+=("$label")
+                break
+              fi
+            done
+          done
+          if [ ${#TO_APPLY[@]} -gt 0 ]; then
+            JOINED=$(IFS=','; echo "${TO_APPLY[*]}")
+            gh issue edit "$ISSUE_NUMBER" --add-label "$JOINED"
+            echo "Applied: $JOINED"
+          else
+            echo "No suggested labels matched the repo's label set — skipping."
+          fi
+
+      - name: Comment if needs info
+        if: contains(steps.triage.outputs.labels, 'needs info')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body "Thanks for the report. Could you share a minimal pipeline that reproduces this — ideally a 5–10 line snippet plus the accrue version (\`pip show accrue\`)? This was auto-flagged by the dogfooded triage pipeline; a human will follow up."

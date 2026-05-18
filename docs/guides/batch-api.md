@@ -71,17 +71,17 @@ print(usage.cache_hit_rate)  # Float between 0.0 and 1.0
 
 ```python
 from accrue import Pipeline, LLMStep
-from accrue.steps.providers.anthropic import AnthropicClient
 
 pipeline = Pipeline([
     LLMStep("analyze",
         fields={"market_size": "Estimate TAM"},
-        client=AnthropicClient(),
         model="claude-sonnet-4-20250514",
         batch=True,
     ),
 ])
 ```
+
+The Anthropic provider is auto-detected from the `claude-` model prefix. Requires `pip install accrue[anthropic]`.
 
 The Anthropic adapter uses the Message Batches API. System messages automatically get `cache_control` annotations for prompt caching savings.
 

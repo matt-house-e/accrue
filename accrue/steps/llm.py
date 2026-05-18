@@ -34,9 +34,27 @@ except ImportError:
 
 logger = get_logger(__name__)
 
+
 # ---------------------------------------------------------------------------
 # Refusal detection for default enforcement
 # ---------------------------------------------------------------------------
+def _strip_markdown_fences(content: str) -> str:
+    """Strip surrounding markdown code fences if present.
+
+    Some Claude models (notably Haiku with grounding tools) wrap JSON
+    in ``` ... ``` fences when not constrained by structured outputs.
+    Safe to call on unfenced content — returns it unchanged.
+    """
+    s = content.strip()
+    if not s.startswith("```"):
+        return content
+    lines = s.split("\n")
+    lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
 REFUSAL_PATTERNS = frozenset(
     {
         "unable to determine",
@@ -244,8 +262,38 @@ class LLMStep:
     # -- client ----------------------------------------------------------
 
     def _resolve_client(self) -> LLMClient:
-        """Lazily create or return the LLMClient."""
-        if self._client is None:
+        """Lazily create or return the LLMClient.
+
+        Picks the provider by model-name prefix when no explicit ``client``
+        was passed:
+
+          * ``claude-*``  → ``AnthropicClient``  (requires ``accrue[anthropic]``)
+          * ``gemini-*``  → ``GoogleClient``    (requires ``accrue[google]``)
+          * everything else, or any model when ``base_url`` is set → ``OpenAIClient``
+
+        ``base_url`` always implies an OpenAI-compatible endpoint
+        (Ollama, Groq, etc.) regardless of model name; users running
+        Claude or Gemini through a non-OpenAI gateway should pass
+        ``client=`` explicitly.
+        """
+        if self._client is not None:
+            return self._client
+
+        if self.base_url is None and self.model.startswith("claude-"):
+            if _AnthropicClient is None:
+                raise ImportError(
+                    f"Model '{self.model}' requires the Anthropic provider. "
+                    "Install with: pip install accrue[anthropic]"
+                )
+            self._client = _AnthropicClient(api_key=self.api_key)
+        elif self.base_url is None and self.model.startswith("gemini-"):
+            if _GoogleClient is None:
+                raise ImportError(
+                    f"Model '{self.model}' requires the Google provider. "
+                    "Install with: pip install accrue[google]"
+                )
+            self._client = _GoogleClient(api_key=self.api_key)
+        else:
             self._client = OpenAIClient(
                 api_key=self.api_key,
                 base_url=self.base_url,
@@ -431,7 +479,7 @@ class LLMStep:
                 validation.
         """
         content = response.content
-        parsed = json.loads(content)
+        parsed = json.loads(_strip_markdown_fences(content))
 
         # Extract __ internal fields before Pydantic validation (which
         # rejects them due to extra="forbid").  They bypass schema

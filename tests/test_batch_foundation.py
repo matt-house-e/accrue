@@ -185,6 +185,22 @@ class TestConfigBatchFields:
         assert config.max_retries == 5
 
 
+# -- EnrichmentConfig caching defaults --------------------------------------
+
+
+class TestConfigCachingDefaults:
+    def test_enable_caching_defaults_to_true(self):
+        """Caching is on by default — re-running a pipeline against
+        unchanged inputs should not re-pay the API cost. Opt out
+        explicitly with EnrichmentConfig(enable_caching=False)."""
+        config = EnrichmentConfig()
+        assert config.enable_caching is True
+
+    def test_enable_caching_can_be_disabled(self):
+        config = EnrichmentConfig(enable_caching=False)
+        assert config.enable_caching is False
+
+
 # -- LLMStep batch param ----------------------------------------------------
 
 
@@ -303,6 +319,48 @@ class TestParseResponse:
         response = LLMResponse(content="not json")
         with pytest.raises(json.JSONDecodeError):
             step.parse_response(response)
+
+    def test_strips_markdown_fences_with_json_hint(self):
+        """Claude Haiku with grounding wraps JSON in ```json...``` fences."""
+        step = LLMStep(
+            name="s",
+            fields={"market_size": "Estimate TAM"},
+            client=AsyncMock(spec=["complete"]),
+        )
+        response = _mock_llm_response('```json\n{"market_size": "$5B"}\n```')
+        result = step.parse_response(response)
+        assert result.values == {"market_size": "$5B"}
+
+    def test_strips_markdown_fences_without_hint(self):
+        step = LLMStep(
+            name="s",
+            fields={"market_size": "Estimate TAM"},
+            client=AsyncMock(spec=["complete"]),
+        )
+        response = _mock_llm_response('```\n{"market_size": "$5B"}\n```')
+        result = step.parse_response(response)
+        assert result.values == {"market_size": "$5B"}
+
+    def test_strips_fences_with_surrounding_whitespace(self):
+        step = LLMStep(
+            name="s",
+            fields={"market_size": "Estimate TAM"},
+            client=AsyncMock(spec=["complete"]),
+        )
+        response = _mock_llm_response('\n  ```json\n{"market_size": "$5B"}\n```  \n')
+        result = step.parse_response(response)
+        assert result.values == {"market_size": "$5B"}
+
+    def test_unfenced_json_unchanged(self):
+        """Regression: bare JSON must still parse (no fence-handling regression)."""
+        step = LLMStep(
+            name="s",
+            fields={"market_size": "Estimate TAM"},
+            client=AsyncMock(spec=["complete"]),
+        )
+        response = _mock_llm_response('{"market_size": "$5B"}')
+        result = step.parse_response(response)
+        assert result.values == {"market_size": "$5B"}
 
     def test_default_enforcement(self):
         step = LLMStep(

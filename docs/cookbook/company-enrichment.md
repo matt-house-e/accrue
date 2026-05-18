@@ -228,16 +228,15 @@ print(result.data[["company", "market_position", "growth_score"]])
 
 ## Using a Different Provider
 
-Swap in Anthropic or Google by passing a `client` argument:
+Swap in Anthropic or Google by changing the `model` name — the provider is auto-detected from the prefix:
 
 ```python
-from accrue.providers import AnthropicClient
-
 LLMStep(
     "classify",
     fields={...},
     depends_on=["research"],
-    client=AnthropicClient(),
-    model="claude-sonnet-4-20250514",
+    model="claude-sonnet-4-20250514",  # claude-* → Anthropic
 )
 ```
+
+Requires the matching extra: `pip install accrue[anthropic]` for Claude, `pip install accrue[google]` for Gemini. Pass `client=AnthropicClient(...)` or `client=GoogleClient(...)` explicitly only when you need to customize the underlying SDK.

@@ -168,6 +168,87 @@ class TestLLMStepClient:
         assert c1 is c2
 
 
+# -- provider auto-detection from model name ---------------------------------
+
+
+class TestProviderAutoDetect:
+    """Auto-pick the provider client from the model-name prefix when no
+    explicit ``client`` is passed. Closes #23."""
+
+    @patch("openai.AsyncOpenAI")
+    def test_gpt_prefix_uses_openai(self, mock_cls):
+        from accrue.steps.providers.openai import OpenAIClient
+
+        step = LLMStep(name="s", fields=["f"], model="gpt-4.1-mini", api_key="k")
+        assert isinstance(step._resolve_client(), OpenAIClient)
+
+    def test_claude_prefix_uses_anthropic(self):
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        step = LLMStep(
+            name="s",
+            fields=["f"],
+            model="claude-haiku-4-5-20251001",
+            api_key="k",
+        )
+        assert isinstance(step._resolve_client(), AnthropicClient)
+
+    def test_gemini_prefix_uses_google(self):
+        from accrue.steps.providers.google import GoogleClient
+
+        step = LLMStep(name="s", fields=["f"], model="gemini-1.5-pro", api_key="k")
+        assert isinstance(step._resolve_client(), GoogleClient)
+
+    @patch("openai.AsyncOpenAI")
+    def test_unknown_prefix_falls_back_to_openai(self, mock_cls):
+        """o1-/o3- and any other unknown prefix go to OpenAI (back-compat)."""
+        from accrue.steps.providers.openai import OpenAIClient
+
+        step = LLMStep(name="s", fields=["f"], model="o3-mini", api_key="k")
+        assert isinstance(step._resolve_client(), OpenAIClient)
+
+    @patch("openai.AsyncOpenAI")
+    def test_base_url_overrides_model_prefix(self, mock_cls):
+        """base_url means OpenAI-compatible endpoint regardless of model name."""
+        from accrue.steps.providers.openai import OpenAIClient
+
+        step = LLMStep(
+            name="s",
+            fields=["f"],
+            model="claude-haiku-4-5-20251001",
+            base_url="http://localhost:8080/v1",
+            api_key="k",
+        )
+        assert isinstance(step._resolve_client(), OpenAIClient)
+
+    def test_explicit_client_overrides_auto_detection(self):
+        mock_client = AsyncMock()
+        step = LLMStep(
+            name="s",
+            fields=["f"],
+            model="claude-haiku-4-5-20251001",
+            client=mock_client,
+        )
+        assert step._resolve_client() is mock_client
+
+    def test_claude_prefix_without_extra_raises_clear_error(self, monkeypatch):
+        monkeypatch.setattr("accrue.steps.llm._AnthropicClient", None)
+        step = LLMStep(
+            name="s",
+            fields=["f"],
+            model="claude-haiku-4-5-20251001",
+            api_key="k",
+        )
+        with pytest.raises(ImportError, match="pip install accrue\\[anthropic\\]"):
+            step._resolve_client()
+
+    def test_gemini_prefix_without_extra_raises_clear_error(self, monkeypatch):
+        monkeypatch.setattr("accrue.steps.llm._GoogleClient", None)
+        step = LLMStep(name="s", fields=["f"], model="gemini-1.5-pro", api_key="k")
+        with pytest.raises(ImportError, match="pip install accrue\\[google\\]"):
+            step._resolve_client()
+
+
 # -- system message building --------------------------------------------
 
 
