@@ -190,6 +190,11 @@ class CheckpointManager:
                     f.flush()
                     os.fsync(f.fileno())
                 os.replace(tmp_path, path)
+                if os.name == "posix":
+                    try:
+                        os.chmod(path, 0o600)
+                    except (OSError, NotImplementedError):
+                        pass
             except Exception:
                 tmp_path.unlink(missing_ok=True)
                 raise

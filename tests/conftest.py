@@ -31,6 +31,25 @@ def _isolate_cache_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_xdg_dirs(tmp_path, monkeypatch):
+    """Scope XDG-backed defaults (cache_dir, checkpoint_dir) to a per-test tmp dir.
+
+    ``EnrichmentConfig`` defaults ``cache_dir`` to ``$XDG_CACHE_HOME/accrue`` and
+    ``checkpoint_dir`` to ``$XDG_STATE_HOME/accrue`` via ``default_factory``.
+    Without isolation, every test sharing the developer's real XDG dirs would see
+    cache + checkpoint state bleed between runs — causing spurious cache hits and
+    ``complete``-mock-call-count == 0 failures.
+
+    Tests that explicitly pass ``cache_dir=`` / ``checkpoint_dir=`` are unaffected.
+    The ``TestXdg*`` classes in ``test_config.py`` / ``test_checkpoint.py`` set
+    these vars themselves inside the test body, which overrides this fixture's
+    values for that test (monkeypatch is stack-scoped).
+    """
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+
+
+@pytest.fixture(autouse=True)
 def _scrub_provider_env_vars(monkeypatch):
     """Remove real provider keys and substitute a dummy so non-empty checks pass.
 
