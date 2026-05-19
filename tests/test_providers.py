@@ -890,6 +890,127 @@ class TestAnthropicClient:
         assert result.citations[0].title == "Example Article"
         assert result.citations[0].snippet == "The answer is 42."
 
+    @pytest.mark.asyncio
+    async def test_grounding_schema_warning_fires_once_per_client(self, caplog):
+        """Warning fires exactly once per client across N complete() calls."""
+        self._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        schema = {"type": "object", "properties": {"f1": {"type": "string"}}}
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "test", "schema": schema, "strict": True},
+        }
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+        )
+        mock_inner = MagicMock()
+        mock_inner.messages.create = AsyncMock(return_value=mock_response)
+
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            for _ in range(5):
+                await client.complete(
+                    messages=[{"role": "user", "content": "hi"}],
+                    model="claude-sonnet-4-5-20250929",
+                    temperature=0.2,
+                    max_tokens=1000,
+                    response_format=response_format,
+                    tools=[{"type": "web_search"}],
+                )
+
+        warning_records = [
+            r
+            for r in caplog.records
+            if "structured output schema will not be enforced" in r.message
+        ]
+        assert len(warning_records) == 1
+
+    @pytest.mark.asyncio
+    async def test_grounding_schema_warning_fires_on_first_call(self, caplog):
+        """Warning fires on first call when grounding+schema both set (regression for #57)."""
+        self._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        schema = {"type": "object", "properties": {"f1": {"type": "string"}}}
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "test", "schema": schema, "strict": True},
+        }
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+        )
+        mock_inner = MagicMock()
+        mock_inner.messages.create = AsyncMock(return_value=mock_response)
+
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="claude-sonnet-4-5-20250929",
+                temperature=0.2,
+                max_tokens=1000,
+                response_format=response_format,
+                tools=[{"type": "web_search"}],
+            )
+
+        assert "structured output schema will not be enforced" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_grounding_schema_warning_fires_for_fresh_client(self, caplog):
+        """A second AnthropicClient instance emits its own warning (cache is per-instance)."""
+        self._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        schema = {"type": "object", "properties": {"f1": {"type": "string"}}}
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "test", "schema": schema, "strict": True},
+        }
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+        )
+        mock_inner = MagicMock()
+        mock_inner.messages.create = AsyncMock(return_value=mock_response)
+
+        # First client — exhaust its warning
+        client_a = AnthropicClient(api_key="test")
+        client_a._client = mock_inner
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            for _ in range(3):
+                await client_a.complete(
+                    messages=[{"role": "user", "content": "hi"}],
+                    model="claude-sonnet-4-5-20250929",
+                    temperature=0.2,
+                    max_tokens=1000,
+                    response_format=response_format,
+                    tools=[{"type": "web_search"}],
+                )
+
+        caplog.clear()
+
+        # Second client — must still fire its own warning
+        client_b = AnthropicClient(api_key="test")
+        client_b._client = mock_inner
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            await client_b.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="claude-sonnet-4-5-20250929",
+                temperature=0.2,
+                max_tokens=1000,
+                response_format=response_format,
+                tools=[{"type": "web_search"}],
+            )
+
+        assert "structured output schema will not be enforced" in caplog.text
+
 
 # -- GoogleClient -----------------------------------------------------------
 

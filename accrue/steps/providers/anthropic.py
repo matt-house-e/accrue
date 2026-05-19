@@ -38,6 +38,7 @@ class AnthropicClient:
         self._api_key = api_key
         self._http_client = http_client
         self._client: Any = None
+        self._warned_grounding_schema: bool = False
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -109,12 +110,14 @@ class AnthropicClient:
         # json_schema → constrained decoding; json_object → no equivalent, skip
         # IMPORTANT: output_config.format is incompatible with web search citations
         if anthropic_tools and response_format and response_format.get("type") == "json_schema":
-            logger.warning(
-                "Anthropic grounding (web search tools) is incompatible with strict "
-                "structured outputs; structured output schema will not be enforced for "
-                "this request. Consider running a separate non-grounded LLMStep over "
-                "the grounded context, or disable grounding for this step."
-            )
+            if not self._warned_grounding_schema:
+                logger.warning(
+                    "Anthropic grounding (web search tools) is incompatible with strict "
+                    "structured outputs; structured output schema will not be enforced for "
+                    "this request. Consider running a separate non-grounded LLMStep over "
+                    "the grounded context, or disable grounding for this step."
+                )
+                self._warned_grounding_schema = True
         if not anthropic_tools and response_format and response_format.get("type") == "json_schema":
             inner = response_format.get("json_schema", {})
             schema = inner.get("schema", {})
