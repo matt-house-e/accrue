@@ -1180,3 +1180,146 @@ class TestGoogleClient:
             )
 
         assert "allowed_domains is not supported" in caplog.text
+
+    # -- Retry classification (regression for #65) --------------------------
+
+    @pytest.mark.asyncio
+    async def test_5xx_is_retryable(self):
+        """503 Service Unavailable from Gemini → LLMAPIError.retryable True."""
+        import sys
+
+        self._install_mock_google()
+        # Ensure google.api_core is NOT present so we exercise the substring path
+        sys.modules.pop("google.api_core", None)
+        sys.modules.pop("google.api_core.exceptions", None)
+        # Reload the google module to pick up the patched sys.modules
+        import importlib
+
+        import accrue.steps.providers.google as _google_mod
+
+        importlib.reload(_google_mod)
+
+        from accrue.steps.providers.google import GoogleClient
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=Exception("503 Service Unavailable")
+        )
+
+        client = GoogleClient(api_key="test")
+        client._client = mock_client
+
+        with pytest.raises(LLMAPIError) as exc_info:
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gemini-2.5-flash",
+                temperature=0.0,
+                max_tokens=10,
+            )
+
+        assert exc_info.value.retryable is True
+        assert exc_info.value.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_timeout_is_retryable(self):
+        """Deadline exceeded / timeout from Gemini → LLMAPIError.retryable True."""
+        import sys
+
+        self._install_mock_google()
+        sys.modules.pop("google.api_core", None)
+        sys.modules.pop("google.api_core.exceptions", None)
+        import importlib
+
+        import accrue.steps.providers.google as _google_mod
+
+        importlib.reload(_google_mod)
+
+        from accrue.steps.providers.google import GoogleClient
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=Exception("Deadline exceeded waiting for response")
+        )
+
+        client = GoogleClient(api_key="test")
+        client._client = mock_client
+
+        with pytest.raises(LLMAPIError) as exc_info:
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gemini-2.5-flash",
+                temperature=0.0,
+                max_tokens=10,
+            )
+
+        assert exc_info.value.retryable is True
+
+    @pytest.mark.asyncio
+    async def test_400_invalid_argument_not_retryable(self):
+        """400 / invalid argument from Gemini → LLMAPIError.retryable False."""
+        import sys
+
+        self._install_mock_google()
+        sys.modules.pop("google.api_core", None)
+        sys.modules.pop("google.api_core.exceptions", None)
+        import importlib
+
+        import accrue.steps.providers.google as _google_mod
+
+        importlib.reload(_google_mod)
+
+        from accrue.steps.providers.google import GoogleClient
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=Exception("400 Bad Request: invalid argument in prompt")
+        )
+
+        client = GoogleClient(api_key="test")
+        client._client = mock_client
+
+        with pytest.raises(LLMAPIError) as exc_info:
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gemini-2.5-flash",
+                temperature=0.0,
+                max_tokens=10,
+            )
+
+        assert exc_info.value.retryable is False
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_429_is_retryable(self):
+        """429 / resource exhausted from Gemini → LLMAPIError.retryable True (regression guard)."""
+        import sys
+
+        self._install_mock_google()
+        sys.modules.pop("google.api_core", None)
+        sys.modules.pop("google.api_core.exceptions", None)
+        import importlib
+
+        import accrue.steps.providers.google as _google_mod
+
+        importlib.reload(_google_mod)
+
+        from accrue.steps.providers.google import GoogleClient
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=Exception("429 Resource Exhausted: quota exceeded")
+        )
+
+        client = GoogleClient(api_key="test")
+        client._client = mock_client
+
+        with pytest.raises(LLMAPIError) as exc_info:
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gemini-2.5-flash",
+                temperature=0.0,
+                max_tokens=10,
+            )
+
+        assert exc_info.value.retryable is True
+        assert exc_info.value.is_rate_limit is True
+        assert exc_info.value.status_code == 429

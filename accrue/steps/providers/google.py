@@ -12,6 +12,14 @@ from .base import LLMAPIError, LLMResponse
 
 logger = logging.getLogger(__name__)
 
+# Lazily resolved; populated once on first exception classification.
+# google-api-core ships with google-genai so it will normally be present,
+# but we don't declare it as a hard dependency.
+try:
+    import google.api_core.exceptions as _gax_exc
+except ImportError:  # pragma: no cover
+    _gax_exc = None  # type: ignore[assignment]
+
 
 class GoogleClient:
     """Adapter for Google's Gemini models.
@@ -109,20 +117,7 @@ class GoogleClient:
                 config=types.GenerateContentConfig(**config),
             )
         except Exception as exc:
-            # Google SDK doesn't have typed error classes as clean as OpenAI/Anthropic
-            exc_str = str(exc).lower()
-            if "429" in exc_str or "rate" in exc_str:
-                raise LLMAPIError(
-                    f"Google rate limit for model '{model}': {exc}",
-                    status_code=429,
-                    is_rate_limit=True,
-                ) from exc
-            if "timeout" in exc_str:
-                raise LLMAPIError(
-                    f"Google timeout for model '{model}': {exc}",
-                    status_code=408,
-                ) from exc
-            raise LLMAPIError(f"Google API error for model '{model}': {exc}") from exc
+            raise _classify_google_exc(exc, model) from exc
 
         content = response.text or ""
 
@@ -146,6 +141,78 @@ class GoogleClient:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _classify_google_exc(exc: Exception, model: str) -> LLMAPIError:
+    """Classify a Google SDK exception into a typed LLMAPIError.
+
+    Tries typed ``google.api_core.exceptions`` first (Option A); falls back to
+    substring heuristics (Option B) for unknown exception types or when the
+    ``google-api-core`` package is unavailable.
+    """
+    # Option A — typed classification via google.api_core.exceptions
+    if _gax_exc is not None:
+        if isinstance(exc, _gax_exc.ResourceExhausted):
+            return LLMAPIError(
+                f"Google rate limit for model '{model}': {exc}",
+                is_rate_limit=True,
+                status_code=429,
+            )
+        if isinstance(
+            exc,
+            (
+                _gax_exc.ServiceUnavailable,
+                getattr(_gax_exc, "InternalServerError", type(None)),
+                getattr(_gax_exc, "BadGateway", type(None)),
+            ),
+        ):
+            return LLMAPIError(
+                f"Google server error for model '{model}': {exc}",
+                status_code=503,
+            )
+        if isinstance(exc, _gax_exc.DeadlineExceeded):
+            return LLMAPIError(
+                f"Google deadline exceeded for model '{model}': {exc}",
+                retryable=True,
+            )
+        if isinstance(
+            exc,
+            (
+                getattr(_gax_exc, "InvalidArgument", type(None)),
+                getattr(_gax_exc, "PermissionDenied", type(None)),
+                getattr(_gax_exc, "NotFound", type(None)),
+            ),
+        ):
+            return LLMAPIError(
+                f"Google API error for model '{model}': {exc}",
+                status_code=400,
+            )
+
+    # Option B — substring heuristics (fallback for unknown types)
+    exc_str = str(exc).lower()
+    if "429" in exc_str or "resource exhausted" in exc_str or "rate" in exc_str:
+        return LLMAPIError(
+            f"Google rate limit for model '{model}': {exc}",
+            is_rate_limit=True,
+            status_code=429,
+        )
+    for code, marker in [
+        (500, "internal server error"),
+        (502, "bad gateway"),
+        (503, "service unavailable"),
+        (504, "gateway timeout"),
+    ]:
+        if marker in exc_str:
+            return LLMAPIError(
+                f"Google server error for model '{model}': {exc}",
+                status_code=code,
+            )
+    if "deadline exceeded" in exc_str or "timeout" in exc_str:
+        return LLMAPIError(
+            f"Google timeout for model '{model}': {exc}",
+            retryable=True,
+        )
+    return LLMAPIError(f"Google API error for model '{model}': {exc}")
 
 
 def _translate_tools(tools: list[dict[str, Any]], types: Any) -> list[Any]:
