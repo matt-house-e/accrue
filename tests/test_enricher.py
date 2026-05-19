@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pandas as pd
@@ -351,3 +352,76 @@ class TestStableDataIdentifier:
         # And the identifier must be a stable hex string (not an integer from hash()).
         assert id1.startswith("df_")
         assert len(id1) == len("df_") + 16
+
+
+# -- cancellation + resume (regression for partial-checkpoint corruption) -----
+
+
+class TestCancelAndResume:
+    @pytest.mark.asyncio
+    async def test_cancel_mid_step_resume_has_no_empty_rows(self, tmp_path):
+        """Cancel mid-step; resume must re-run the step — no {} placeholders downstream.
+
+        Regression for: on_partial_checkpoint used to mark the step completed,
+        so a resumed run would skip it and propagate empty {} for unfinished rows.
+        """
+        num_rows = 10
+        # rows_started tracks which row indices were actually processed by the step.
+        rows_started: list[int] = []
+        # Deterministic synchronization: the main coroutine waits on this event
+        # so cancellation always lands while row 2 is mid-flight (rows 0-1 done,
+        # row 2 hanging, rows 3-9 not yet started).  This removes the timing
+        # dependency that made the previous version flaky on slow CI workers.
+        started_row_2 = asyncio.Event()
+
+        async def slow_fn(ctx):
+            row_idx = ctx.row.get("idx", -1)
+            rows_started.append(row_idx)
+            if row_idx == 2:
+                # Signal the main coroutine that row 2 has started, then hang
+                # long enough that cancellation arrives before the row finishes.
+                started_row_2.set()
+                await asyncio.sleep(10.0)
+            else:
+                await asyncio.sleep(0.01)
+            return {"enriched": f"done_{row_idx}"}
+
+        pipeline = Pipeline([FunctionStep("enrich", fn=slow_fn, fields=["enriched"])])
+        config = EnrichmentConfig(
+            enable_checkpointing=True,
+            auto_resume=True,
+            checkpoint_dir=str(tmp_path),
+            # Fire a partial checkpoint after every row so the checkpoint is
+            # guaranteed to be written before the cancellation arrives.
+            checkpoint_interval=1,
+            max_workers=1,  # sequential to make cancellation timing deterministic
+        )
+        enricher = Enricher(pipeline, config=config)
+        df = pd.DataFrame({"idx": list(range(num_rows))})
+
+        # Wait until row 2 is in-flight, then cancel — no wall-clock timeouts.
+        task = asyncio.create_task(enricher.run_async(df, data_identifier="cancel_test"))
+        await started_row_2.wait()
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+        # Confirm we actually cancelled before finishing all rows.
+        assert len(rows_started) < num_rows, "Test setup error: all rows completed before cancel"
+        # And confirm row 2 was the in-flight row (so the partial checkpoint has
+        # results for rows 0,1 only — row 2 was cancelled mid-flight).
+        assert 2 in rows_started, "Row 2 should have started before cancel"
+
+        # Now resume with a fresh Enricher and confirm no {} leaks downstream.
+        rows_started.clear()
+        enricher2 = Enricher(pipeline, config=config)
+        result = await enricher2.run_async(df, data_identifier="cancel_test")
+
+        enriched_col = list(result["enriched"])
+        # Every value must be non-empty — no {} placeholders from the partial save.
+        for i, val in enumerate(enriched_col):
+            assert val != {} and val is not None and val != "", (
+                f"Row {i} has empty/placeholder value after resume: {val!r}"
+            )

@@ -415,3 +415,90 @@ class TestTypedSerializer:
                 existing_completed=[],
                 existing_results={},
             )
+
+
+# -- partial checkpoint (partial=True) ---------------------------------------
+
+
+class TestPartialCheckpoint:
+    def test_partial_true_does_not_add_to_completed_steps(self, tmp_path):
+        """save_step(partial=True) must NOT append the step to completed_steps."""
+        mgr = _make_mgr(tmp_path)
+        row_results = [{"f": "partial_val"}, {}]
+
+        ok = mgr.save_step(
+            data_identifier="data",
+            category="cat",
+            step_name="step1",
+            step_row_results=row_results,
+            total_rows=2,
+            fields_dict=FIELDS,
+            existing_completed=[],
+            existing_results={},
+            partial=True,
+        )
+        assert ok is True
+
+        cp = mgr.load("data", "cat")
+        assert cp is not None
+        # Step must NOT appear in completed_steps so a resumed run re-executes it.
+        assert "step1" not in cp.completed_steps
+        assert cp.completed_steps == []
+        # Partial data is still persisted in step_results for tracking purposes.
+        assert cp.step_results["step1"] == row_results
+
+    def test_partial_false_default_adds_to_completed_steps(self, tmp_path):
+        """save_step(partial=False) (the default) DOES append to completed_steps."""
+        mgr = _make_mgr(tmp_path)
+        row_results = [{"f": "val"}]
+
+        mgr.save_step(
+            data_identifier="data",
+            category="cat",
+            step_name="step1",
+            step_row_results=row_results,
+            total_rows=1,
+            fields_dict=FIELDS,
+            existing_completed=[],
+            existing_results={},
+        )
+
+        cp = mgr.load("data", "cat")
+        assert cp is not None
+        assert "step1" in cp.completed_steps
+
+    def test_partial_preserves_prior_completed_steps_unchanged(self, tmp_path):
+        """Partial save must not disturb already-completed steps."""
+        mgr = _make_mgr(tmp_path)
+
+        # First step is fully completed.
+        step1_results = [{"f1": "done"}]
+        mgr.save_step(
+            data_identifier="data",
+            category="cat",
+            step_name="step1",
+            step_row_results=step1_results,
+            total_rows=1,
+            fields_dict=FIELDS,
+            existing_completed=[],
+            existing_results={},
+        )
+
+        # Second step is only partially done (e.g. cancelled mid-flight).
+        mgr.save_step(
+            data_identifier="data",
+            category="cat",
+            step_name="step2",
+            step_row_results=[{}],
+            total_rows=1,
+            fields_dict=FIELDS,
+            existing_completed=["step1"],
+            existing_results={"step1": step1_results},
+            partial=True,
+        )
+
+        cp = mgr.load("data", "cat")
+        assert cp is not None
+        # Only step1 is completed; step2 must NOT appear.
+        assert cp.completed_steps == ["step1"]
+        assert "step2" not in cp.completed_steps

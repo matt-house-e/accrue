@@ -124,9 +124,11 @@ class Enricher:
             elif cp.fields_dict != fields_dict:
                 logger.warning("Checkpoint fields_dict mismatch, starting fresh")
             else:
-                prior_step_results = cp.step_results
                 completed_steps = list(cp.completed_steps)
-                checkpoint_results = dict(cp.step_results)
+                prior_step_results = {
+                    k: v for k, v in cp.step_results.items() if k in cp.completed_steps
+                }
+                checkpoint_results = dict(prior_step_results)
                 logger.info(f"Resuming from checkpoint: skipping {completed_steps}")
 
         # Convert DataFrame to rows
@@ -175,6 +177,7 @@ class Enricher:
                     fields_dict=fields_dict,
                     existing_completed=list(cb_completed),
                     existing_results=dict(cb_results),
+                    partial=True,
                 )
 
         # Execute pipeline
