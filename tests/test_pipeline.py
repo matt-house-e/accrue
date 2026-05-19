@@ -471,3 +471,55 @@ class TestNanToNoneBoundary:
         df = pd.DataFrame({"x": [10, 20, 30]})
         await p.run_async(df)
         assert captured == [10, 20, 30]
+
+
+# -- Worker-pool bounded task count ----------------------------------------
+
+
+class TestWorkerPoolBoundedTaskCount:
+    """Streaming worker pool: in-flight asyncio Task count stays bounded.
+
+    Before this refactor, all N row tasks were created up-front, so
+    asyncio.all_tasks() would show ~N tasks.  The new design uses a fixed
+    pool of max_workers workers, so in-flight tasks must stay bounded
+    regardless of row count.
+    """
+
+    @pytest.mark.asyncio
+    async def test_inflight_tasks_bounded_by_max_workers(self):
+        """1000 rows with max_workers=4 never spawns more than ~max_workers+overhead tasks."""
+        num_rows = 1000
+        max_workers = 4
+        # Overhead: workers + producer + pipeline-level tasks + test task itself.
+        # We use a generous ceiling (max_workers * 3) to avoid false positives.
+        task_ceiling = max_workers * 3
+
+        peak_task_count = 0
+
+        async def counting_fn(ctx: StepContext) -> dict[str, Any]:
+            nonlocal peak_task_count
+            current = len(asyncio.all_tasks())
+            if current > peak_task_count:
+                peak_task_count = current
+            # yield to the event loop so other tasks can be observed
+            await asyncio.sleep(0)
+            return {"v": 1}
+
+        from accrue.core.config import EnrichmentConfig
+
+        step = FunctionStep("count", fn=counting_fn, fields=["v"])
+        p = Pipeline([step])
+        rows = [{"i": i} for i in range(num_rows)]
+        config = EnrichmentConfig(max_workers=max_workers)
+
+        results, errors, cost = await p.execute(rows, all_fields={}, config=config)
+
+        assert errors == [], f"Unexpected errors: {errors}"
+        assert len(results) == num_rows
+        assert all(r.get("v") == 1 for r in results), "Some rows produced wrong output"
+
+        # Core assertion: in-flight task count stayed bounded
+        assert peak_task_count <= task_ceiling, (
+            f"Peak task count {peak_task_count} exceeded ceiling {task_ceiling}. "
+            f"The eager-creation regression may have been reintroduced."
+        )
