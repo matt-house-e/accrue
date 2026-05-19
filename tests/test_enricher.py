@@ -318,6 +318,196 @@ class TestCheckpointResume:
         files = list(tmp_path.glob("*_checkpoint.json"))
         assert len(files) == 0
 
+    # -- helpers for strict-validation tests ---------------------------------
+
+    @staticmethod
+    def _write_checkpoint(
+        tmp_path,
+        df_columns,
+        total_rows,
+        fields_dict,
+        completed_steps,
+        step_results,
+        category="_default",
+    ):
+        """Write a checkpoint file using the same path logic as CheckpointManager._get_path."""
+        import hashlib
+        import json as _json
+
+        identifier_source = _json.dumps(
+            {"columns": df_columns, "rows": total_rows}, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        data_id = f"df_{hashlib.sha256(identifier_source).hexdigest()[:16]}"
+        # Mirror CheckpointManager._get_path exactly
+        safe_id = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in data_id)
+        safe_cat = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in category)
+        cp_path = tmp_path / f"{safe_id}_{safe_cat}_checkpoint.json"
+        checkpoint_data = {
+            "timestamp": 1000.0,
+            "category": category,
+            "total_rows": total_rows,
+            "fields_dict": fields_dict,
+            "completed_steps": completed_steps,
+            "step_results": step_results,
+        }
+        with open(cp_path, "w") as f:
+            _json.dump(checkpoint_data, f)
+        return cp_path
+
+    def test_renamed_step_discards_checkpoint(self, tmp_path, caplog):
+        """Checkpoint with steps ['a','b'] must be discarded when pipeline has 'a_v2'."""
+        import logging
+
+        call_tracker = {"calls": 0}
+
+        def fn(ctx):
+            call_tracker["calls"] += 1
+            return {"field1": "fresh"}
+
+        # Pipeline now has 'a_v2' instead of 'a'
+        pipeline = Pipeline([FunctionStep("a_v2", fn=fn, fields=["field1"])])
+
+        # Write checkpoint that has step 'a' completed (same fields, same rows)
+        self._write_checkpoint(
+            tmp_path,
+            df_columns=["x"],
+            total_rows=2,
+            fields_dict={"field1": {}},
+            completed_steps=["a"],
+            step_results={"a": [{"field1": "cached"}, {"field1": "cached"}]},
+        )
+
+        config = EnrichmentConfig(
+            enable_checkpointing=True,
+            auto_resume=True,
+            checkpoint_dir=str(tmp_path),
+        )
+        enricher = Enricher(pipeline, config=config)
+        df = pd.DataFrame({"x": [1, 2]})
+
+        with caplog.at_level(logging.WARNING):
+            result = enricher.run(df)
+
+        # Must re-run from scratch — step fn must have been called
+        assert call_tracker["calls"] == 2
+        # Result must come from fresh execution, not cached "cached" value
+        assert list(result["field1"]) == ["fresh", "fresh"]
+        # A warning about the unknown step must have been logged
+        assert any(
+            "unknown" in record.message.lower() or "discard" in record.message.lower()
+            for record in caplog.records
+        )
+
+    def test_row_count_mismatch_discards_checkpoint(self, tmp_path):
+        """Checkpoint with 3 rows must be discarded when the DataFrame has 2 rows."""
+        call_tracker = {"calls": 0}
+
+        def fn(ctx):
+            call_tracker["calls"] += 1
+            return {"out": "fresh"}
+
+        pipeline = Pipeline([FunctionStep("s", fn=fn, fields=["out"])])
+
+        # Write checkpoint with 3 rows, but we'll run with 2
+        self._write_checkpoint(
+            tmp_path,
+            df_columns=["x"],
+            total_rows=3,  # mismatch
+            fields_dict={"out": {}},
+            completed_steps=["s"],
+            step_results={"s": [{"out": "cached"}] * 3},
+        )
+
+        config = EnrichmentConfig(
+            enable_checkpointing=True,
+            auto_resume=True,
+            checkpoint_dir=str(tmp_path),
+        )
+        enricher = Enricher(pipeline, config=config)
+        df = pd.DataFrame({"x": [1, 2]})  # 2 rows
+        result = enricher.run(df)
+
+        # Must re-run from scratch
+        assert call_tracker["calls"] == 2
+        assert list(result["out"]) == ["fresh", "fresh"]
+
+    def test_field_mismatch_discards_checkpoint(self, tmp_path):
+        """Checkpoint with different fields must be discarded."""
+        call_tracker = {"calls": 0}
+
+        def fn(ctx):
+            call_tracker["calls"] += 1
+            return {"new_field": "fresh"}
+
+        pipeline = Pipeline([FunctionStep("s", fn=fn, fields=["new_field"])])
+
+        # Write checkpoint with different fields
+        self._write_checkpoint(
+            tmp_path,
+            df_columns=["x"],
+            total_rows=2,
+            fields_dict={"old_field": {}},  # mismatch
+            completed_steps=["s"],
+            step_results={"s": [{"old_field": "cached"}] * 2},
+        )
+
+        config = EnrichmentConfig(
+            enable_checkpointing=True,
+            auto_resume=True,
+            checkpoint_dir=str(tmp_path),
+        )
+        enricher = Enricher(pipeline, config=config)
+        df = pd.DataFrame({"x": [1, 2]})
+        result = enricher.run(df)
+
+        # Must re-run from scratch
+        assert call_tracker["calls"] == 2
+        assert list(result["new_field"]) == ["fresh", "fresh"]
+
+    def test_matching_shape_resumes_correctly(self, tmp_path):
+        """Checkpoint with matching rows, fields, and steps must resume (skip completed step)."""
+        call_tracker = {"step1_calls": 0, "step2_calls": 0}
+
+        def step1_fn(ctx):
+            call_tracker["step1_calls"] += 1
+            return {"f1": "live_val"}
+
+        def step2_fn(ctx):
+            call_tracker["step2_calls"] += 1
+            return {"f2": ctx.prior_results.get("f1", "") + "_done"}
+
+        pipeline = Pipeline(
+            [
+                FunctionStep("step1", fn=step1_fn, fields=["f1"]),
+                FunctionStep("step2", fn=step2_fn, fields=["f2"], depends_on=["step1"]),
+            ]
+        )
+
+        self._write_checkpoint(
+            tmp_path,
+            df_columns=["x"],
+            total_rows=2,
+            fields_dict={"f1": {}, "f2": {}},
+            completed_steps=["step1"],
+            step_results={"step1": [{"f1": "cached_val"}, {"f1": "cached_val2"}]},
+        )
+
+        config = EnrichmentConfig(
+            enable_checkpointing=True,
+            auto_resume=True,
+            checkpoint_dir=str(tmp_path),
+        )
+        enricher = Enricher(pipeline, config=config)
+        df = pd.DataFrame({"x": [1, 2]})
+        result = enricher.run(df)
+
+        # step1 must be skipped (it was checkpointed with matching state)
+        assert call_tracker["step1_calls"] == 0
+        # step2 must run using the cached step1 results
+        assert call_tracker["step2_calls"] == 2
+        assert result.at[0, "f2"] == "cached_val_done"
+        assert result.at[1, "f2"] == "cached_val2_done"
+
 
 # -- stable data_identifier --------------------------------------------------
 
