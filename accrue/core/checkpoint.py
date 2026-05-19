@@ -120,19 +120,29 @@ class CheckpointManager:
         fields_dict: dict[str, dict[str, Any]],
         existing_completed: list[str],
         existing_results: dict[str, list[dict[str, Any]]],
+        *,
+        partial: bool = False,
     ) -> bool:
         """Write full pipeline state to disk after a step completes.
 
         Uses an atomic write (tmp + fsync + os.replace) so a crash mid-write
         never corrupts the existing checkpoint.
 
+        Args:
+            partial: When True, save partial row results without marking the
+                step as completed.  On resume the step will re-run from
+                scratch, ensuring unfinished rows are never silently treated
+                as completed.  Defaults to False (normal completion).
+
         Returns True on success or when checkpointing is disabled (no-op).
         """
         if not self._enabled:
             return True
 
-        # Merge the newly completed step into existing state
-        completed = list(existing_completed) + [step_name]
+        # For a partial save, do NOT append step_name to completed_steps so
+        # that a resumed run re-executes the step from scratch instead of
+        # skipping it and propagating empty {} results downstream.
+        completed = list(existing_completed) if partial else list(existing_completed) + [step_name]
         results = dict(existing_results)
         results[step_name] = step_row_results
 

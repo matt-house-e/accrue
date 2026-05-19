@@ -175,6 +175,7 @@ class Enricher:
                     fields_dict=fields_dict,
                     existing_completed=list(cb_completed),
                     existing_results=dict(cb_results),
+                    partial=True,
                 )
 
         # Execute pipeline

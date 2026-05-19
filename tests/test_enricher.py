@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pandas as pd
@@ -351,3 +352,66 @@ class TestStableDataIdentifier:
         # And the identifier must be a stable hex string (not an integer from hash()).
         assert id1.startswith("df_")
         assert len(id1) == len("df_") + 16
+
+
+# -- cancellation + resume (regression for partial-checkpoint corruption) -----
+
+
+class TestCancelAndResume:
+    @pytest.mark.asyncio
+    async def test_cancel_mid_step_resume_has_no_empty_rows(self, tmp_path):
+        """Cancel mid-step; resume must re-run the step — no {} placeholders downstream.
+
+        Regression for: on_partial_checkpoint used to mark the step completed,
+        so a resumed run would skip it and propagate empty {} for unfinished rows.
+        """
+        num_rows = 10
+        # rows_started tracks which row indices were actually processed by the step.
+        rows_started: list[int] = []
+
+        async def slow_fn(ctx):
+            row_idx = ctx.row.get("idx", -1)
+            rows_started.append(row_idx)
+            # Introduce a small delay so we can cancel mid-flight.
+            await asyncio.sleep(0.05)
+            return {"enriched": f"done_{row_idx}"}
+
+        pipeline = Pipeline([FunctionStep("enrich", fn=slow_fn, fields=["enriched"])])
+        config = EnrichmentConfig(
+            enable_checkpointing=True,
+            auto_resume=True,
+            checkpoint_dir=str(tmp_path),
+            # Fire a partial checkpoint after every row so the checkpoint is
+            # guaranteed to be written before the cancellation arrives.
+            checkpoint_interval=1,
+            max_workers=1,  # sequential to make cancellation timing deterministic
+        )
+        enricher = Enricher(pipeline, config=config)
+        df = pd.DataFrame({"idx": list(range(num_rows))})
+
+        # Run with a short timeout to force cancellation mid-step.
+        task = asyncio.create_task(enricher.run_async(df, data_identifier="cancel_test"))
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.15)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+        # Confirm we actually cancelled before finishing all rows.
+        assert len(rows_started) < num_rows, "Test setup error: all rows completed before cancel"
+
+        # Now resume with a fresh Enricher and confirm no {} leaks downstream.
+        rows_started.clear()
+        enricher2 = Enricher(pipeline, config=config)
+        result = await enricher2.run_async(df, data_identifier="cancel_test")
+
+        enriched_col = list(result["enriched"])
+        # Every value must be non-empty — no {} placeholders from the partial save.
+        for i, val in enumerate(enriched_col):
+            assert val != {} and val is not None and val != "", (
+                f"Row {i} has empty/placeholder value after resume: {val!r}"
+            )
