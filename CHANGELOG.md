@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - `LLMStep.parse_response` now strips markdown code fences before `json.loads`. Fixes parse failures with Claude Haiku + grounding tools, where the structured-output constraint is disabled and the model wraps JSON in ` ``` ` fences. (#7)
 - `accrue/__init__.py` `__version__` was out of sync with `pyproject.toml`.
+- Google provider: Option-B rate-limit fallback now uses a word-boundary regex (`\brate[\s_-]?limit\b`) instead of bare `"rate" in exc_str`, preventing false positives on words like "iterate" or "accelerator". (#80)
+- Google provider: `DeadlineExceeded` errors now set `status_code=408` (both typed Option-A and substring Option-B paths) for consistency with the Anthropic adapter. (#80)
+- Checkpoint: pre-1.2.1 files using the legacy `__type__` sentinel are now detected, logged as a `WARNING`, and discarded so pipelines resume cleanly instead of silently misreading typed values. (#80)
+- Pipeline: submit-batch cleanup now logs a `WARNING` for any `cancel_batch` failures so users know if orphaned batches may still be billable after a submit error. (#80)
+
+### Internal
+- `AnthropicClient._warned_grounding_schema` is per-client-instance scope (not per-process). `LLMStep` constructs a fresh client per `Pipeline.run_async()` call, so the grounding-schema incompatibility warning fires once per run. (#80)
 
 ## [1.2.0] - 2026-04-25
 

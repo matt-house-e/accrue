@@ -1198,10 +1198,22 @@ class Pipeline:
         except Exception:
             # Best-effort cancel of already-submitted batches before propagating
             if batch_ids:
-                await asyncio.gather(
+                cancel_results = await asyncio.gather(
                     *(client.cancel_batch(bid) for bid in batch_ids),
                     return_exceptions=True,
                 )
+                failures = [
+                    (bid, r)
+                    for bid, r in zip(batch_ids, cancel_results)
+                    if isinstance(r, BaseException)
+                ]
+                if failures:
+                    logger.warning(
+                        "Failed to cancel %d orphaned batch(es) after submit failure; "
+                        "these may still be billable: %s",
+                        len(failures),
+                        [(bid, type(err).__name__) for bid, err in failures],
+                    )
             raise
 
         # ── Phase 4: Poll (with KeyboardInterrupt handling) ────────────

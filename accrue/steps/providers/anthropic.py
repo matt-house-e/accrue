@@ -38,6 +38,9 @@ class AnthropicClient:
         self._api_key = api_key
         self._http_client = http_client
         self._client: Any = None
+        # Scope: per-client-instance (not per-process).  LLMStep constructs a
+        # fresh AnthropicClient on each Pipeline.run_async() call, so users see
+        # this warning once per pipeline run rather than once per process lifetime.
         self._warned_grounding_schema: bool = False
 
     def _get_client(self) -> Any:
