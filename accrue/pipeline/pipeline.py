@@ -641,9 +641,17 @@ class Pipeline:
                 gathered = await asyncio.gather(*level_coros, return_exceptions=True)
 
                 # Surface the first exception (after siblings have been awaited)
-                first_exc = next((r for r in gathered if isinstance(r, BaseException)), None)
-                if first_exc is not None:
-                    raise first_exc
+                exceptions = [r for r in gathered if isinstance(r, BaseException)]
+                if exceptions:
+                    if len(exceptions) > 1:
+                        for extra in exceptions[1:]:
+                            logger.warning(
+                                "Sibling step in same level also raised "
+                                "(suppressed by primary): %s: %s",
+                                type(extra).__name__,
+                                extra,
+                            )
+                    raise exceptions[0]
 
                 step_results_list = gathered
 
