@@ -28,3 +28,47 @@ import pytest
 @pytest.fixture(autouse=True)
 def _isolate_cache_dir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _scrub_provider_env_vars(monkeypatch):
+    """Remove real provider keys and substitute a dummy so non-empty checks pass.
+
+    Unit tests must never read credentials from the developer's shell.
+    This fixture scrubs all known provider env vars and injects a clearly
+    fake OpenAI key so code paths that assert ``key != ""`` still reach
+    the mock layer rather than blowing up at key-validation time.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-mock-key-not-real")
+
+
+@pytest.fixture(autouse=True)
+def _block_network(monkeypatch):
+    """Raise on any real outbound HTTP in unit tests.
+
+    Patches both the async and sync ``httpx`` send methods so accidental
+    real API calls fail loudly with a clear message rather than hanging or
+    leaking billing charges.  Integration tests that need real network access
+    must be decorated with ``@pytest.mark.integration`` and kept under
+    ``tests/integration/`` (excluded from the default pytest run via
+    ``norecursedirs``).
+    """
+    import httpx
+
+    _msg = (
+        "Unit test attempted a real network call — "
+        "mock the provider client or use pytest.mark.integration"
+    )
+
+    def _raise_async(self, *args, **kwargs):
+        raise RuntimeError(_msg)
+
+    def _raise_sync(self, *args, **kwargs):
+        raise RuntimeError(_msg)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", _raise_async)
+    monkeypatch.setattr(httpx.Client, "send", _raise_sync)
