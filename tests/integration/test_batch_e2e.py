@@ -4,63 +4,67 @@ Uses a single tiny request to minimize wait time. Polls aggressively.
 Typically completes in 2-15 minutes.
 """
 
-import sys
+import os
 
-sys.path.insert(0, ".")
+import pytest
 
-from dotenv import load_dotenv
 
-load_dotenv()
+@pytest.mark.integration
+@pytest.mark.skipif(not os.getenv("OPENAI_API_KEY"), reason="needs real OPENAI_API_KEY")
+def test_batch_e2e():
+    from dotenv import load_dotenv
 
-from accrue import EnrichmentConfig, LLMStep, Pipeline
+    load_dotenv()
 
-pipeline = Pipeline(
-    [
-        LLMStep(
-            "test",
-            fields={
-                "greeting": "Say hello to this person by name",
-            },
-            model="gpt-4.1-nano",
-            batch=True,
-        )
-    ]
-)
+    from accrue import EnrichmentConfig, LLMStep, Pipeline
 
-data = [{"person": "Alice"}]
+    pipeline = Pipeline(
+        [
+            LLMStep(
+                "test",
+                fields={
+                    "greeting": "Say hello to this person by name",
+                },
+                model="gpt-4.1-nano",
+                batch=True,
+            )
+        ]
+    )
 
-config = EnrichmentConfig(
-    enable_progress_bar=False,
-    batch_poll_interval=15.0,  # Check every 15 seconds
-    batch_timeout=1800.0,  # 30 minute timeout
-)
+    data = [{"person": "Alice"}]
 
-print("=== End-to-End Batch Test ===")
-print("Submitting 1 row via Batch API...")
-print("(Polling every 15s, timeout 30min)\n")
+    config = EnrichmentConfig(
+        enable_progress_bar=False,
+        batch_poll_interval=15.0,  # Check every 15 seconds
+        batch_timeout=1800.0,  # 30 minute timeout
+    )
 
-result = pipeline.run(data, config=config)
+    print("=== End-to-End Batch Test ===")
+    print("Submitting 1 row via Batch API...")
+    print("(Polling every 15s, timeout 30min)\n")
 
-print(f"Success rate: {result.success_rate:.0%}")
-print(f"Errors: {len(result.errors)}")
-print(f"Total tokens: {result.cost.total_tokens}")
+    result = pipeline.run(data, config=config)
 
-step_usage = result.cost.steps.get("test")
-if step_usage:
-    print(f"Execution mode: {step_usage.execution_mode}")
-    print(f"Batch ID: {step_usage.batch_id}")
+    print(f"Success rate: {result.success_rate:.0%}")
+    print(f"Errors: {len(result.errors)}")
+    print(f"Total tokens: {result.cost.total_tokens}")
 
-for row in result.data:
-    print(f"  Result: {row.get('greeting')}")
+    step_usage = result.cost.steps.get("test")
+    if step_usage:
+        print(f"Execution mode: {step_usage.execution_mode}")
+        print(f"Batch ID: {step_usage.batch_id}")
 
-assert result.success_rate == 1.0, f"Expected 100% success, got {result.success_rate}"
-assert result.cost.total_tokens > 0, "Expected token usage"
-assert step_usage.execution_mode == "batch"
-assert step_usage.batch_id is not None
+    for row in result.data:
+        print(f"  Result: {row.get('greeting')}")
 
-greeting = result.data[0].get("greeting", "")
-assert "Alice" in greeting or "alice" in greeting.lower(), (
-    f"Expected greeting to mention Alice: {greeting}"
-)
+    assert result.success_rate == 1.0, f"Expected 100% success, got {result.success_rate}"
+    assert result.cost.total_tokens > 0, "Expected token usage"
+    assert step_usage.execution_mode == "batch"
+    assert step_usage.batch_id is not None
 
-print("\n✓ End-to-end batch test PASSED")
+    greeting = result.data[0].get("greeting", "")
+    assert "Alice" in greeting or "alice" in greeting.lower(), (
+        f"Expected greeting to mention Alice: {greeting}"
+    )
+
+    print("\n✓ End-to-end batch test PASSED")
