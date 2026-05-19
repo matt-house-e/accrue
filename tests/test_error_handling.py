@@ -250,6 +250,59 @@ class TestLevelGatherSiblingsAwaited:
         assert step_tasks == [], f"Orphaned step tasks found: {step_tasks}"
 
 
+class TestSiblingExceptionLogging:
+    @pytest.mark.asyncio
+    async def test_sibling_exceptions_both_logged(self, caplog):
+        """Two parallel steps both raise; second exception is logged at WARNING."""
+        import logging
+
+        async def fail_a(ctx):
+            raise ValueError("step_a blew up")
+
+        async def fail_b(ctx):
+            raise RuntimeError("step_b blew up")
+
+        p = Pipeline(
+            [
+                FunctionStep("step_a", fn=fail_a, fields=["a"]),
+                FunctionStep("step_b", fn=fail_b, fields=["b"]),
+            ]
+        )
+        rows = [{"x": 1}]
+        config = EnrichmentConfig(on_error="raise", max_workers=2)
+
+        with caplog.at_level(logging.WARNING, logger="accrue.pipeline.pipeline"):
+            with pytest.raises((ValueError, RuntimeError)):
+                await p.execute(rows, all_fields={}, config=config)
+
+        # One of the two exceptions is logged as a sibling warning
+        sibling_warnings = [
+            r for r in caplog.records if "Sibling step in same level also raised" in r.message
+        ]
+        assert len(sibling_warnings) == 1
+        # The warning mentions the suppressed exception type
+        msg = sibling_warnings[0].message
+        assert "ValueError" in msg or "RuntimeError" in msg
+
+    @pytest.mark.asyncio
+    async def test_single_failure_no_sibling_warning(self, caplog):
+        """Single step failure: no sibling-suppressed warning emitted."""
+        import logging
+
+        p = Pipeline([_failing_step("s", ["f"], fail_indices={0})])
+        rows = [{"__idx": 0}]
+        config = EnrichmentConfig(on_error="raise", max_workers=1)
+
+        with caplog.at_level(logging.WARNING, logger="accrue.pipeline.pipeline"):
+            with pytest.raises(Exception):
+                await p.execute(rows, all_fields={}, config=config)
+
+        sibling_warnings = [
+            r for r in caplog.records if "Sibling step in same level also raised" in r.message
+        ]
+        assert sibling_warnings == []
+
+
 class TestOnErrorContinueRegression:
     @pytest.mark.asyncio
     async def test_continue_mode_collects_errors_and_succeeds(self):
