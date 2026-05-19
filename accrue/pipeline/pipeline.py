@@ -1185,13 +1185,24 @@ class Pipeline:
             )
 
         batch_ids: list[str] = []
-        for chunk in chunks:
-            bid = await client.submit_batch(
-                chunk,
-                metadata={"step": step.name, "pipeline": "accrue"},
-            )
-            batch_ids.append(bid)
-            logger.info("Step '%s': submitted batch %s (%d requests)", step.name, bid, len(chunk))
+        try:
+            for chunk in chunks:
+                bid = await client.submit_batch(
+                    chunk,
+                    metadata={"step": step.name, "pipeline": "accrue"},
+                )
+                batch_ids.append(bid)
+                logger.info(
+                    "Step '%s': submitted batch %s (%d requests)", step.name, bid, len(chunk)
+                )
+        except Exception:
+            # Best-effort cancel of already-submitted batches before propagating
+            if batch_ids:
+                await asyncio.gather(
+                    *(client.cancel_batch(bid) for bid in batch_ids),
+                    return_exceptions=True,
+                )
+            raise
 
         # ── Phase 4: Poll (with KeyboardInterrupt handling) ────────────
         from ..steps.providers.base import BatchResult
@@ -1213,7 +1224,7 @@ class Pipeline:
                 all_responses.update(batch_result.responses)
                 all_failed.extend(batch_result.failed_ids)
                 all_errors_map.update(batch_result.errors)
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, asyncio.CancelledError):
             logger.warning(
                 "KeyboardInterrupt — cancelling %d batch(es): %s",
                 len(batch_ids),
