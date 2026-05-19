@@ -394,10 +394,15 @@ class TestNanToNoneBoundary:
     """DataFrame → row dict conversion must replace NaN/NaT/pd.NA with None."""
 
     def _make_pipeline(self, captured: list):
-        """Return a pipeline that appends ctx.row['x'] to *captured*."""
+        """Return a pipeline that records ctx.row['x'] into *captured* by input index.
+
+        Uses an ``idx`` sentinel column on the input DataFrame so callers can
+        capture values by their original row index rather than completion order
+        (the streaming worker pool finishes rows non-deterministically).
+        """
 
         def fn(ctx: StepContext) -> dict[str, Any]:
-            captured.append(ctx.row["x"])
+            captured[ctx.row["idx"]] = ctx.row["x"]
             return {}
 
         return Pipeline([FunctionStep("capture", fn=fn, fields=[])])
@@ -405,36 +410,41 @@ class TestNanToNoneBoundary:
     @pytest.mark.asyncio
     async def test_float_nan_becomes_none(self):
         """float('nan') in a DataFrame column is converted to None before step.run."""
-        captured: list = []
+        captured: list = [object()] * 3
         p = self._make_pipeline(captured)
-        df = pd.DataFrame({"x": [1.0, float("nan"), 3.0]})
+        df = pd.DataFrame({"idx": [0, 1, 2], "x": [1.0, float("nan"), 3.0]})
         await p.run_async(df)
         assert captured[1] is None, f"expected None, got {captured[1]!r}"
 
     @pytest.mark.asyncio
     async def test_pd_na_becomes_none(self):
         """pd.NA in a DataFrame column is converted to None before step.run."""
-        captured: list = []
+        captured: list = [object()] * 3
         p = self._make_pipeline(captured)
-        df = pd.DataFrame({"x": pd.array([1, pd.NA, 3], dtype="Int64")})
+        df = pd.DataFrame({"idx": [0, 1, 2], "x": pd.array([1, pd.NA, 3], dtype="Int64")})
         await p.run_async(df)
         assert captured[1] is None, f"expected None, got {captured[1]!r}"
 
     @pytest.mark.asyncio
     async def test_nat_becomes_none(self):
         """pd.NaT in a datetime column is converted to None before step.run."""
-        captured: list = []
+        captured: list = [object()] * 3
         p = self._make_pipeline(captured)
-        df = pd.DataFrame({"x": pd.to_datetime(["2024-01-01", None, "2024-03-01"])})
+        df = pd.DataFrame(
+            {
+                "idx": [0, 1, 2],
+                "x": pd.to_datetime(["2024-01-01", None, "2024-03-01"]),
+            }
+        )
         await p.run_async(df)
         assert captured[1] is None, f"expected None, got {captured[1]!r}"
 
     @pytest.mark.asyncio
     async def test_none_roundtrips_as_none(self):
         """An explicit Python None in input stays None after conversion."""
-        captured: list = []
+        captured: list = [object()] * 3
         p = self._make_pipeline(captured)
-        df = pd.DataFrame({"x": [1, None, 3]})
+        df = pd.DataFrame({"idx": [0, 1, 2], "x": [1, None, 3]})
         await p.run_async(df)
         assert captured[1] is None, f"expected None, got {captured[1]!r}"
 
@@ -459,16 +469,18 @@ class TestNanToNoneBoundary:
         )
         df = pd.DataFrame({"x": [1.0, float("nan"), 3.0]})
         await p.run_async(df)
-        # Middle row should be skipped — None is falsy, nan is truthy
+        # Middle row should be skipped — None is falsy, nan is truthy.
+        # Compare as a set since completion order is non-deterministic under
+        # the streaming worker pool.
         assert len(skipped) == 2
-        assert 1.0 in skipped and 3.0 in skipped
+        assert set(skipped) == {1.0, 3.0}
 
     @pytest.mark.asyncio
     async def test_non_null_dataframe_regression(self):
         """Existing behaviour with fully-populated DataFrame is unchanged."""
-        captured: list = []
+        captured: list = [None] * 3
         p = self._make_pipeline(captured)
-        df = pd.DataFrame({"x": [10, 20, 30]})
+        df = pd.DataFrame({"idx": [0, 1, 2], "x": [10, 20, 30]})
         await p.run_async(df)
         assert captured == [10, 20, 30]
 
