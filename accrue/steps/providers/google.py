@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
 from ...schemas.base import UsageInfo
@@ -11,6 +12,10 @@ from ...schemas.grounding import Citation
 from .base import LLMAPIError, LLMResponse
 
 logger = logging.getLogger(__name__)
+
+# Word-boundary regex for rate-limit detection in Option-B fallback.
+# Avoids false positives on words like "iterate", "accelerator", "rated".
+_RATE_LIMIT_RE = re.compile(r"\b(rate[\s_-]?limit|resource\s+exhausted)\b", re.IGNORECASE)
 
 # Lazily resolved; populated once on first exception classification.
 # google-api-core ships with google-genai so it will normally be present,
@@ -174,6 +179,7 @@ def _classify_google_exc(exc: Exception, model: str) -> LLMAPIError:
             return LLMAPIError(
                 f"Google deadline exceeded for model '{model}': {exc}",
                 retryable=True,
+                status_code=408,
             )
         if isinstance(
             exc,
@@ -189,28 +195,30 @@ def _classify_google_exc(exc: Exception, model: str) -> LLMAPIError:
             )
 
     # Option B — substring heuristics (fallback for unknown types)
-    exc_str = str(exc).lower()
-    if "429" in exc_str or "resource exhausted" in exc_str or "rate" in exc_str:
+    exc_str = str(exc)
+    if "429" in exc_str or _RATE_LIMIT_RE.search(exc_str):
         return LLMAPIError(
             f"Google rate limit for model '{model}': {exc}",
             is_rate_limit=True,
             status_code=429,
         )
+    exc_str_lower = exc_str.lower()
     for code, marker in [
         (500, "internal server error"),
         (502, "bad gateway"),
         (503, "service unavailable"),
         (504, "gateway timeout"),
     ]:
-        if marker in exc_str:
+        if marker in exc_str_lower:
             return LLMAPIError(
                 f"Google server error for model '{model}': {exc}",
                 status_code=code,
             )
-    if "deadline exceeded" in exc_str or "timeout" in exc_str:
+    if "deadline exceeded" in exc_str_lower or "timeout" in exc_str_lower:
         return LLMAPIError(
             f"Google timeout for model '{model}': {exc}",
             retryable=True,
+            status_code=408,
         )
     return LLMAPIError(f"Google API error for model '{model}': {exc}")
 

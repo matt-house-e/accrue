@@ -58,10 +58,24 @@ def _typed_decoder(d: dict) -> Any:
     treated as encoded library values — any extra keys means it's user data
     and must be returned unchanged.  Dicts without ``__accrue_type__`` are
     also returned as-is (covers plain user data and the outer checkpoint
-    structure).  Old checkpoint files written with ``__type__`` (pre-#63)
-    pass through as plain dicts; they won't deserialise their typed values
-    but they won't crash either.
+    structure).
+
+    Legacy checkpoint files written with ``__type__`` (pre-1.2.1) would
+    silently produce plain dicts with incorrect types on resume.  We detect
+    this format and discard the checkpoint so the user gets a clean start
+    with a clear warning rather than a silent misparse.
     """
+    if d.keys() == {"__type__", "value"} and d["__type__"] in (
+        "datetime",
+        "Decimal",
+        "set",
+        "numpy",
+    ):
+        logger.warning(
+            "Legacy checkpoint format detected (pre-1.2.1 __type__ sentinel); "
+            "discarding checkpoint and starting fresh."
+        )
+        raise json.JSONDecodeError("Legacy checkpoint format — discarded", doc="", pos=0)
     if d.keys() != {"__accrue_type__", "value"}:
         return d
     t = d["__accrue_type__"]
@@ -266,6 +280,11 @@ class CheckpointManager:
                 f"({', '.join(data.completed_steps)})"
             )
             return data
+        except json.JSONDecodeError:
+            # JSONDecodeError is raised by _typed_decoder for legacy checkpoints
+            # (pre-1.2.1 __type__ sentinel) after logging a WARNING there.
+            # Return None to give the pipeline a clean start.
+            return None
         except Exception as e:
             logger.error(f"Failed to load checkpoint: {e}")
             return None

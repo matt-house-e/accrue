@@ -1444,3 +1444,69 @@ class TestGoogleClient:
         assert exc_info.value.retryable is True
         assert exc_info.value.is_rate_limit is True
         assert exc_info.value.status_code == 429
+
+    # -- Word-boundary regex (fix #80) ----------------------------------------
+
+    def _reload_google_no_api_core(self):
+        """Remove google.api_core so tests exercise the Option-B substring path."""
+        import importlib
+        import sys
+
+        self._install_mock_google()
+        sys.modules.pop("google.api_core", None)
+        sys.modules.pop("google.api_core.exceptions", None)
+        import accrue.steps.providers.google as _google_mod
+
+        importlib.reload(_google_mod)
+        from accrue.steps.providers.google import _classify_google_exc
+
+        return _classify_google_exc
+
+    def test_iterate_does_not_classify_as_rate_limit(self):
+        """'iterate' must NOT trigger the rate-limit branch (word-boundary guard)."""
+        classify = self._reload_google_no_api_core()
+        exc = Exception("failed to iterate over results")
+        result = classify(exc, "gemini-2.5-flash")
+        assert result.is_rate_limit is False
+
+    def test_rate_limit_string_does_classify_as_rate_limit(self):
+        """'rate limit' MUST trigger the rate-limit branch."""
+        classify = self._reload_google_no_api_core()
+        exc = Exception("rate limit exceeded for project")
+        result = classify(exc, "gemini-2.5-flash")
+        assert result.is_rate_limit is True
+        assert result.status_code == 429
+
+    def test_deadline_exceeded_sets_status_408_option_b(self):
+        """'deadline exceeded' in Option-B must set status_code=408."""
+        classify = self._reload_google_no_api_core()
+        exc = Exception("deadline exceeded waiting for response")
+        result = classify(exc, "gemini-2.5-flash")
+        assert result.status_code == 408
+        assert result.retryable is True
+
+    def test_deadline_exceeded_sets_status_408_option_a(self):
+        """DeadlineExceeded via typed Option-A path must set status_code=408."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        fake_deadline_exceeded = type("DeadlineExceeded", (Exception,), {})
+        fake_resource_exhausted = type("ResourceExhausted", (Exception,), {})
+        fake_service_unavailable = type("ServiceUnavailable", (Exception,), {})
+
+        # Build a namespace that mirrors the subset of google.api_core.exceptions
+        # that _classify_google_exc uses, then patch _gax_exc in the module directly.
+        fake_gax = SimpleNamespace(
+            ResourceExhausted=fake_resource_exhausted,
+            ServiceUnavailable=fake_service_unavailable,
+            DeadlineExceeded=fake_deadline_exceeded,
+        )
+
+        from accrue.steps.providers import google as _google_mod
+
+        with patch.object(_google_mod, "_gax_exc", fake_gax):
+            exc = fake_deadline_exceeded("deadline exceeded")
+            result = _google_mod._classify_google_exc(exc, "gemini-2.5-flash")
+
+        assert result.status_code == 408
+        assert result.retryable is True

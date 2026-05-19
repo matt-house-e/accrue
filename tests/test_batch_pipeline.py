@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -524,3 +525,36 @@ class TestBatchCancellationCleanup:
         client.cancel_batch.assert_not_called()
         assert result.data[0]["market_size"] == "$5B"
         assert result.data[1]["market_size"] == "$3B"
+
+    @pytest.mark.asyncio
+    async def test_cancel_failure_after_submit_failure_logs_warning(self, caplog):
+        """If cancel_batch raises during cleanup, a WARNING is logged before re-raise."""
+        submit_call_count = 0
+
+        async def submit_side_effect(requests, metadata=None):
+            nonlocal submit_call_count
+            submit_call_count += 1
+            if submit_call_count == 1:
+                return "batch_chunk_1"
+            raise RuntimeError("Submit failed on chunk 2")
+
+        async def cancel_side_effect(bid):
+            raise RuntimeError(f"cancel failed for {bid}")
+
+        client = AsyncMock(spec=["complete", "submit_batch", "poll_batch", "cancel_batch"])
+        client.complete = AsyncMock(return_value=_mock_llm_response('{"market_size": "$1B"}'))
+        client.submit_batch = submit_side_effect
+        client.poll_batch = AsyncMock()
+        client.cancel_batch = cancel_side_effect
+
+        step = _make_batch_step(client=client)
+        pipeline = Pipeline([step])
+        config = EnrichmentConfig(batch_max_requests=1)
+
+        with caplog.at_level(logging.WARNING, logger="accrue.pipeline.pipeline"):
+            with pytest.raises(RuntimeError, match="Submit failed"):
+                await pipeline.run_async([{"company": "Acme"}, {"company": "Beta"}], config=config)
+
+        assert "orphaned" in caplog.text.lower() or "billable" in caplog.text.lower(), (
+            "A warning about orphaned/billable batches must be logged when cancel fails"
+        )

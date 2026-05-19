@@ -531,3 +531,32 @@ class TestPartialCheckpoint:
         # Only step1 is completed; step2 must NOT appear.
         assert cp.completed_steps == ["step1"]
         assert "step2" not in cp.completed_steps
+
+
+# -- Legacy checkpoint format (fix #80) -------------------------------------
+
+
+class TestLegacyCheckpointDetection:
+    def test_legacy_type_sentinel_returns_none_and_warns(self, tmp_path, caplog):
+        """Pre-1.2.1 checkpoint using __type__ must be discarded with a WARNING."""
+        mgr = _make_mgr(tmp_path)
+
+        # Write a checkpoint file containing the old __type__ sentinel
+        legacy_payload = {
+            "timestamp": 1000.0,
+            "category": "cat",
+            "total_rows": 1,
+            "fields_dict": {"col": {}},
+            "completed_steps": ["step1"],
+            "step_results": {
+                "step1": [{"val": {"__type__": "datetime", "value": "2024-01-01T00:00:00"}}]
+            },
+        }
+        path = mgr._get_path("data", "cat")
+        path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING, logger="accrue.core.checkpoint"):
+            result = mgr.load("data", "cat")
+
+        assert result is None, "Legacy checkpoint must be discarded (return None)"
+        assert "Legacy checkpoint format" in caplog.text, "A WARNING must be logged"
