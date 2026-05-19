@@ -368,12 +368,22 @@ class TestCancelAndResume:
         num_rows = 10
         # rows_started tracks which row indices were actually processed by the step.
         rows_started: list[int] = []
+        # Deterministic synchronization: the main coroutine waits on this event
+        # so cancellation always lands while row 2 is mid-flight (rows 0-1 done,
+        # row 2 hanging, rows 3-9 not yet started).  This removes the timing
+        # dependency that made the previous version flaky on slow CI workers.
+        started_row_2 = asyncio.Event()
 
         async def slow_fn(ctx):
             row_idx = ctx.row.get("idx", -1)
             rows_started.append(row_idx)
-            # Introduce a small delay so we can cancel mid-flight.
-            await asyncio.sleep(0.05)
+            if row_idx == 2:
+                # Signal the main coroutine that row 2 has started, then hang
+                # long enough that cancellation arrives before the row finishes.
+                started_row_2.set()
+                await asyncio.sleep(10.0)
+            else:
+                await asyncio.sleep(0.01)
             return {"enriched": f"done_{row_idx}"}
 
         pipeline = Pipeline([FunctionStep("enrich", fn=slow_fn, fields=["enriched"])])
@@ -389,20 +399,20 @@ class TestCancelAndResume:
         enricher = Enricher(pipeline, config=config)
         df = pd.DataFrame({"idx": list(range(num_rows))})
 
-        # Run with a short timeout to force cancellation mid-step.
+        # Wait until row 2 is in-flight, then cancel — no wall-clock timeouts.
         task = asyncio.create_task(enricher.run_async(df, data_identifier="cancel_test"))
+        await started_row_2.wait()
+        task.cancel()
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=0.15)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
         # Confirm we actually cancelled before finishing all rows.
         assert len(rows_started) < num_rows, "Test setup error: all rows completed before cancel"
+        # And confirm row 2 was the in-flight row (so the partial checkpoint has
+        # results for rows 0,1 only — row 2 was cancelled mid-flight).
+        assert 2 in rows_started, "Row 2 should have started before cancel"
 
         # Now resume with a fresh Enricher and confirm no {} leaks downstream.
         rows_started.clear()
