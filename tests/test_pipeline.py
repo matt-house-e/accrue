@@ -394,10 +394,15 @@ class TestNanToNoneBoundary:
     """DataFrame → row dict conversion must replace NaN/NaT/pd.NA with None."""
 
     def _make_pipeline(self, captured: list):
-        """Return a pipeline that appends ctx.row['x'] to *captured*."""
+        """Return a pipeline that records ctx.row['x'] into *captured* by input index.
+
+        Uses an ``idx`` sentinel column on the input DataFrame so callers can
+        capture values by their original row index rather than completion order
+        (the streaming worker pool finishes rows non-deterministically).
+        """
 
         def fn(ctx: StepContext) -> dict[str, Any]:
-            captured.append(ctx.row["x"])
+            captured[ctx.row["idx"]] = ctx.row["x"]
             return {}
 
         return Pipeline([FunctionStep("capture", fn=fn, fields=[])])
@@ -405,36 +410,41 @@ class TestNanToNoneBoundary:
     @pytest.mark.asyncio
     async def test_float_nan_becomes_none(self):
         """float('nan') in a DataFrame column is converted to None before step.run."""
-        captured: list = []
+        captured: list = [object()] * 3
         p = self._make_pipeline(captured)
-        df = pd.DataFrame({"x": [1.0, float("nan"), 3.0]})
+        df = pd.DataFrame({"idx": [0, 1, 2], "x": [1.0, float("nan"), 3.0]})
         await p.run_async(df)
         assert captured[1] is None, f"expected None, got {captured[1]!r}"
 
     @pytest.mark.asyncio
     async def test_pd_na_becomes_none(self):
         """pd.NA in a DataFrame column is converted to None before step.run."""
-        captured: list = []
+        captured: list = [object()] * 3
         p = self._make_pipeline(captured)
-        df = pd.DataFrame({"x": pd.array([1, pd.NA, 3], dtype="Int64")})
+        df = pd.DataFrame({"idx": [0, 1, 2], "x": pd.array([1, pd.NA, 3], dtype="Int64")})
         await p.run_async(df)
         assert captured[1] is None, f"expected None, got {captured[1]!r}"
 
     @pytest.mark.asyncio
     async def test_nat_becomes_none(self):
         """pd.NaT in a datetime column is converted to None before step.run."""
-        captured: list = []
+        captured: list = [object()] * 3
         p = self._make_pipeline(captured)
-        df = pd.DataFrame({"x": pd.to_datetime(["2024-01-01", None, "2024-03-01"])})
+        df = pd.DataFrame(
+            {
+                "idx": [0, 1, 2],
+                "x": pd.to_datetime(["2024-01-01", None, "2024-03-01"]),
+            }
+        )
         await p.run_async(df)
         assert captured[1] is None, f"expected None, got {captured[1]!r}"
 
     @pytest.mark.asyncio
     async def test_none_roundtrips_as_none(self):
         """An explicit Python None in input stays None after conversion."""
-        captured: list = []
+        captured: list = [object()] * 3
         p = self._make_pipeline(captured)
-        df = pd.DataFrame({"x": [1, None, 3]})
+        df = pd.DataFrame({"idx": [0, 1, 2], "x": [1, None, 3]})
         await p.run_async(df)
         assert captured[1] is None, f"expected None, got {captured[1]!r}"
 
@@ -459,15 +469,69 @@ class TestNanToNoneBoundary:
         )
         df = pd.DataFrame({"x": [1.0, float("nan"), 3.0]})
         await p.run_async(df)
-        # Middle row should be skipped — None is falsy, nan is truthy
+        # Middle row should be skipped — None is falsy, nan is truthy.
+        # Compare as a set since completion order is non-deterministic under
+        # the streaming worker pool.
         assert len(skipped) == 2
-        assert 1.0 in skipped and 3.0 in skipped
+        assert set(skipped) == {1.0, 3.0}
 
     @pytest.mark.asyncio
     async def test_non_null_dataframe_regression(self):
         """Existing behaviour with fully-populated DataFrame is unchanged."""
-        captured: list = []
+        captured: list = [None] * 3
         p = self._make_pipeline(captured)
-        df = pd.DataFrame({"x": [10, 20, 30]})
+        df = pd.DataFrame({"idx": [0, 1, 2], "x": [10, 20, 30]})
         await p.run_async(df)
         assert captured == [10, 20, 30]
+
+
+# -- Worker-pool bounded task count ----------------------------------------
+
+
+class TestWorkerPoolBoundedTaskCount:
+    """Streaming worker pool: in-flight asyncio Task count stays bounded.
+
+    Before this refactor, all N row tasks were created up-front, so
+    asyncio.all_tasks() would show ~N tasks.  The new design uses a fixed
+    pool of max_workers workers, so in-flight tasks must stay bounded
+    regardless of row count.
+    """
+
+    @pytest.mark.asyncio
+    async def test_inflight_tasks_bounded_by_max_workers(self):
+        """1000 rows with max_workers=4 never spawns more than ~max_workers+overhead tasks."""
+        num_rows = 1000
+        max_workers = 4
+        # Overhead: workers + producer + pipeline-level tasks + test task itself.
+        # We use a generous ceiling (max_workers * 3) to avoid false positives.
+        task_ceiling = max_workers * 3
+
+        peak_task_count = 0
+
+        async def counting_fn(ctx: StepContext) -> dict[str, Any]:
+            nonlocal peak_task_count
+            current = len(asyncio.all_tasks())
+            if current > peak_task_count:
+                peak_task_count = current
+            # yield to the event loop so other tasks can be observed
+            await asyncio.sleep(0)
+            return {"v": 1}
+
+        from accrue.core.config import EnrichmentConfig
+
+        step = FunctionStep("count", fn=counting_fn, fields=["v"])
+        p = Pipeline([step])
+        rows = [{"i": i} for i in range(num_rows)]
+        config = EnrichmentConfig(max_workers=max_workers)
+
+        results, errors, cost = await p.execute(rows, all_fields={}, config=config)
+
+        assert errors == [], f"Unexpected errors: {errors}"
+        assert len(results) == num_rows
+        assert all(r.get("v") == 1 for r in results), "Some rows produced wrong output"
+
+        # Core assertion: in-flight task count stayed bounded
+        assert peak_task_count <= task_ceiling, (
+            f"Peak task count {peak_task_count} exceeded ceiling {task_ceiling}. "
+            f"The eager-creation regression may have been reintroduced."
+        )

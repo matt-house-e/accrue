@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Checkpoint: pre-1.2.1 files using the legacy `__type__` sentinel are now detected, logged as a `WARNING`, and discarded so pipelines resume cleanly instead of silently misreading typed values. (#80)
 - Pipeline: submit-batch cleanup now logs a `WARNING` for any `cancel_batch` failures so users know if orphaned batches may still be billable after a submit error. (#80)
 
+### Performance
+- **Streaming worker pool** replaces eager `asyncio.Task` materialization in the realtime pipeline path. Previously, running a step across N rows created N pending tasks up-front; for 50k rows × multi-step pipelines that meant hundreds of thousands of objects in the event-loop's ready queue. The new design keeps a fixed pool of `max_workers` tasks pulling from a bounded `asyncio.Queue`, so memory and scheduling overhead is O(max_workers) regardless of row count. All existing semantics are preserved: `on_error="raise"/"continue"`, hooks, caching, `run_if`/`skip_if` predicates, checkpointing, and cancellation drain. (#78)
+
 ### Internal
 - `AnthropicClient._warned_grounding_schema` is per-client-instance scope (not per-process). `LLMStep` constructs a fresh client per `Pipeline.run_async()` call, so the grounding-schema incompatibility warning fires once per run. (#80)
 
