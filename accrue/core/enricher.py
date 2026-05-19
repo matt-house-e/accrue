@@ -114,22 +114,20 @@ class Enricher:
         completed_steps: list[str] = []
         checkpoint_results: dict[str, list[dict[str, Any]]] = {}
 
-        cp = self._checkpoint.load(data_identifier, category)
+        cp = self._checkpoint.load(
+            data_identifier,
+            category,
+            expected_total_rows=len(df),
+            expected_fields=fields_dict,
+            expected_steps=self.pipeline.step_names,
+        )
         if cp is not None:
-            # Validate checkpoint compatibility
-            if cp.total_rows != len(df):
-                logger.warning(
-                    f"Checkpoint row count mismatch ({cp.total_rows} vs {len(df)}), starting fresh"
-                )
-            elif cp.fields_dict != fields_dict:
-                logger.warning("Checkpoint fields_dict mismatch, starting fresh")
-            else:
-                completed_steps = list(cp.completed_steps)
-                prior_step_results = {
-                    k: v for k, v in cp.step_results.items() if k in cp.completed_steps
-                }
-                checkpoint_results = dict(prior_step_results)
-                logger.info(f"Resuming from checkpoint: skipping {completed_steps}")
+            completed_steps = list(cp.completed_steps)
+            prior_step_results = {
+                k: v for k, v in cp.step_results.items() if k in cp.completed_steps
+            }
+            checkpoint_results = dict(prior_step_results)
+            logger.info(f"Resuming from checkpoint: skipping {completed_steps}")
 
         # Convert DataFrame to rows
         rows = df.to_dict(orient="records")
