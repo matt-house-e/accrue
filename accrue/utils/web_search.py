@@ -19,6 +19,7 @@ Example::
 from __future__ import annotations
 
 import os
+import uuid
 from typing import Any, Awaitable, Callable
 
 from ..core.exceptions import ConfigurationError
@@ -66,9 +67,11 @@ def web_search(
 
     Returns:
         ``{"__web_context": str, "sources": list[str]}`` — the
-        ``__web_context`` value is wrapped in
-        ``<untrusted_web_search_results>`` tags to isolate raw search
-        content from downstream LLM instructions (OWASP LLM01 mitigation).
+        ``__web_context`` value is wrapped in a per-call random boundary tag
+        (e.g. ``<untrusted-a3f9c2d01b4e>...</untrusted-a3f9c2d01b4e>``) to
+        isolate raw search content from downstream LLM instructions (OWASP
+        LLM01 mitigation).  The boundary is randomised each call so that a
+        malicious page cannot embed the closing tag to escape the wrapper.
     """
     # Eager validation
     if search_context_size not in _VALID_CONTEXT_SIZES:
@@ -151,11 +154,17 @@ def web_search(
             if not include_sources:
                 sources = []
 
-            # Fix #1: Wrap raw search output in isolation tags so downstream LLM steps
-            # treat it as data rather than instructions (OWASP LLM01 prompt-injection mitigation).
-            web_context = (
-                f"<untrusted_web_search_results>\n{web_text}\n</untrusted_web_search_results>"
-            )
+            # Fix #1: Wrap raw search output in a per-call random boundary tag so
+            # downstream LLM steps treat it as data rather than instructions (OWASP
+            # LLM01 prompt-injection mitigation).  A static tag is bypassable by a
+            # malicious page embedding the literal closing tag; a random boundary
+            # defeats that attack because the attacker cannot predict it.
+            boundary = f"untrusted-{uuid.uuid4().hex[:12]}"
+            # Belt-and-suspenders: if the boundary appears in the content
+            # (vanishingly unlikely with a random hex token), pick a new one.
+            while f"</{boundary}>" in web_text:
+                boundary = f"untrusted-{uuid.uuid4().hex[:12]}"
+            web_context = f"<{boundary}>\n{web_text}\n</{boundary}>"
             return {"__web_context": web_context, "sources": sources}
 
         except (APIError, RateLimitError, APITimeoutError) as exc:
