@@ -416,6 +416,35 @@ class TestTypedSerializer:
                 existing_results={},
             )
 
+    def test_user_dict_with_dunder_type_key_round_trips_unchanged(self, tmp_path):
+        """User data containing '__type__' must survive save+load without interpretation."""
+        mgr = _make_mgr(tmp_path)
+        user_record = {"__type__": "user_tag", "value": "x"}
+
+        result = self._round_trip(mgr, user_record, tmp_path)
+
+        assert result == user_record
+        assert result["__type__"] == "user_tag"
+
+    def test_tmp_file_cleaned_up_on_encoder_failure(self, tmp_path):
+        """A TypeError mid-encode must unlink the .tmp file before re-raising."""
+        mgr = _make_mgr(tmp_path)
+
+        with pytest.raises(TypeError):
+            mgr.save_step(
+                data_identifier="data",
+                category="cat",
+                step_name="s",
+                step_row_results=[{"val": complex(1, 2)}],
+                total_rows=1,
+                fields_dict=FIELDS,
+                existing_completed=[],
+                existing_results={},
+            )
+
+        tmp_files = list(tmp_path.glob("*.tmp"))
+        assert tmp_files == [], f"Orphaned .tmp files found: {tmp_files}"
+
 
 # -- partial checkpoint (partial=True) ---------------------------------------
 

@@ -32,15 +32,20 @@ except ImportError:
 
 
 def _typed_encoder(obj: Any) -> Any:
-    """JSON encoder that preserves Python types across checkpoint round-trips."""
+    """JSON encoder that preserves Python types across checkpoint round-trips.
+
+    Encoded values are written as ``{"__accrue_type__": "<type>", "value": ...}``.
+    The namespaced key avoids collision with user data that uses ``__type__``
+    as its own discriminator (common in typed-union JSON patterns).
+    """
     if isinstance(obj, datetime):
-        return {"__type__": "datetime", "value": obj.isoformat()}
+        return {"__accrue_type__": "datetime", "value": obj.isoformat()}
     if isinstance(obj, Decimal):
-        return {"__type__": "Decimal", "value": str(obj)}
+        return {"__accrue_type__": "Decimal", "value": str(obj)}
     if isinstance(obj, set):
-        return {"__type__": "set", "value": sorted(obj, key=str)}
+        return {"__accrue_type__": "set", "value": sorted(obj, key=str)}
     if _numpy is not None and hasattr(obj, "tolist"):
-        return {"__type__": "numpy", "value": obj.tolist()}
+        return {"__accrue_type__": "numpy", "value": obj.tolist()}
     raise TypeError(
         f"Object of type {type(obj).__name__} is not JSON serializable for checkpointing"
     )
@@ -49,10 +54,17 @@ def _typed_encoder(obj: Any) -> Any:
 def _typed_decoder(d: dict) -> Any:
     """JSON object_hook that restores typed values written by _typed_encoder.
 
-    Dicts without a ``__type__`` key are returned as-is so that legacy
-    checkpoint files (pre-typed-encoder) load correctly.
+    Only dicts with exactly the keys ``{"__accrue_type__", "value"}`` are
+    treated as encoded library values — any extra keys means it's user data
+    and must be returned unchanged.  Dicts without ``__accrue_type__`` are
+    also returned as-is (covers plain user data and the outer checkpoint
+    structure).  Old checkpoint files written with ``__type__`` (pre-#63)
+    pass through as plain dicts; they won't deserialise their typed values
+    but they won't crash either.
     """
-    t = d.get("__type__")
+    if d.keys() != {"__accrue_type__", "value"}:
+        return d
+    t = d["__accrue_type__"]
     if t == "datetime":
         return datetime.fromisoformat(d["value"])
     if t == "Decimal":
@@ -155,14 +167,18 @@ class CheckpointManager:
             "step_results": results,
         }
 
+        path = self._get_path(data_identifier, category)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
         try:
-            path = self._get_path(data_identifier, category)
-            tmp_path = path.with_suffix(path.suffix + ".tmp")
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, default=_typed_encoder, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, path)
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, default=_typed_encoder, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, path)
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
             logger.info(f"Checkpoint saved after step '{step_name}': {path}")
             return True
         except TypeError:
