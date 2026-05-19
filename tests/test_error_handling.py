@@ -147,6 +147,44 @@ class TestRowError:
         err = RowError(row_index=0, step_name="s", error=StepError("fail"))
         assert err.error_type == "StepError"
 
+    # -- secret sanitization --------------------------------------------------
+
+    def test_api_key_sk_redacted(self):
+        """sk-... API key in exception message is redacted from __str__."""
+        key = "sk-abc123def456ghi789jklmnop"
+        err = RowError(row_index=0, step_name="s", error=ValueError(f"auth failed: {key}"))
+        s = str(err)
+        assert "***REDACTED***" in s
+        assert key not in s
+
+    def test_bearer_token_redacted(self):
+        """Bearer token in exception message is redacted from __str__."""
+        err = RowError(
+            row_index=1,
+            step_name="s",
+            error=ValueError("401: Authorization: Bearer eyJh.abc.def"),
+        )
+        s = str(err)
+        assert "***REDACTED***" in s
+        assert "eyJh.abc.def" not in s
+
+    def test_api_key_param_redacted(self):
+        """api_key=... in exception message is redacted from __str__."""
+        err = RowError(
+            row_index=2,
+            step_name="s",
+            error=ValueError("api_key=sk-xyz failed"),
+        )
+        s = str(err)
+        assert "***REDACTED***" in s
+        assert "sk-xyz" not in s
+
+    def test_plain_error_unchanged(self):
+        """Plain English error messages pass through unsanitized."""
+        msg = "missing required field 'company'"
+        err = RowError(row_index=3, step_name="s", error=ValueError(msg))
+        assert msg in str(err)
+
 
 # -- Enricher integration with errors ----------------------------------------
 

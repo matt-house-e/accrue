@@ -7,8 +7,23 @@ with helpful error messages and context.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
+
+_SECRET_PATTERNS = [
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+"),
+    re.compile(r"(?i)authorization\s*:\s*\S+"),
+    re.compile(r"(?i)api[_-]?key\s*[:=]\s*\S+"),
+]
+
+
+def _sanitize_secrets(s: str) -> str:
+    """Replace known secret patterns with a redaction marker."""
+    for pat in _SECRET_PATTERNS:
+        s = pat.sub("***REDACTED***", s)
+    return s
 
 
 class EnrichmentError(Exception):
@@ -95,7 +110,7 @@ class RowError:
             self.error_type = type(self.error).__name__
 
     def __str__(self) -> str:
-        return (
+        return _sanitize_secrets(
             f"RowError(row={self.row_index}, step='{self.step_name}', "
             f"{self.error_type}: {self.error})"
         )
