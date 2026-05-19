@@ -129,8 +129,10 @@ class Enricher:
             checkpoint_results = dict(prior_step_results)
             logger.info(f"Resuming from checkpoint: skipping {completed_steps}")
 
-        # Convert DataFrame to rows
-        rows = df.to_dict(orient="records")
+        # Convert DataFrame to rows, replacing NaN/NaT/pd.NA with None.
+        # astype(object) is required first; otherwise float columns keep nan
+        # even after where(..., None) because pandas preserves dtype.
+        rows = df.astype(object).where(pd.notna(df), None).to_dict(orient="records")
 
         # Build on_step_complete callback for checkpointing
         cb_completed = list(completed_steps)

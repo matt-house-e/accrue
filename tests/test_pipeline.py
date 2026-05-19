@@ -385,3 +385,89 @@ class TestMergeResultsIntoDf:
         accumulated = [{"b": "val"}]
         with pytest.raises(ValueError, match="duplicate column names"):
             _merge_results_into_df(df, accumulated, overwrite_fields=True)
+
+
+# -- NaN → None boundary conversion -----------------------------------------
+
+
+class TestNanToNoneBoundary:
+    """DataFrame → row dict conversion must replace NaN/NaT/pd.NA with None."""
+
+    def _make_pipeline(self, captured: list):
+        """Return a pipeline that appends ctx.row['x'] to *captured*."""
+
+        def fn(ctx: StepContext) -> dict[str, Any]:
+            captured.append(ctx.row["x"])
+            return {}
+
+        return Pipeline([FunctionStep("capture", fn=fn, fields=[])])
+
+    @pytest.mark.asyncio
+    async def test_float_nan_becomes_none(self):
+        """float('nan') in a DataFrame column is converted to None before step.run."""
+        captured: list = []
+        p = self._make_pipeline(captured)
+        df = pd.DataFrame({"x": [1.0, float("nan"), 3.0]})
+        await p.run_async(df)
+        assert captured[1] is None, f"expected None, got {captured[1]!r}"
+
+    @pytest.mark.asyncio
+    async def test_pd_na_becomes_none(self):
+        """pd.NA in a DataFrame column is converted to None before step.run."""
+        captured: list = []
+        p = self._make_pipeline(captured)
+        df = pd.DataFrame({"x": pd.array([1, pd.NA, 3], dtype="Int64")})
+        await p.run_async(df)
+        assert captured[1] is None, f"expected None, got {captured[1]!r}"
+
+    @pytest.mark.asyncio
+    async def test_nat_becomes_none(self):
+        """pd.NaT in a datetime column is converted to None before step.run."""
+        captured: list = []
+        p = self._make_pipeline(captured)
+        df = pd.DataFrame({"x": pd.to_datetime(["2024-01-01", None, "2024-03-01"])})
+        await p.run_async(df)
+        assert captured[1] is None, f"expected None, got {captured[1]!r}"
+
+    @pytest.mark.asyncio
+    async def test_none_roundtrips_as_none(self):
+        """An explicit Python None in input stays None after conversion."""
+        captured: list = []
+        p = self._make_pipeline(captured)
+        df = pd.DataFrame({"x": [1, None, 3]})
+        await p.run_async(df)
+        assert captured[1] is None, f"expected None, got {captured[1]!r}"
+
+    @pytest.mark.asyncio
+    async def test_run_if_predicate_is_falsy_for_nan_was_none(self):
+        """run_if lambda receives None (not nan) so the predicate evaluates falsy."""
+        skipped: list = []
+
+        def fn(ctx: StepContext) -> dict[str, Any]:
+            skipped.append(ctx.row["x"])
+            return {}
+
+        p = Pipeline(
+            [
+                FunctionStep(
+                    "conditional",
+                    fn=fn,
+                    fields=[],
+                    run_if=lambda row, _prior: row.get("x"),
+                )
+            ]
+        )
+        df = pd.DataFrame({"x": [1.0, float("nan"), 3.0]})
+        await p.run_async(df)
+        # Middle row should be skipped — None is falsy, nan is truthy
+        assert len(skipped) == 2
+        assert 1.0 in skipped and 3.0 in skipped
+
+    @pytest.mark.asyncio
+    async def test_non_null_dataframe_regression(self):
+        """Existing behaviour with fully-populated DataFrame is unchanged."""
+        captured: list = []
+        p = self._make_pipeline(captured)
+        df = pd.DataFrame({"x": [10, 20, 30]})
+        await p.run_async(df)
+        assert captured == [10, 20, 30]

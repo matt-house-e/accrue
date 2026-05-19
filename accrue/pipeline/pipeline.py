@@ -338,7 +338,7 @@ class Pipeline:
             rows = data
             input_is_list = True
         else:
-            rows = data.to_dict(orient="records")
+            rows = data.astype(object).where(pd.notna(data), None).to_dict(orient="records")
             input_is_list = False
 
         # Set up cache manager
