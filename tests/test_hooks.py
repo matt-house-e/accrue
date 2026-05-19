@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -300,3 +301,94 @@ class TestHooksIntegration:
         s2_events = [e for e in events if e.step_name == "s2"]
         assert len(s1_events) == 2
         assert len(s2_events) == 2
+
+
+# ---------------------------------------------------------------------------
+# Performance + correctness tests for fire-async, drain-at-step-end
+# ---------------------------------------------------------------------------
+
+
+class TestHooksFireAsync:
+    @pytest.mark.asyncio
+    async def test_sync_hook_with_delay_does_not_serialize(self):
+        """50 rows × 100ms sync hook must finish well under 5s total.
+
+        Without the fix each hook would be awaited sequentially, totalling ~5s.
+        With asyncio.to_thread + create_task they run concurrently and the wall
+        time should be ~0.1s + overhead (under 2s is a generous bound).
+        """
+
+        def slow_hook(event):
+            time.sleep(0.1)
+
+        hooks = EnrichmentHooks(on_row_complete=slow_hook)
+        pipeline = Pipeline([_MockStep("s1", fields=["f1"])])
+        rows = [{"x": i} for i in range(50)]
+
+        start = time.monotonic()
+        await pipeline.run_async(rows, hooks=hooks)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 2.0, f"Hooks appear to be serializing: {elapsed:.2f}s (want < 2s)"
+
+    @pytest.mark.asyncio
+    async def test_async_hook_drained_before_step_complete(self):
+        """Async hook with internal await must be fully awaited before step returns.
+
+        The hook appends a first entry, sleeps briefly, then appends a second.
+        Both entries must be present when the pipeline returns — if hooks were
+        fire-and-forget (not drained) only the first entry would be there.
+        """
+        log: list[str] = []
+
+        async def two_part_hook(event):
+            log.append(f"first:{event.row_index}")
+            await asyncio.sleep(0.01)
+            log.append(f"second:{event.row_index}")
+
+        hooks = EnrichmentHooks(on_row_complete=two_part_hook)
+        pipeline = Pipeline([_MockStep("s1", fields=["f1"])])
+        await pipeline.run_async([{"x": 0}, {"x": 1}], hooks=hooks)
+
+        first_entries = [e for e in log if e.startswith("first:")]
+        second_entries = [e for e in log if e.startswith("second:")]
+        assert len(first_entries) == 2, "Expected 2 'first' hook entries"
+        assert len(second_entries) == 2, "Expected 2 'second' hook entries (drain incomplete)"
+
+    @pytest.mark.asyncio
+    async def test_hook_exception_does_not_crash_pipeline(self):
+        """A hook that raises must not propagate to the pipeline caller."""
+
+        def crashing_hook(event):
+            raise RuntimeError("hook exploded in async path")
+
+        hooks = EnrichmentHooks(on_row_complete=crashing_hook)
+        pipeline = Pipeline([_MockStep("s1", fields=["f1"])])
+        rows = [{"x": i} for i in range(5)]
+
+        result = await pipeline.run_async(rows, hooks=hooks)
+        # Pipeline should complete with all rows present
+        assert len(result.data) == 5
+
+    @pytest.mark.asyncio
+    async def test_step_level_hooks_remain_serial(self):
+        """on_step_end for step 1 fires BEFORE on_step_start for step 2."""
+        log: list[str] = []
+
+        def on_start(e):
+            log.append(f"start:{e.step_name}")
+
+        def on_end(e):
+            log.append(f"end:{e.step_name}")
+
+        hooks = EnrichmentHooks(on_step_start=on_start, on_step_end=on_end)
+        pipeline = Pipeline(
+            [
+                _MockStep("s1", fields=["f1"]),
+                _MockStep("s2", fields=["f2"], depends_on=["s1"]),
+            ]
+        )
+        await pipeline.run_async([{"x": 1}], hooks=hooks)
+
+        # Strict ordering: start:s1, end:s1, start:s2, end:s2
+        assert log == ["start:s1", "end:s1", "start:s2", "end:s2"]

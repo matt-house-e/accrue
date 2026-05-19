@@ -833,6 +833,7 @@ class Pipeline:
 
             tasks = [asyncio.create_task(tracked_row(i)) for i in range(num_rows)]
             completed_count = 0
+            hook_tasks: list[asyncio.Task] = []
             try:
                 for coro in asyncio.as_completed(tasks):
                     idx, result_or_none, exc = await coro
@@ -852,18 +853,23 @@ class Pipeline:
                             exc,
                         )
 
-                        # Fire on_row_complete for error
-                        await _fire_hook(
-                            hooks.on_row_complete,
-                            RowCompleteEvent(
-                                step_name=step.name,
-                                row_index=idx,
-                                values={f: None for f in step.fields},
-                                error=exc,
-                                from_cache=False,
-                                skipped=row_was_skipped[idx],
-                            ),
-                        )
+                        # Fire on_row_complete as background task (non-blocking)
+                        if hooks.on_row_complete:
+                            hook_tasks.append(
+                                asyncio.create_task(
+                                    _fire_hook(
+                                        hooks.on_row_complete,
+                                        RowCompleteEvent(
+                                            step_name=step.name,
+                                            row_index=idx,
+                                            values={f: None for f in step.fields},
+                                            error=exc,
+                                            from_cache=False,
+                                            skipped=row_was_skipped[idx],
+                                        ),
+                                    )
+                                )
+                            )
 
                         if on_error == "raise":
                             step_values[step.name] = results
@@ -872,35 +878,49 @@ class Pipeline:
                                 if not t.done():
                                     t.cancel()
                             await asyncio.gather(*tasks, return_exceptions=True)
+                            if hook_tasks:
+                                await asyncio.gather(*hook_tasks, return_exceptions=True)
                             raise exc
                     else:
                         results[idx] = result_or_none.values
                         if result_or_none.usage:
                             usage_list.append(result_or_none.usage)
 
-                        # Fire on_row_complete for success
-                        await _fire_hook(
-                            hooks.on_row_complete,
-                            RowCompleteEvent(
-                                step_name=step.name,
-                                row_index=idx,
-                                values=result_or_none.values,
-                                error=None,
-                                from_cache=row_from_cache[idx],
-                                skipped=row_was_skipped[idx],
-                            ),
-                        )
+                        # Fire on_row_complete as background task (non-blocking)
+                        if hooks.on_row_complete:
+                            hook_tasks.append(
+                                asyncio.create_task(
+                                    _fire_hook(
+                                        hooks.on_row_complete,
+                                        RowCompleteEvent(
+                                            step_name=step.name,
+                                            row_index=idx,
+                                            values=result_or_none.values,
+                                            error=None,
+                                            from_cache=row_from_cache[idx],
+                                            skipped=row_was_skipped[idx],
+                                        ),
+                                    )
+                                )
+                            )
 
                     completed_count += 1
                     row_bar.update(1)
                     if completed_count % checkpoint_interval == 0:
                         on_partial_checkpoint(step.name, results, completed_count)
+
+                # Drain all background hook tasks before the step is declared complete
+                if hook_tasks:
+                    await asyncio.gather(*hook_tasks, return_exceptions=True)
             except (asyncio.CancelledError, KeyboardInterrupt):
                 # Drain all in-flight tasks so they don't race teardown
                 for t in tasks:
                     if not t.done():
                         t.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+                # Drain hook tasks before re-raising
+                if hook_tasks:
+                    await asyncio.gather(*hook_tasks, return_exceptions=True)
                 # Persist whatever was accumulated so resume works
                 step_values[step.name] = results
                 if on_partial_checkpoint is not None and completed_count > 0:
@@ -915,6 +935,7 @@ class Pipeline:
                     return (idx, None, exc)
 
             tasks = [asyncio.create_task(_tracked_row(i)) for i in range(num_rows)]
+            hook_tasks_plain: list[asyncio.Task] = []
             for coro in asyncio.as_completed(tasks):
                 idx, result_or_none, exc = await coro
                 row_bar.update(1)
@@ -934,18 +955,23 @@ class Pipeline:
                         exc,
                     )
 
-                    # Fire on_row_complete for error
-                    await _fire_hook(
-                        hooks.on_row_complete,
-                        RowCompleteEvent(
-                            step_name=step.name,
-                            row_index=idx,
-                            values={f: None for f in step.fields},
-                            error=exc,
-                            from_cache=False,
-                            skipped=row_was_skipped[idx],
-                        ),
-                    )
+                    # Fire on_row_complete as background task (non-blocking)
+                    if hooks.on_row_complete:
+                        hook_tasks_plain.append(
+                            asyncio.create_task(
+                                _fire_hook(
+                                    hooks.on_row_complete,
+                                    RowCompleteEvent(
+                                        step_name=step.name,
+                                        row_index=idx,
+                                        values={f: None for f in step.fields},
+                                        error=exc,
+                                        from_cache=False,
+                                        skipped=row_was_skipped[idx],
+                                    ),
+                                )
+                            )
+                        )
 
                     if on_error == "raise":
                         step_values[step.name] = results
@@ -954,24 +980,35 @@ class Pipeline:
                             if not t.done():
                                 t.cancel()
                         await asyncio.gather(*tasks, return_exceptions=True)
+                        if hook_tasks_plain:
+                            await asyncio.gather(*hook_tasks_plain, return_exceptions=True)
                         raise exc
                 else:
                     results[idx] = result_or_none.values
                     if result_or_none.usage:
                         usage_list.append(result_or_none.usage)
 
-                    # Fire on_row_complete for success
-                    await _fire_hook(
-                        hooks.on_row_complete,
-                        RowCompleteEvent(
-                            step_name=step.name,
-                            row_index=idx,
-                            values=result_or_none.values,
-                            error=None,
-                            from_cache=row_from_cache[idx],
-                            skipped=row_was_skipped[idx],
-                        ),
-                    )
+                    # Fire on_row_complete as background task (non-blocking)
+                    if hooks.on_row_complete:
+                        hook_tasks_plain.append(
+                            asyncio.create_task(
+                                _fire_hook(
+                                    hooks.on_row_complete,
+                                    RowCompleteEvent(
+                                        step_name=step.name,
+                                        row_index=idx,
+                                        values=result_or_none.values,
+                                        error=None,
+                                        from_cache=row_from_cache[idx],
+                                        skipped=row_was_skipped[idx],
+                                    ),
+                                )
+                            )
+                        )
+
+            # Drain all background hook tasks before the step is declared complete
+            if hook_tasks_plain:
+                await asyncio.gather(*hook_tasks_plain, return_exceptions=True)
 
         row_bar.close()
 
@@ -1117,19 +1154,27 @@ class Pipeline:
                     execution_mode="batch",
                 )
 
-            # Fire hooks for cached/skipped rows
+            # Fire hooks for cached/skipped rows as background tasks, then drain
+            hook_tasks_cached: list[asyncio.Task] = []
             for idx in range(num_rows):
-                await _fire_hook(
-                    hooks.on_row_complete,
-                    RowCompleteEvent(
-                        step_name=step.name,
-                        row_index=idx,
-                        values=results[idx],
-                        error=None,
-                        from_cache=row_from_cache[idx],
-                        skipped=row_was_skipped[idx],
-                    ),
-                )
+                if hooks.on_row_complete:
+                    hook_tasks_cached.append(
+                        asyncio.create_task(
+                            _fire_hook(
+                                hooks.on_row_complete,
+                                RowCompleteEvent(
+                                    step_name=step.name,
+                                    row_index=idx,
+                                    values=results[idx],
+                                    error=None,
+                                    from_cache=row_from_cache[idx],
+                                    skipped=row_was_skipped[idx],
+                                ),
+                            )
+                        )
+                    )
+            if hook_tasks_cached:
+                await asyncio.gather(*hook_tasks_cached, return_exceptions=True)
 
             elapsed = _time.monotonic() - step_start
             return errors, step_usage, elapsed
@@ -1328,20 +1373,28 @@ class Pipeline:
         # ── Phase 7: Merge and finalize ────────────────────────────────
         step_values[step.name] = results
 
-        # Fire hooks for all rows
+        # Fire hooks for all rows as background tasks, then drain
+        hook_tasks_batch: list[asyncio.Task] = []
         for idx in range(num_rows):
-            error_obj = next((e.error for e in errors if e.row_index == idx), None)
-            await _fire_hook(
-                hooks.on_row_complete,
-                RowCompleteEvent(
-                    step_name=step.name,
-                    row_index=idx,
-                    values=results[idx],
-                    error=error_obj,
-                    from_cache=row_from_cache[idx],
-                    skipped=row_was_skipped[idx],
-                ),
-            )
+            if hooks.on_row_complete:
+                error_obj = next((e.error for e in errors if e.row_index == idx), None)
+                hook_tasks_batch.append(
+                    asyncio.create_task(
+                        _fire_hook(
+                            hooks.on_row_complete,
+                            RowCompleteEvent(
+                                step_name=step.name,
+                                row_index=idx,
+                                values=results[idx],
+                                error=error_obj,
+                                from_cache=row_from_cache[idx],
+                                skipped=row_was_skipped[idx],
+                            ),
+                        )
+                    )
+                )
+        if hook_tasks_batch:
+            await asyncio.gather(*hook_tasks_batch, return_exceptions=True)
 
         # Build step usage
         step_usage: StepUsage | None = None
