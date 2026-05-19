@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -54,6 +55,11 @@ class CacheManager:
             db_path = self._cache_dir / "cache.db"
 
             conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            if os.name == "posix":
+                try:
+                    os.chmod(db_path, 0o600)
+                except (OSError, NotImplementedError):
+                    pass
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("PRAGMA synchronous=NORMAL")

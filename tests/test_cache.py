@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import concurrent.futures
+import os
 import sqlite3
+import sys
 import threading
 import time
 from unittest.mock import patch
+
+import pytest
 
 from accrue.core.cache import (
     CacheManager,
@@ -14,6 +18,7 @@ from accrue.core.cache import (
     canonical_json,
     compute_cache_key,
 )
+from accrue.core.config import EnrichmentConfig
 
 # ---------------------------------------------------------------------------
 # CacheManager
@@ -411,3 +416,39 @@ class TestComputeStepCacheKey:
         # FunctionStep has no model — confirm it takes the function path
         assert not hasattr(step, "max_tokens")
         assert not hasattr(step, "provider_kwargs")
+
+
+# ---------------------------------------------------------------------------
+# XDG defaults + 0o600 permissions
+# ---------------------------------------------------------------------------
+
+
+class TestXdgCacheDirDefault:
+    def test_xdg_cache_home_respected(self, monkeypatch, tmp_path):
+        """XDG_CACHE_HOME is used as the base for cache_dir."""
+        xdg_cache = str(tmp_path / "xdg_cache")
+        monkeypatch.setenv("XDG_CACHE_HOME", xdg_cache)
+        config = EnrichmentConfig()
+        assert config.cache_dir == os.path.join(xdg_cache, "accrue")
+
+    def test_fallback_to_home_cache_when_xdg_unset(self, monkeypatch):
+        """Falls back to ~/.cache/accrue when XDG_CACHE_HOME is unset."""
+        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+        config = EnrichmentConfig()
+        expected = os.path.join(os.path.expanduser("~"), ".cache", "accrue")
+        assert config.cache_dir == expected
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only chmod")
+    def test_cache_db_has_0o600_permissions(self, tmp_path):
+        """cache.db is created with 0o600 permissions."""
+        mgr = CacheManager(cache_dir=str(tmp_path), ttl=3600)
+        mgr.set("k", "step", {"v": 1})
+        stat = (tmp_path / "cache.db").stat()
+        assert stat.st_mode & 0o777 == 0o600
+        mgr.close()
+
+    def test_custom_cache_dir_constructor_arg_still_works(self, tmp_path):
+        """Regression: explicit cache_dir= overrides the XDG default."""
+        custom = str(tmp_path / "custom_cache")
+        config = EnrichmentConfig(cache_dir=custom)
+        assert config.cache_dir == custom

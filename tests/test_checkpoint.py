@@ -2,6 +2,8 @@
 
 import json
 import logging
+import os
+import sys
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -560,3 +562,47 @@ class TestLegacyCheckpointDetection:
 
         assert result is None, "Legacy checkpoint must be discarded (return None)"
         assert "Legacy checkpoint format" in caplog.text, "A WARNING must be logged"
+
+
+# -- XDG defaults + 0o600 permissions ----------------------------------------
+
+
+class TestXdgCheckpointDirDefault:
+    def test_xdg_state_home_respected(self, monkeypatch, tmp_path):
+        """XDG_STATE_HOME is used as the base for checkpoint_dir."""
+        xdg_state = str(tmp_path / "xdg_state")
+        monkeypatch.setenv("XDG_STATE_HOME", xdg_state)
+        config = EnrichmentConfig()
+        assert config.checkpoint_dir == os.path.join(xdg_state, "accrue")
+
+    def test_fallback_to_local_state_when_xdg_unset(self, monkeypatch):
+        """Falls back to ~/.local/state/accrue when XDG_STATE_HOME is unset."""
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        config = EnrichmentConfig()
+        expected = os.path.join(os.path.expanduser("~"), ".local", "state", "accrue")
+        assert config.checkpoint_dir == expected
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only chmod")
+    def test_checkpoint_file_has_0o600_permissions(self, tmp_path):
+        """Checkpoint files are written with 0o600 permissions."""
+        mgr = _make_mgr(tmp_path)
+        mgr.save_step(
+            data_identifier="data",
+            category="cat",
+            step_name="s",
+            step_row_results=[{"v": 1}],
+            total_rows=1,
+            fields_dict=FIELDS,
+            existing_completed=[],
+            existing_results={},
+        )
+        checkpoint_files = list(tmp_path.glob("*_checkpoint.json"))
+        assert len(checkpoint_files) == 1
+        stat = checkpoint_files[0].stat()
+        assert stat.st_mode & 0o777 == 0o600
+
+    def test_custom_checkpoint_dir_constructor_arg_still_works(self, tmp_path):
+        """Regression: explicit checkpoint_dir= overrides the XDG default."""
+        custom = str(tmp_path / "custom_checkpoints")
+        config = EnrichmentConfig(checkpoint_dir=custom)
+        assert config.checkpoint_dir == custom
