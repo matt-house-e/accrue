@@ -52,6 +52,27 @@ config = EnrichmentConfig(
 
 All three values must be positive. The defaults work well for most workloads.
 
+## Custom batch-capable providers
+
+Accrue exposes the batch protocol types from the top-level package so custom
+provider adapters can integrate with the same execution path as the built-in
+OpenAI and Anthropic adapters:
+
+```python
+from accrue import BatchCapableLLMClient, BatchRequest, BatchResult
+```
+
+- `BatchRequest` represents one row request in a batch submission. It carries
+  the row `custom_id`, chat `messages`, model settings, optional structured
+  output format, tool definitions, and `provider_kwargs`.
+- `BatchResult` is returned after polling finishes. It maps each successful
+  `custom_id` to an `LLMResponse`, records failed request IDs, and keeps the
+  provider batch ID for debugging or dashboard lookup.
+- `BatchCapableLLMClient` extends the regular `LLMClient` protocol with
+  `submit_batch()`, `poll_batch()`, and `cancel_batch()`. A custom client that
+  implements these methods can run `LLMStep(batch=True)` through the batch
+  path; otherwise Accrue falls back to realtime calls.
+
 ## Monitoring batch runs
 
 ```python
