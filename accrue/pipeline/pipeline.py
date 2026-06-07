@@ -26,6 +26,7 @@ from ..core.hooks import (
 from ..schemas.base import CostSummary, StepUsage, UsageInfo
 from ..steps.base import Step, StepContext, StepResult
 from ..utils.logger import get_logger
+from .plan import PipelinePlan
 
 logger = get_logger(__name__)
 
@@ -393,12 +394,92 @@ class Pipeline:
 
     # -- primary API -----------------------------------------------------
 
+    def plan(
+        self,
+        data: pd.DataFrame | list[dict[str, Any]],
+        sample_size: int = 3,
+        config: EnrichmentConfig | None = None,
+    ) -> PipelinePlan:
+        """Preview what a run will do and estimate its cost — a dry run.
+
+        Runs the pipeline over the first ``sample_size`` rows (real calls, but
+        capped) and extrapolates the measured token usage to the full dataset,
+        alongside each step's resolved prompt and JSON schema.  Use it to catch
+        a mis-built prompt or an accidental \\$50 run before committing.
+
+        Args:
+            data: The full dataset (DataFrame or ``list[dict]``).  Only the
+                first ``sample_size`` rows are actually executed.
+            sample_size: Rows to run for the preview (clamped to the dataset
+                size).
+            config: Optional :class:`EnrichmentConfig` — the same one you'd
+                pass to :meth:`run`, so the preview reflects your settings.
+
+        Returns:
+            A :class:`PipelinePlan`; call ``.summary()`` for a readable preview.
+        """
+        from ..steps.function import FunctionStep
+        from ..steps.llm import LLMStep
+        from .plan import StepPlan, extrapolate_cost
+
+        # Normalize input to rows and count the full dataset.
+        if isinstance(data, list):
+            all_rows = data
+        else:
+            all_rows = data.astype(object).where(pd.notna(data), None).to_dict(orient="records")
+        total_rows = len(all_rows)
+        n = max(0, min(sample_size, total_rows))
+        sample_rows = [dict(r) for r in all_rows[:n]]
+
+        # Introspect each step's resolved prompt + schema (off the first row).
+        first_row = sample_rows[0] if sample_rows else {}
+        step_plans: list[StepPlan] = []
+        for name in self.step_names:
+            step = self._step_map[name]
+            depends_on = list(getattr(step, "depends_on", []) or [])
+            if isinstance(step, LLMStep):
+                ctx = StepContext(row=first_row, fields={}, prior_results={})
+                step_plans.append(
+                    StepPlan(
+                        name=name,
+                        kind="llm",
+                        depends_on=depends_on,
+                        model=step.model,
+                        system_prompt=step._build_system_message(ctx),
+                        response_format=step._build_response_format(),
+                    )
+                )
+            else:
+                kind = "function" if isinstance(step, FunctionStep) else "other"
+                step_plans.append(StepPlan(name=name, kind=kind, depends_on=depends_on))
+
+        # Run the capped sample (real calls) to get outputs + measured cost.
+        sample_result = self.run(sample_rows, config=config) if sample_rows else None
+        if sample_result is not None:
+            sample_outputs = list(sample_result.data)
+            sample_cost = sample_result.cost
+            sample_errors = sample_result.errors
+        else:
+            sample_outputs, sample_cost, sample_errors = [], CostSummary(), []
+
+        return PipelinePlan(
+            steps=step_plans,
+            sample_rows=sample_rows,
+            sample_outputs=sample_outputs,
+            sample_errors=sample_errors,
+            total_rows=total_rows,
+            sample_size=n,
+            sample_cost=sample_cost,
+            estimated_cost=extrapolate_cost(sample_cost, total_rows),
+        )
+
     def run(
         self,
         data: pd.DataFrame | list[dict[str, Any]],
         config: EnrichmentConfig | None = None,
         hooks: EnrichmentHooks | None = None,
         output_file: str | Path | None = None,
+        confirm: bool = False,
     ) -> PipelineResult:
         """Synchronous entry point — the ONE way to use Accrue.
 
@@ -409,9 +490,18 @@ class Pipeline:
         ``run`` returns, so an error in your own post-processing can't lose a
         completed, paid-for run.  ``result.data`` is still returned in memory.
 
+        If ``confirm=True``, a :meth:`plan` preview is printed first and you're
+        prompted ``y/n`` before the full run proceeds; answering no raises
+        ``RuntimeError`` without running the rest of the dataset.
+
         Raises ``RuntimeError`` if called from inside a running event loop
         (use ``await pipeline.run_async(data)`` in that case).
         """
+        if confirm:
+            print(self.plan(data, config=config).summary())
+            answer = input("Proceed with the full run? [y/N] ").strip().lower()
+            if answer not in {"y", "yes"}:
+                raise RuntimeError("Pipeline run aborted at confirmation prompt.")
         try:
             asyncio.get_running_loop()
             raise RuntimeError(
