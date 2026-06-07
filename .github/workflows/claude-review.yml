@@ -1,16 +1,26 @@
 name: Claude PR review
 
-# Auto-runs an agent review on every PR opened or updated against main.
-# Uses the action's inline-comment MCP tool so feedback lands as inline
-# review comments (not a wall of text). track_progress posts a single
-# tracking comment with visual progress as the review runs.
+# Auto-runs an agent review when a PR is opened against main (and when a
+# draft is marked ready). Uses the action's inline-comment MCP tool so
+# feedback lands as inline review comments (not a wall of text).
+# track_progress posts a single tracking comment with visual progress.
+#
+# Cost control: each review costs ~$0.30, so we deliberately omit
+# `synchronize` — the review runs once per PR, not on every push. Re-run
+# it on demand after addressing feedback by commenting `@claude review`.
+# `paths-ignore` skips docs-only PRs that don't need a code review.
 #
 # Patterns from: https://github.com/anthropics/claude-code-action/blob/main/docs/solutions.md
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, reopened, ready_for_review]
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
 
 # Only review the latest push if the PR is updated mid-review.
 concurrency:
@@ -19,7 +29,14 @@ concurrency:
 
 jobs:
   review:
-    if: github.event.pull_request.draft == false
+    # Skip fork PRs: GitHub withholds secrets and the OIDC id-token from
+    # `pull_request` runs on forks, so the action can't auth (empty
+    # ANTHROPIC_API_KEY + failed OIDC token) and the job hard-fails with a
+    # red X. Gating here makes fork PRs skip the review instead. Maintainers
+    # can still review a fork PR on demand via the `@claude` mention bot.
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
