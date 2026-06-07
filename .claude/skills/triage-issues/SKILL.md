@@ -1,5 +1,7 @@
 ---
-description: Sweep open issues — apply labels, ask for repro on bugs, link near-duplicates
+name: triage-issues
+description: Run a triage pass over open accrue issues — classify type/component/priority, apply labels, ask for repro on bugs missing a minimal example, and link near-duplicates. Use when the user wants to triage, label, or sweep the accrue issue queue.
+allowed-tools: Read, Grep, Glob, Bash(gh:*)
 ---
 
 Run a triage pass on open issues in the accrue repo.
