@@ -50,6 +50,147 @@ class TestLLMAPIError:
         e = LLMAPIError("rate limited", retry_after=2.5, is_rate_limit=True)
         assert e.retry_after == 2.5
 
+    # -- retryable property ------------------------------------------------
+
+    def test_retryable_rate_limit_flag(self):
+        e = LLMAPIError("rate limited", is_rate_limit=True)
+        assert e.retryable is True
+
+    def test_retryable_status_429(self):
+        e = LLMAPIError("429 error", status_code=429)
+        assert e.retryable is True
+
+    def test_retryable_status_408(self):
+        e = LLMAPIError("timeout", status_code=408)
+        assert e.retryable is True
+
+    def test_retryable_status_500(self):
+        e = LLMAPIError("internal server error", status_code=500)
+        assert e.retryable is True
+
+    def test_retryable_status_503(self):
+        e = LLMAPIError("service unavailable", status_code=503)
+        assert e.retryable is True
+
+    def test_not_retryable_status_400(self):
+        e = LLMAPIError("bad request", status_code=400)
+        assert e.retryable is False
+
+    def test_not_retryable_status_401(self):
+        e = LLMAPIError("unauthorized", status_code=401)
+        assert e.retryable is False
+
+    def test_not_retryable_status_403(self):
+        e = LLMAPIError("forbidden", status_code=403)
+        assert e.retryable is False
+
+    def test_not_retryable_status_404(self):
+        e = LLMAPIError("not found", status_code=404)
+        assert e.retryable is False
+
+    def test_not_retryable_status_422(self):
+        e = LLMAPIError("unprocessable", status_code=422)
+        assert e.retryable is False
+
+    def test_not_retryable_no_status(self):
+        e = LLMAPIError("generic error")
+        assert e.retryable is False
+
+    def test_retryable_override_true(self):
+        """explicit retryable=True overrides the auto-logic."""
+        e = LLMAPIError("bad req", status_code=400, retryable=True)
+        assert e.retryable is True
+
+    def test_retryable_override_false(self):
+        """explicit retryable=False overrides the auto-logic."""
+        e = LLMAPIError("rate limited", status_code=429, is_rate_limit=True, retryable=False)
+        assert e.retryable is False
+
+    def test_third_party_429_promoted(self):
+        """Generic APIError with status_code=429 is treated as rate-limit retryable."""
+        e = LLMAPIError("429 from third-party server", status_code=429, is_rate_limit=True)
+        assert e.retryable is True
+        assert e.is_rate_limit is True
+
+
+# -- SDK max_retries=0 checks ---------------------------------------------
+
+
+class TestSDKMaxRetries:
+    """Verify that provider clients pass max_retries=0 to their SDKs."""
+
+    @patch("openai.AsyncOpenAI")
+    def test_openai_client_max_retries_zero(self, mock_cls):
+        """OpenAIClient constructs AsyncOpenAI with max_retries=0."""
+        client = OpenAIClient(api_key="key")
+        client._get_client()
+        call_kwargs = mock_cls.call_args.kwargs
+        assert call_kwargs["max_retries"] == 0
+
+    @patch("openai.AsyncOpenAI")
+    def test_openai_client_with_base_url_max_retries_zero(self, mock_cls):
+        """OpenAIClient (base_url) also passes max_retries=0."""
+        client = OpenAIClient(api_key="key", base_url="http://localhost:11434/v1")
+        client._get_client()
+        call_kwargs = mock_cls.call_args.kwargs
+        assert call_kwargs["max_retries"] == 0
+
+    def test_anthropic_client_max_retries_zero(self):
+        """AnthropicClient constructs AsyncAnthropic with max_retries=0."""
+        import sys
+        from unittest.mock import MagicMock
+
+        mock_mod = MagicMock()
+        mock_mod.AsyncAnthropic = MagicMock()
+        sys.modules.setdefault("anthropic", mock_mod)
+
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        client = AnthropicClient(api_key="test-key")
+        client._get_client()
+
+        call_kwargs = mock_mod.AsyncAnthropic.call_args.kwargs
+        assert call_kwargs["max_retries"] == 0
+
+
+# -- Third-party 429 promoted to is_rate_limit ----------------------------
+
+
+class TestThirdParty429Promotion:
+    """Generic APIError with status_code=429 is promoted to is_rate_limit."""
+
+    @pytest.mark.asyncio
+    async def test_chat_completions_generic_429_promoted(self):
+        """A third-party OpenAI-compatible server returning 429 via generic APIError
+        is wrapped with is_rate_limit=True so the retry loop treats it as retryable."""
+        from openai import APIError
+
+        # Simulate a third-party server raising APIError (not RateLimitError) with 429
+        exc = APIError(
+            message="too many requests",
+            request=MagicMock(),
+            body=None,
+        )
+        exc.status_code = 429
+
+        mock_inner = MagicMock()
+        mock_inner.chat.completions.create = AsyncMock(side_effect=exc)
+
+        client = OpenAIClient(api_key="test", base_url="http://third-party:8080/v1")
+        client._client = mock_inner
+
+        with pytest.raises(LLMAPIError) as exc_info:
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="my-model",
+                temperature=0.0,
+                max_tokens=10,
+            )
+
+        assert exc_info.value.status_code == 429
+        assert exc_info.value.is_rate_limit is True
+        assert exc_info.value.retryable is True
+
 
 # -- LLMClient protocol check -------------------------------------------
 
@@ -71,7 +212,7 @@ class TestOpenAIClientResponses:
         client = OpenAIClient(api_key="key123")
         assert client._client is None
         inner = client._get_client()
-        mock_cls.assert_called_once_with(api_key="key123")
+        mock_cls.assert_called_once_with(api_key="key123", max_retries=0)
         assert inner is mock_cls.return_value
 
     @pytest.mark.asyncio
@@ -399,7 +540,9 @@ class TestOpenAIClientChatCompletions:
     def test_base_url_passed_to_sdk(self, mock_cls):
         client = OpenAIClient(api_key="key", base_url="http://localhost:11434/v1")
         client._get_client()
-        mock_cls.assert_called_once_with(api_key="key", base_url="http://localhost:11434/v1")
+        mock_cls.assert_called_once_with(
+            api_key="key", base_url="http://localhost:11434/v1", max_retries=0
+        )
 
     @pytest.mark.asyncio
     async def test_complete_uses_chat_completions(self):
@@ -747,6 +890,127 @@ class TestAnthropicClient:
         assert result.citations[0].title == "Example Article"
         assert result.citations[0].snippet == "The answer is 42."
 
+    @pytest.mark.asyncio
+    async def test_grounding_schema_warning_fires_once_per_client(self, caplog):
+        """Warning fires exactly once per client across N complete() calls."""
+        self._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        schema = {"type": "object", "properties": {"f1": {"type": "string"}}}
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "test", "schema": schema, "strict": True},
+        }
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+        )
+        mock_inner = MagicMock()
+        mock_inner.messages.create = AsyncMock(return_value=mock_response)
+
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            for _ in range(5):
+                await client.complete(
+                    messages=[{"role": "user", "content": "hi"}],
+                    model="claude-sonnet-4-5-20250929",
+                    temperature=0.2,
+                    max_tokens=1000,
+                    response_format=response_format,
+                    tools=[{"type": "web_search"}],
+                )
+
+        warning_records = [
+            r
+            for r in caplog.records
+            if "structured output schema will not be enforced" in r.message
+        ]
+        assert len(warning_records) == 1
+
+    @pytest.mark.asyncio
+    async def test_grounding_schema_warning_fires_on_first_call(self, caplog):
+        """Warning fires on first call when grounding+schema both set (regression for #57)."""
+        self._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        schema = {"type": "object", "properties": {"f1": {"type": "string"}}}
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "test", "schema": schema, "strict": True},
+        }
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+        )
+        mock_inner = MagicMock()
+        mock_inner.messages.create = AsyncMock(return_value=mock_response)
+
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="claude-sonnet-4-5-20250929",
+                temperature=0.2,
+                max_tokens=1000,
+                response_format=response_format,
+                tools=[{"type": "web_search"}],
+            )
+
+        assert "structured output schema will not be enforced" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_grounding_schema_warning_fires_for_fresh_client(self, caplog):
+        """A second AnthropicClient instance emits its own warning (cache is per-instance)."""
+        self._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        schema = {"type": "object", "properties": {"f1": {"type": "string"}}}
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "test", "schema": schema, "strict": True},
+        }
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+        )
+        mock_inner = MagicMock()
+        mock_inner.messages.create = AsyncMock(return_value=mock_response)
+
+        # First client — exhaust its warning
+        client_a = AnthropicClient(api_key="test")
+        client_a._client = mock_inner
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            for _ in range(3):
+                await client_a.complete(
+                    messages=[{"role": "user", "content": "hi"}],
+                    model="claude-sonnet-4-5-20250929",
+                    temperature=0.2,
+                    max_tokens=1000,
+                    response_format=response_format,
+                    tools=[{"type": "web_search"}],
+                )
+
+        caplog.clear()
+
+        # Second client — must still fire its own warning
+        client_b = AnthropicClient(api_key="test")
+        client_b._client = mock_inner
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            await client_b.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="claude-sonnet-4-5-20250929",
+                temperature=0.2,
+                max_tokens=1000,
+                response_format=response_format,
+                tools=[{"type": "web_search"}],
+            )
+
+        assert "structured output schema will not be enforced" in caplog.text
+
 
 # -- GoogleClient -----------------------------------------------------------
 
@@ -1037,3 +1301,212 @@ class TestGoogleClient:
             )
 
         assert "allowed_domains is not supported" in caplog.text
+
+    # -- Retry classification (regression for #65) --------------------------
+
+    @pytest.mark.asyncio
+    async def test_5xx_is_retryable(self):
+        """503 Service Unavailable from Gemini → LLMAPIError.retryable True."""
+        import sys
+
+        self._install_mock_google()
+        # Ensure google.api_core is NOT present so we exercise the substring path
+        sys.modules.pop("google.api_core", None)
+        sys.modules.pop("google.api_core.exceptions", None)
+        # Reload the google module to pick up the patched sys.modules
+        import importlib
+
+        import accrue.steps.providers.google as _google_mod
+
+        importlib.reload(_google_mod)
+
+        from accrue.steps.providers.google import GoogleClient
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=Exception("503 Service Unavailable")
+        )
+
+        client = GoogleClient(api_key="test")
+        client._client = mock_client
+
+        with pytest.raises(LLMAPIError) as exc_info:
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gemini-2.5-flash",
+                temperature=0.0,
+                max_tokens=10,
+            )
+
+        assert exc_info.value.retryable is True
+        assert exc_info.value.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_timeout_is_retryable(self):
+        """Deadline exceeded / timeout from Gemini → LLMAPIError.retryable True."""
+        import sys
+
+        self._install_mock_google()
+        sys.modules.pop("google.api_core", None)
+        sys.modules.pop("google.api_core.exceptions", None)
+        import importlib
+
+        import accrue.steps.providers.google as _google_mod
+
+        importlib.reload(_google_mod)
+
+        from accrue.steps.providers.google import GoogleClient
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=Exception("Deadline exceeded waiting for response")
+        )
+
+        client = GoogleClient(api_key="test")
+        client._client = mock_client
+
+        with pytest.raises(LLMAPIError) as exc_info:
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gemini-2.5-flash",
+                temperature=0.0,
+                max_tokens=10,
+            )
+
+        assert exc_info.value.retryable is True
+
+    @pytest.mark.asyncio
+    async def test_400_invalid_argument_not_retryable(self):
+        """400 / invalid argument from Gemini → LLMAPIError.retryable False."""
+        import sys
+
+        self._install_mock_google()
+        sys.modules.pop("google.api_core", None)
+        sys.modules.pop("google.api_core.exceptions", None)
+        import importlib
+
+        import accrue.steps.providers.google as _google_mod
+
+        importlib.reload(_google_mod)
+
+        from accrue.steps.providers.google import GoogleClient
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=Exception("400 Bad Request: invalid argument in prompt")
+        )
+
+        client = GoogleClient(api_key="test")
+        client._client = mock_client
+
+        with pytest.raises(LLMAPIError) as exc_info:
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gemini-2.5-flash",
+                temperature=0.0,
+                max_tokens=10,
+            )
+
+        assert exc_info.value.retryable is False
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_429_is_retryable(self):
+        """429 / resource exhausted from Gemini → LLMAPIError.retryable True (regression guard)."""
+        import sys
+
+        self._install_mock_google()
+        sys.modules.pop("google.api_core", None)
+        sys.modules.pop("google.api_core.exceptions", None)
+        import importlib
+
+        import accrue.steps.providers.google as _google_mod
+
+        importlib.reload(_google_mod)
+
+        from accrue.steps.providers.google import GoogleClient
+
+        mock_client = MagicMock()
+        mock_client.aio.models.generate_content = AsyncMock(
+            side_effect=Exception("429 Resource Exhausted: quota exceeded")
+        )
+
+        client = GoogleClient(api_key="test")
+        client._client = mock_client
+
+        with pytest.raises(LLMAPIError) as exc_info:
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gemini-2.5-flash",
+                temperature=0.0,
+                max_tokens=10,
+            )
+
+        assert exc_info.value.retryable is True
+        assert exc_info.value.is_rate_limit is True
+        assert exc_info.value.status_code == 429
+
+    # -- Word-boundary regex (fix #80) ----------------------------------------
+
+    def _reload_google_no_api_core(self):
+        """Remove google.api_core so tests exercise the Option-B substring path."""
+        import importlib
+        import sys
+
+        self._install_mock_google()
+        sys.modules.pop("google.api_core", None)
+        sys.modules.pop("google.api_core.exceptions", None)
+        import accrue.steps.providers.google as _google_mod
+
+        importlib.reload(_google_mod)
+        from accrue.steps.providers.google import _classify_google_exc
+
+        return _classify_google_exc
+
+    def test_iterate_does_not_classify_as_rate_limit(self):
+        """'iterate' must NOT trigger the rate-limit branch (word-boundary guard)."""
+        classify = self._reload_google_no_api_core()
+        exc = Exception("failed to iterate over results")
+        result = classify(exc, "gemini-2.5-flash")
+        assert result.is_rate_limit is False
+
+    def test_rate_limit_string_does_classify_as_rate_limit(self):
+        """'rate limit' MUST trigger the rate-limit branch."""
+        classify = self._reload_google_no_api_core()
+        exc = Exception("rate limit exceeded for project")
+        result = classify(exc, "gemini-2.5-flash")
+        assert result.is_rate_limit is True
+        assert result.status_code == 429
+
+    def test_deadline_exceeded_sets_status_408_option_b(self):
+        """'deadline exceeded' in Option-B must set status_code=408."""
+        classify = self._reload_google_no_api_core()
+        exc = Exception("deadline exceeded waiting for response")
+        result = classify(exc, "gemini-2.5-flash")
+        assert result.status_code == 408
+        assert result.retryable is True
+
+    def test_deadline_exceeded_sets_status_408_option_a(self):
+        """DeadlineExceeded via typed Option-A path must set status_code=408."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        fake_deadline_exceeded = type("DeadlineExceeded", (Exception,), {})
+        fake_resource_exhausted = type("ResourceExhausted", (Exception,), {})
+        fake_service_unavailable = type("ServiceUnavailable", (Exception,), {})
+
+        # Build a namespace that mirrors the subset of google.api_core.exceptions
+        # that _classify_google_exc uses, then patch _gax_exc in the module directly.
+        fake_gax = SimpleNamespace(
+            ResourceExhausted=fake_resource_exhausted,
+            ServiceUnavailable=fake_service_unavailable,
+            DeadlineExceeded=fake_deadline_exceeded,
+        )
+
+        from accrue.steps.providers import google as _google_mod
+
+        with patch.object(_google_mod, "_gax_exc", fake_gax):
+            exc = fake_deadline_exceeded("deadline exceeded")
+            result = _google_mod._classify_google_exc(exc, "gemini-2.5-flash")
+
+        assert result.status_code == 408
+        assert result.retryable is True

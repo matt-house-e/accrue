@@ -7,7 +7,21 @@ For Tier 1 accounts, reduce max_workers to 5-10.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+def _default_cache_dir() -> str:
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".cache"
+    return str(base / "accrue")
+
+
+def _default_checkpoint_dir() -> str:
+    xdg = os.environ.get("XDG_STATE_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "state"
+    return str(base / "accrue")
 
 
 @dataclass
@@ -64,8 +78,9 @@ class EnrichmentConfig:
     enable_checkpointing: bool = False
     """Save results after each step completes for crash recovery."""
 
-    checkpoint_dir: str | None = None
-    """Directory for checkpoint files. None = temp directory."""
+    checkpoint_dir: str = field(default_factory=_default_checkpoint_dir)
+    """Directory for checkpoint files. Defaults to XDG_STATE_HOME/accrue or ~/.local/state/accrue.
+    """
 
     auto_resume: bool = True
     """Automatically resume from checkpoint on re-run."""
@@ -83,8 +98,8 @@ class EnrichmentConfig:
     cache_ttl: int = 3600
     """Cache time-to-live in seconds."""
 
-    cache_dir: str = ".accrue"
-    """Directory for cache.db."""
+    cache_dir: str = field(default_factory=_default_cache_dir)
+    """Directory for cache.db. Defaults to XDG_CACHE_HOME/accrue or ~/.cache/accrue."""
 
     checkpoint_interval: int = 0
     """Save partial step progress every N rows. 0 = disabled."""

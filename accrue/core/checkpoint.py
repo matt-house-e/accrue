@@ -7,8 +7,11 @@ Single JSON file per data_identifier + category.
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +21,77 @@ if TYPE_CHECKING:
     from .config import EnrichmentConfig
 
 logger = get_logger(__name__)
+
+try:
+    import numpy as _numpy
+except ImportError:
+    _numpy = None  # type: ignore[assignment]
+
+
+# -- typed encoder / decoder -------------------------------------------------
+
+
+def _typed_encoder(obj: Any) -> Any:
+    """JSON encoder that preserves Python types across checkpoint round-trips.
+
+    Encoded values are written as ``{"__accrue_type__": "<type>", "value": ...}``.
+    The namespaced key avoids collision with user data that uses ``__type__``
+    as its own discriminator (common in typed-union JSON patterns).
+    """
+    if isinstance(obj, datetime):
+        return {"__accrue_type__": "datetime", "value": obj.isoformat()}
+    if isinstance(obj, Decimal):
+        return {"__accrue_type__": "Decimal", "value": str(obj)}
+    if isinstance(obj, set):
+        return {"__accrue_type__": "set", "value": sorted(obj, key=str)}
+    if _numpy is not None and hasattr(obj, "tolist"):
+        return {"__accrue_type__": "numpy", "value": obj.tolist()}
+    raise TypeError(
+        f"Object of type {type(obj).__name__} is not JSON serializable for checkpointing"
+    )
+
+
+def _typed_decoder(d: dict) -> Any:
+    """JSON object_hook that restores typed values written by _typed_encoder.
+
+    Only dicts with exactly the keys ``{"__accrue_type__", "value"}`` are
+    treated as encoded library values — any extra keys means it's user data
+    and must be returned unchanged.  Dicts without ``__accrue_type__`` are
+    also returned as-is (covers plain user data and the outer checkpoint
+    structure).
+
+    Legacy checkpoint files written with ``__type__`` (pre-1.2.1) would
+    silently produce plain dicts with incorrect types on resume.  We detect
+    this format and discard the checkpoint so the user gets a clean start
+    with a clear warning rather than a silent misparse.
+    """
+    if d.keys() == {"__type__", "value"} and d["__type__"] in (
+        "datetime",
+        "Decimal",
+        "set",
+        "numpy",
+    ):
+        logger.warning(
+            "Legacy checkpoint format detected (pre-1.2.1 __type__ sentinel); "
+            "discarding checkpoint and starting fresh."
+        )
+        raise json.JSONDecodeError("Legacy checkpoint format — discarded", doc="", pos=0)
+    if d.keys() != {"__accrue_type__", "value"}:
+        return d
+    t = d["__accrue_type__"]
+    if t == "datetime":
+        return datetime.fromisoformat(d["value"])
+    if t == "Decimal":
+        return Decimal(d["value"])
+    if t == "set":
+        return set(d["value"])
+    if t == "numpy":
+        # Return as plain list — resume runs may not have numpy installed.
+        return d["value"]
+    return d
+
+
+# -- data model --------------------------------------------------------------
 
 
 @dataclass
@@ -72,16 +146,29 @@ class CheckpointManager:
         fields_dict: dict[str, dict[str, Any]],
         existing_completed: list[str],
         existing_results: dict[str, list[dict[str, Any]]],
+        *,
+        partial: bool = False,
     ) -> bool:
         """Write full pipeline state to disk after a step completes.
+
+        Uses an atomic write (tmp + fsync + os.replace) so a crash mid-write
+        never corrupts the existing checkpoint.
+
+        Args:
+            partial: When True, save partial row results without marking the
+                step as completed.  On resume the step will re-run from
+                scratch, ensuring unfinished rows are never silently treated
+                as completed.  Defaults to False (normal completion).
 
         Returns True on success or when checkpointing is disabled (no-op).
         """
         if not self._enabled:
             return True
 
-        # Merge the newly completed step into existing state
-        completed = list(existing_completed) + [step_name]
+        # For a partial save, do NOT append step_name to completed_steps so
+        # that a resumed run re-executes the step from scratch instead of
+        # skipping it and propagating empty {} results downstream.
+        completed = list(existing_completed) if partial else list(existing_completed) + [step_name]
         results = dict(existing_results)
         results[step_name] = step_row_results
 
@@ -94,18 +181,49 @@ class CheckpointManager:
             "step_results": results,
         }
 
+        path = self._get_path(data_identifier, category)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
         try:
-            path = self._get_path(data_identifier, category)
-            with open(path, "w") as f:
-                json.dump(payload, f, indent=2, default=str)
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, default=_typed_encoder, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, path)
+                if os.name == "posix":
+                    try:
+                        os.chmod(path, 0o600)
+                    except (OSError, NotImplementedError):
+                        pass
+            except Exception:
+                tmp_path.unlink(missing_ok=True)
+                raise
             logger.info(f"Checkpoint saved after step '{step_name}': {path}")
             return True
+        except TypeError:
+            # Re-raise immediately — caller passed an unserializable type and needs to know.
+            raise
         except Exception as e:
             logger.error(f"Failed to save checkpoint: {e}")
             return False
 
-    def load(self, data_identifier: str, category: str) -> CheckpointData | None:
-        """Load checkpoint if enabled, auto_resume is on, file exists, and category matches."""
+    def load(
+        self,
+        data_identifier: str,
+        category: str,
+        *,
+        expected_total_rows: int | None = None,
+        expected_fields: dict | None = None,
+        expected_steps: list[str] | None = None,
+    ) -> CheckpointData | None:
+        """Load checkpoint if enabled, auto_resume is on, file exists, and all checks pass.
+
+        Optional keyword arguments validate the saved checkpoint against the
+        current pipeline shape. Any mismatch is logged as a warning and the
+        checkpoint is discarded (returns None) rather than silently resuming
+        against a mismatched dataset.  Pass None to skip a particular check
+        (backwards-compatible with callers that pre-date strict validation).
+        """
         if not self._enabled or not self._auto_resume:
             return None
 
@@ -114,8 +232,8 @@ class CheckpointManager:
             return None
 
         try:
-            with open(path) as f:
-                raw = json.load(f)
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f, object_hook=_typed_decoder)
 
             if raw.get("category") != category:
                 logger.warning(
@@ -123,6 +241,36 @@ class CheckpointManager:
                     f"got '{raw.get('category')}'"
                 )
                 return None
+
+            if expected_total_rows is not None and raw.get("total_rows") != expected_total_rows:
+                logger.warning(
+                    f"Checkpoint row count mismatch: expected {expected_total_rows}, "
+                    f"got {raw.get('total_rows')} — discarding checkpoint"
+                )
+                return None
+
+            if expected_fields is not None:
+                saved_keys = set(raw.get("fields_dict", {}).keys())
+                expected_keys = set(expected_fields.keys())
+                if saved_keys != expected_keys:
+                    logger.warning(
+                        f"Checkpoint fields mismatch: expected {sorted(expected_keys)}, "
+                        f"got {sorted(saved_keys)} — discarding checkpoint"
+                    )
+                    return None
+
+            if expected_steps is not None:
+                saved_steps = raw.get("completed_steps", [])
+                # Validate that every saved step is still declared in the pipeline.
+                # Extra saved steps (from a shorter pipeline) are safe; missing
+                # pipeline steps that appear in the checkpoint are flagged.
+                unknown = [s for s in saved_steps if s not in expected_steps]
+                if unknown:
+                    logger.warning(
+                        f"Checkpoint contains steps unknown to the current pipeline: "
+                        f"{unknown} — discarding checkpoint"
+                    )
+                    return None
 
             data = CheckpointData(
                 timestamp=raw["timestamp"],
@@ -137,6 +285,11 @@ class CheckpointManager:
                 f"({', '.join(data.completed_steps)})"
             )
             return data
+        except json.JSONDecodeError:
+            # JSONDecodeError is raised by _typed_decoder for legacy checkpoints
+            # (pre-1.2.1 __type__ sentinel) after logging a WARNING there.
+            # Return None to give the pipeline a clean start.
+            return None
         except Exception as e:
             logger.error(f"Failed to load checkpoint: {e}")
             return None
@@ -169,8 +322,8 @@ class CheckpointManager:
 
         for path in scan_dir.glob("*_checkpoint.json"):
             try:
-                with open(path) as f:
-                    raw = json.load(f)
+                with open(path, encoding="utf-8") as f:
+                    raw = json.load(f, object_hook=_typed_decoder)
                 checkpoints[path.stem] = {
                     "path": str(path),
                     "category": raw.get("category"),

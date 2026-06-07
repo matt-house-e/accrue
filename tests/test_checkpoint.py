@@ -1,6 +1,15 @@
 """Tests for the per-step CheckpointManager."""
 
+import json
+import logging
+import os
+import sys
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from accrue.core.checkpoint import CheckpointData, CheckpointManager
 from accrue.core.config import EnrichmentConfig
@@ -222,3 +231,378 @@ class TestSaveStepDisabled:
         # No file should have been written
         files = list(tmp_path.glob("*_checkpoint.json"))
         assert len(files) == 0
+
+
+# -- atomic write ------------------------------------------------------------
+
+
+class TestAtomicWrite:
+    def test_original_file_intact_after_failed_write(self, tmp_path):
+        """If json.dump raises mid-write, the original checkpoint file is untouched."""
+        mgr = _make_mgr(tmp_path)
+
+        # Write a valid checkpoint first
+        mgr.save_step(
+            data_identifier="data",
+            category="cat",
+            step_name="step1",
+            step_row_results=[{"v": 1}],
+            total_rows=1,
+            fields_dict=FIELDS,
+            existing_completed=[],
+            existing_results={},
+        )
+        checkpoint_file = tmp_path / "data_cat_checkpoint.json"
+        original_content = checkpoint_file.read_text()
+
+        # Now simulate a failure during json.dump — the tmp file is left behind
+        # but the original must remain intact.
+        with patch("json.dump", side_effect=OSError("simulated disk failure")):
+            ok = mgr.save_step(
+                data_identifier="data",
+                category="cat",
+                step_name="step2",
+                step_row_results=[{"v": 2}],
+                total_rows=1,
+                fields_dict=FIELDS,
+                existing_completed=["step1"],
+                existing_results={"step1": [{"v": 1}]},
+            )
+
+        assert ok is False  # save reported failure
+        # Original file must be readable and unchanged
+        assert checkpoint_file.read_text() == original_content
+        # Parsed content should still match the first successful write
+        saved = json.loads(original_content)
+        assert saved["completed_steps"] == ["step1"]
+
+
+# -- strict resume validation ------------------------------------------------
+
+
+class TestStrictResumeValidation:
+    def _save(self, mgr, *, total_rows=10, fields=None):
+        mgr.save_step(
+            data_identifier="data",
+            category="cat",
+            step_name="s",
+            step_row_results=[{}] * total_rows,
+            total_rows=total_rows,
+            fields_dict=fields or FIELDS,
+            existing_completed=[],
+            existing_results={},
+        )
+
+    def test_rejects_mismatched_row_count(self, tmp_path, caplog):
+        mgr = _make_mgr(tmp_path)
+        self._save(mgr, total_rows=10)
+
+        with caplog.at_level(logging.WARNING, logger="accrue.core.checkpoint"):
+            result = mgr.load("data", "cat", expected_total_rows=5)
+
+        assert result is None
+        assert any("row count mismatch" in r.message.lower() for r in caplog.records)
+
+    def test_rejects_mismatched_fields(self, tmp_path, caplog):
+        mgr = _make_mgr(tmp_path)
+        self._save(mgr, fields={"a": {}, "b": {}})
+
+        with caplog.at_level(logging.WARNING, logger="accrue.core.checkpoint"):
+            result = mgr.load("data", "cat", expected_fields={"a": {}, "b": {}, "c": {}})
+
+        assert result is None
+        assert any("fields mismatch" in r.message.lower() for r in caplog.records)
+
+    def test_rejects_unknown_steps(self, tmp_path, caplog):
+        mgr = _make_mgr(tmp_path)
+        # Checkpoint contains step "old_step" that is no longer in the pipeline.
+        mgr.save_step(
+            data_identifier="data",
+            category="cat",
+            step_name="old_step",
+            step_row_results=[{}],
+            total_rows=1,
+            fields_dict=FIELDS,
+            existing_completed=[],
+            existing_results={},
+        )
+
+        with caplog.at_level(logging.WARNING, logger="accrue.core.checkpoint"):
+            result = mgr.load("data", "cat", expected_steps=["new_step"])
+
+        assert result is None
+        assert any("unknown to the current pipeline" in r.message for r in caplog.records)
+
+    def test_accepts_when_expected_kwargs_are_none(self, tmp_path):
+        """Backwards-compat: omitting expected_* kwargs skips those checks."""
+        mgr = _make_mgr(tmp_path)
+        self._save(mgr, total_rows=10)
+
+        # No expected_* kwargs — should load fine
+        result = mgr.load("data", "cat")
+        assert result is not None
+        assert result.total_rows == 10
+
+    def test_accepts_matching_validation(self, tmp_path):
+        """All expected_* kwargs match — checkpoint is accepted."""
+        mgr = _make_mgr(tmp_path)
+        self._save(mgr, total_rows=10, fields={"a": {}, "b": {}})
+
+        result = mgr.load(
+            "data",
+            "cat",
+            expected_total_rows=10,
+            expected_fields={"a": {}, "b": {}},
+            expected_steps=["s", "other"],
+        )
+        assert result is not None
+
+
+# -- typed serializer --------------------------------------------------------
+
+
+class TestTypedSerializer:
+    def _round_trip(self, mgr, value, tmp_path):
+        """Save a checkpoint containing *value* in step_results; return loaded value."""
+        mgr.save_step(
+            data_identifier="typed",
+            category="cat",
+            step_name="s",
+            step_row_results=[{"val": value}],
+            total_rows=1,
+            fields_dict=FIELDS,
+            existing_completed=[],
+            existing_results={},
+        )
+        cp = mgr.load("typed", "cat")
+        assert cp is not None
+        return cp.step_results["s"][0]["val"]
+
+    def test_datetime_round_trip(self, tmp_path):
+        mgr = _make_mgr(tmp_path)
+        dt = datetime(2024, 6, 15, 12, 30, 45)
+        result = self._round_trip(mgr, dt, tmp_path)
+        assert isinstance(result, datetime)
+        assert result == dt
+
+    def test_decimal_round_trip(self, tmp_path):
+        mgr = _make_mgr(tmp_path)
+        d = Decimal("3.14159")
+        result = self._round_trip(mgr, d, tmp_path)
+        assert isinstance(result, Decimal)
+        assert result == d
+
+    def test_set_round_trip(self, tmp_path):
+        mgr = _make_mgr(tmp_path)
+        s = {"apple", "banana", "cherry"}
+        result = self._round_trip(mgr, s, tmp_path)
+        assert isinstance(result, set)
+        assert result == s
+
+    def test_unknown_type_raises_on_save(self, tmp_path):
+        """Saving an unserializable type must raise TypeError, not silently stringify."""
+        mgr = _make_mgr(tmp_path)
+
+        class _Unserializable:
+            pass
+
+        with pytest.raises(TypeError, match="not JSON serializable"):
+            mgr.save_step(
+                data_identifier="data",
+                category="cat",
+                step_name="s",
+                step_row_results=[{"val": _Unserializable()}],
+                total_rows=1,
+                fields_dict=FIELDS,
+                existing_completed=[],
+                existing_results={},
+            )
+
+    def test_user_dict_with_dunder_type_key_round_trips_unchanged(self, tmp_path):
+        """User data containing '__type__' must survive save+load without interpretation."""
+        mgr = _make_mgr(tmp_path)
+        user_record = {"__type__": "user_tag", "value": "x"}
+
+        result = self._round_trip(mgr, user_record, tmp_path)
+
+        assert result == user_record
+        assert result["__type__"] == "user_tag"
+
+    def test_tmp_file_cleaned_up_on_encoder_failure(self, tmp_path):
+        """A TypeError mid-encode must unlink the .tmp file before re-raising."""
+        mgr = _make_mgr(tmp_path)
+
+        with pytest.raises(TypeError):
+            mgr.save_step(
+                data_identifier="data",
+                category="cat",
+                step_name="s",
+                step_row_results=[{"val": complex(1, 2)}],
+                total_rows=1,
+                fields_dict=FIELDS,
+                existing_completed=[],
+                existing_results={},
+            )
+
+        tmp_files = list(tmp_path.glob("*.tmp"))
+        assert tmp_files == [], f"Orphaned .tmp files found: {tmp_files}"
+
+
+# -- partial checkpoint (partial=True) ---------------------------------------
+
+
+class TestPartialCheckpoint:
+    def test_partial_true_does_not_add_to_completed_steps(self, tmp_path):
+        """save_step(partial=True) must NOT append the step to completed_steps."""
+        mgr = _make_mgr(tmp_path)
+        row_results = [{"f": "partial_val"}, {}]
+
+        ok = mgr.save_step(
+            data_identifier="data",
+            category="cat",
+            step_name="step1",
+            step_row_results=row_results,
+            total_rows=2,
+            fields_dict=FIELDS,
+            existing_completed=[],
+            existing_results={},
+            partial=True,
+        )
+        assert ok is True
+
+        cp = mgr.load("data", "cat")
+        assert cp is not None
+        # Step must NOT appear in completed_steps so a resumed run re-executes it.
+        assert "step1" not in cp.completed_steps
+        assert cp.completed_steps == []
+        # Partial data is still persisted in step_results for tracking purposes.
+        assert cp.step_results["step1"] == row_results
+
+    def test_partial_false_default_adds_to_completed_steps(self, tmp_path):
+        """save_step(partial=False) (the default) DOES append to completed_steps."""
+        mgr = _make_mgr(tmp_path)
+        row_results = [{"f": "val"}]
+
+        mgr.save_step(
+            data_identifier="data",
+            category="cat",
+            step_name="step1",
+            step_row_results=row_results,
+            total_rows=1,
+            fields_dict=FIELDS,
+            existing_completed=[],
+            existing_results={},
+        )
+
+        cp = mgr.load("data", "cat")
+        assert cp is not None
+        assert "step1" in cp.completed_steps
+
+    def test_partial_preserves_prior_completed_steps_unchanged(self, tmp_path):
+        """Partial save must not disturb already-completed steps."""
+        mgr = _make_mgr(tmp_path)
+
+        # First step is fully completed.
+        step1_results = [{"f1": "done"}]
+        mgr.save_step(
+            data_identifier="data",
+            category="cat",
+            step_name="step1",
+            step_row_results=step1_results,
+            total_rows=1,
+            fields_dict=FIELDS,
+            existing_completed=[],
+            existing_results={},
+        )
+
+        # Second step is only partially done (e.g. cancelled mid-flight).
+        mgr.save_step(
+            data_identifier="data",
+            category="cat",
+            step_name="step2",
+            step_row_results=[{}],
+            total_rows=1,
+            fields_dict=FIELDS,
+            existing_completed=["step1"],
+            existing_results={"step1": step1_results},
+            partial=True,
+        )
+
+        cp = mgr.load("data", "cat")
+        assert cp is not None
+        # Only step1 is completed; step2 must NOT appear.
+        assert cp.completed_steps == ["step1"]
+        assert "step2" not in cp.completed_steps
+
+
+# -- Legacy checkpoint format (fix #80) -------------------------------------
+
+
+class TestLegacyCheckpointDetection:
+    def test_legacy_type_sentinel_returns_none_and_warns(self, tmp_path, caplog):
+        """Pre-1.2.1 checkpoint using __type__ must be discarded with a WARNING."""
+        mgr = _make_mgr(tmp_path)
+
+        # Write a checkpoint file containing the old __type__ sentinel
+        legacy_payload = {
+            "timestamp": 1000.0,
+            "category": "cat",
+            "total_rows": 1,
+            "fields_dict": {"col": {}},
+            "completed_steps": ["step1"],
+            "step_results": {
+                "step1": [{"val": {"__type__": "datetime", "value": "2024-01-01T00:00:00"}}]
+            },
+        }
+        path = mgr._get_path("data", "cat")
+        path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING, logger="accrue.core.checkpoint"):
+            result = mgr.load("data", "cat")
+
+        assert result is None, "Legacy checkpoint must be discarded (return None)"
+        assert "Legacy checkpoint format" in caplog.text, "A WARNING must be logged"
+
+
+# -- XDG defaults + 0o600 permissions ----------------------------------------
+
+
+class TestXdgCheckpointDirDefault:
+    def test_xdg_state_home_respected(self, monkeypatch, tmp_path):
+        """XDG_STATE_HOME is used as the base for checkpoint_dir."""
+        xdg_state = str(tmp_path / "xdg_state")
+        monkeypatch.setenv("XDG_STATE_HOME", xdg_state)
+        config = EnrichmentConfig()
+        assert config.checkpoint_dir == os.path.join(xdg_state, "accrue")
+
+    def test_fallback_to_local_state_when_xdg_unset(self, monkeypatch):
+        """Falls back to ~/.local/state/accrue when XDG_STATE_HOME is unset."""
+        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+        config = EnrichmentConfig()
+        expected = os.path.join(os.path.expanduser("~"), ".local", "state", "accrue")
+        assert config.checkpoint_dir == expected
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only chmod")
+    def test_checkpoint_file_has_0o600_permissions(self, tmp_path):
+        """Checkpoint files are written with 0o600 permissions."""
+        mgr = _make_mgr(tmp_path)
+        mgr.save_step(
+            data_identifier="data",
+            category="cat",
+            step_name="s",
+            step_row_results=[{"v": 1}],
+            total_rows=1,
+            fields_dict=FIELDS,
+            existing_completed=[],
+            existing_results={},
+        )
+        checkpoint_files = list(tmp_path.glob("*_checkpoint.json"))
+        assert len(checkpoint_files) == 1
+        stat = checkpoint_files[0].stat()
+        assert stat.st_mode & 0o777 == 0o600
+
+    def test_custom_checkpoint_dir_constructor_arg_still_works(self, tmp_path):
+        """Regression: explicit checkpoint_dir= overrides the XDG default."""
+        custom = str(tmp_path / "custom_checkpoints")
+        config = EnrichmentConfig(checkpoint_dir=custom)
+        assert config.checkpoint_dir == custom

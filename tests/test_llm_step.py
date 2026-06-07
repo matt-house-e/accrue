@@ -158,7 +158,9 @@ class TestLLMStepClient:
         assert client is not None
         # Trigger lazy creation of the inner OpenAI SDK client
         client._get_client()
-        mock_cls.assert_called_once_with(api_key="test", base_url="http://localhost:11434/v1")
+        mock_cls.assert_called_once_with(
+            api_key="test", base_url="http://localhost:11434/v1", max_retries=0
+        )
 
     def test_client_reused(self):
         mock_client = AsyncMock()
@@ -481,6 +483,82 @@ class TestDefaultEnforcement:
         result = await step.run(_make_ctx())
         assert result.values["f1"] is None
 
+    @pytest.mark.asyncio
+    async def test_enum_member_refusal_pattern_kept(self):
+        """A refusal-pattern value that is a declared enum member is NOT replaced."""
+        # Arrange
+        resp = _mock_llm_response(json.dumps({"status": "unknown"}))
+        mock_client = _make_mock_client(resp)
+        step = LLMStep(
+            name="llm",
+            fields={
+                "status": {"prompt": "classify", "enum": ["known", "unknown"], "default": "REVIEW"},
+            },
+            client=mock_client,
+        )
+        # Act
+        result = await step.run(_make_ctx())
+        # Assert — "unknown" is a valid enum value; default must NOT be applied
+        assert result.values["status"] == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_enum_non_member_refusal_pattern_replaced(self):
+        """A refusal-pattern value NOT in the enum still falls back to default."""
+        # Arrange
+        resp = _mock_llm_response(json.dumps({"status": "n/a"}))
+        mock_client = _make_mock_client(resp)
+        step = LLMStep(
+            name="llm",
+            fields={
+                "status": {"prompt": "classify", "enum": ["known", "unknown"], "default": "REVIEW"},
+            },
+            client=mock_client,
+        )
+        # Act
+        result = await step.run(_make_ctx())
+        # Assert — "n/a" is not in the enum, so the default applies
+        assert result.values["status"] == "REVIEW"
+
+    @pytest.mark.asyncio
+    async def test_enum_member_match_is_case_insensitive(self):
+        """Enum membership check is case-insensitive: "unknown" matches "Unknown"."""
+        # Arrange — enum uses title-case, model returns lowercase
+        resp = _mock_llm_response(json.dumps({"status": "unknown"}))
+        mock_client = _make_mock_client(resp)
+        step = LLMStep(
+            name="llm",
+            fields={
+                "status": {
+                    "prompt": "classify",
+                    "enum": ["Known", "Unknown"],
+                    "default": "REVIEW",
+                },
+            },
+            client=mock_client,
+        )
+        # Act
+        result = await step.run(_make_ctx())
+        # Assert — case-insensitive match keeps the model output unchanged
+        assert result.values["status"] == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_no_enum_refusal_still_replaced(self):
+        """Regression: field with no enum + refusal output keeps the original behaviour."""
+        # Arrange
+        resp = _mock_llm_response(json.dumps({"score": "unknown"}))
+        mock_client = _make_mock_client(resp)
+        step = LLMStep(
+            name="llm",
+            fields={
+                "score": {"prompt": "rate 1-10", "default": "N/A"},
+            },
+            client=mock_client,
+        )
+        # Act
+        result = await step.run(_make_ctx())
+        # Assert — no enum defined, so the default is applied as before
+        assert result.values["score"] == "N/A"
+
 
 # -- retries on validation/parse error -----------------------------------
 
@@ -635,6 +713,164 @@ class TestLLMStepAPIRetries:
         # Parse retries (1) exhausted, raises StepError (not caught by API retry)
         with pytest.raises(StepError, match="parse attempts"):
             await step.run(_make_ctx(config=config))
+
+
+# -- narrow retry allowlist ----------------------------------------------
+
+
+class TestNarrowRetryAllowlist:
+    """Non-retryable 4xx errors should not be retried (raises immediately)."""
+
+    @pytest.mark.asyncio
+    async def test_bad_request_not_retried(self):
+        """400 BadRequest (e.g. context_length_exceeded) raises after exactly 1 call."""
+        mock_client = AsyncMock()
+        mock_client.complete = AsyncMock(side_effect=LLMAPIError("bad request", status_code=400))
+        config = EnrichmentConfig(max_retries=3, retry_base_delay=0.001)
+        step = LLMStep(name="llm", fields={"f1": "test"}, client=mock_client)
+
+        with pytest.raises(LLMAPIError):
+            await step.run(_make_ctx(config=config))
+
+        # Must not retry — exactly 1 call
+        assert mock_client.complete.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_auth_error_not_retried(self):
+        """401 AuthenticationError raises after exactly 1 call."""
+        mock_client = AsyncMock()
+        mock_client.complete = AsyncMock(side_effect=LLMAPIError("unauthorized", status_code=401))
+        config = EnrichmentConfig(max_retries=3, retry_base_delay=0.001)
+        step = LLMStep(name="llm", fields={"f1": "test"}, client=mock_client)
+
+        with pytest.raises(LLMAPIError):
+            await step.run(_make_ctx(config=config))
+
+        assert mock_client.complete.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_permission_denied_not_retried(self):
+        """403 PermissionDenied raises after exactly 1 call."""
+        mock_client = AsyncMock()
+        mock_client.complete = AsyncMock(side_effect=LLMAPIError("forbidden", status_code=403))
+        config = EnrichmentConfig(max_retries=3, retry_base_delay=0.001)
+        step = LLMStep(name="llm", fields={"f1": "test"}, client=mock_client)
+
+        with pytest.raises(LLMAPIError):
+            await step.run(_make_ctx(config=config))
+
+        assert mock_client.complete.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_not_found_not_retried(self):
+        """404 NotFound raises after exactly 1 call."""
+        mock_client = AsyncMock()
+        mock_client.complete = AsyncMock(side_effect=LLMAPIError("not found", status_code=404))
+        config = EnrichmentConfig(max_retries=3, retry_base_delay=0.001)
+        step = LLMStep(name="llm", fields={"f1": "test"}, client=mock_client)
+
+        with pytest.raises(LLMAPIError):
+            await step.run(_make_ctx(config=config))
+
+        assert mock_client.complete.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_5xx_retried(self):
+        """503 Service Unavailable is retried."""
+        good_resp = _mock_llm_response(json.dumps({"f1": "ok"}))
+        mock_client = AsyncMock()
+        mock_client.complete = AsyncMock(
+            side_effect=[
+                LLMAPIError("service unavailable", status_code=503),
+                good_resp,
+            ]
+        )
+        config = EnrichmentConfig(max_retries=2, retry_base_delay=0.001)
+        step = LLMStep(name="llm", fields={"f1": "test"}, client=mock_client)
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await step.run(_make_ctx(config=config))
+
+        assert result.values == {"f1": "ok"}
+        assert mock_client.complete.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_retried_exactly_twice(self):
+        """RateLimitError: first call raises, second succeeds. Assert exactly 2 calls."""
+        good_resp = _mock_llm_response(json.dumps({"f1": "ok"}))
+        mock_client = AsyncMock()
+        mock_client.complete = AsyncMock(
+            side_effect=[
+                LLMAPIError("rate limited", status_code=429, is_rate_limit=True),
+                good_resp,
+            ]
+        )
+        config = EnrichmentConfig(max_retries=3, retry_base_delay=0.001)
+        step = LLMStep(name="llm", fields={"f1": "test"}, client=mock_client)
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await step.run(_make_ctx(config=config))
+
+        assert result.values == {"f1": "ok"}
+        assert mock_client.complete.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_full_jitter_uses_random_uniform(self):
+        """Jitter uses random.uniform(0, base * 2^attempt)."""
+        import random
+
+        good_resp = _mock_llm_response(json.dumps({"f1": "ok"}))
+        mock_client = AsyncMock()
+        mock_client.complete = AsyncMock(
+            side_effect=[
+                LLMAPIError("rate limited", status_code=429, is_rate_limit=True),
+                good_resp,
+            ]
+        )
+        config = EnrichmentConfig(max_retries=2, retry_base_delay=1.0)
+        step = LLMStep(name="llm", fields={"f1": "test"}, client=mock_client)
+
+        uniform_calls = []
+
+        original_uniform = random.uniform
+
+        def recording_uniform(a, b):
+            uniform_calls.append((a, b))
+            return 0.0  # return 0 so sleep is fast
+
+        with patch("accrue.steps.llm.random.uniform", side_effect=recording_uniform):
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                await step.run(_make_ctx(config=config))
+
+        # Should have called random.uniform once for api_attempt=0: (0, 1.0 * 2**0) = (0, 1.0)
+        assert len(uniform_calls) >= 1
+        assert uniform_calls[0] == (0, 1.0)
+
+    @pytest.mark.asyncio
+    async def test_retry_after_floor(self):
+        """retry_after=2.0 is honoured as a floor even when jitter computes less."""
+        good_resp = _mock_llm_response(json.dumps({"f1": "ok"}))
+        mock_client = AsyncMock()
+        mock_client.complete = AsyncMock(
+            side_effect=[
+                LLMAPIError("rate limited", status_code=429, retry_after=2.0, is_rate_limit=True),
+                good_resp,
+            ]
+        )
+        config = EnrichmentConfig(max_retries=2, retry_base_delay=0.001)
+        step = LLMStep(name="llm", fields={"f1": "test"}, client=mock_client)
+
+        slept_delays = []
+
+        async def recording_sleep(delay):
+            slept_delays.append(delay)
+
+        with patch("accrue.steps.llm.random.uniform", return_value=0.0):
+            with patch("asyncio.sleep", side_effect=recording_sleep):
+                await step.run(_make_ctx(config=config))
+
+        # The delay should have been floored to retry_after=2.0
+        assert slept_delays[0] >= 2.0
 
 
 # -- custom schema -------------------------------------------------------

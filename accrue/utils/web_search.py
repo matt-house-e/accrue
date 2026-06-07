@@ -19,9 +19,14 @@ Example::
 from __future__ import annotations
 
 import os
+import uuid
 from typing import Any, Awaitable, Callable
 
+from ..core.exceptions import ConfigurationError
 from ..steps.base import StepContext
+from .logger import get_logger
+
+logger = get_logger(__name__)
 
 _VALID_CONTEXT_SIZES = frozenset({"low", "medium", "high"})
 _VALID_TOOL_TYPES = frozenset({"web_search", "web_search_preview"})
@@ -61,7 +66,12 @@ def web_search(
             models).  GA supports domain filtering.  Defaults to ``"web_search"``.
 
     Returns:
-        ``{"__web_context": str, "sources": list[str]}``
+        ``{"__web_context": str, "sources": list[str]}`` — the
+        ``__web_context`` value is wrapped in a per-call random boundary tag
+        (e.g. ``<untrusted-a3f9c2d01b4e>...</untrusted-a3f9c2d01b4e>``) to
+        isolate raw search content from downstream LLM instructions (OWASP
+        LLM01 mitigation).  The boundary is randomised each call so that a
+        malicious page cannot embed the closing tag to escape the wrapper.
     """
     # Eager validation
     if search_context_size not in _VALID_CONTEXT_SIZES:
@@ -80,8 +90,22 @@ def web_search(
     async def _search(ctx: StepContext) -> dict[str, Any]:
         from openai import APIError, APITimeoutError, AsyncOpenAI, RateLimitError
 
-        # Format the query template
-        template_vars = dict(ctx.row)
+        # Fix #2: Fail loud if no API key is available — before any try block so the
+        # error is never swallowed by the broad except below.
+        key = api_key or os.environ.get("OPENAI_API_KEY")
+        if not key:
+            raise ConfigurationError(
+                "web_search requires an OpenAI API key — pass api_key= or set OPENAI_API_KEY"
+            )
+
+        # Format the query template.
+        # Fix #3: Pre-escape literal braces in string row values so that row content
+        # containing '{' or '}' does not crash str.format; template placeholders like
+        # {company} are unaffected because we only escape values, not the template.
+        template_vars = {
+            k: v.replace("{", "{{").replace("}", "}}") if isinstance(v, str) else v
+            for k, v in ctx.row.items()
+        }
         if ctx.prior_results:
             template_vars.update(ctx.prior_results)
 
@@ -90,7 +114,6 @@ def web_search(
         except KeyError as exc:
             raise ValueError(f"web_search query template references missing field: {exc}") from exc
 
-        key = api_key or os.environ.get("OPENAI_API_KEY")
         client = AsyncOpenAI(api_key=key)
 
         # Build tool config
@@ -113,7 +136,7 @@ def web_search(
             )
 
             # Extract text content
-            web_context = ""
+            web_text = ""
             sources: list[str] = []
 
             for item in response.output:
@@ -121,7 +144,7 @@ def web_search(
                     # Message output item — extract text
                     for part in item.content:
                         if hasattr(part, "text"):
-                            web_context = part.text
+                            web_text = part.text
                         # Extract citations from annotations
                         if include_sources and hasattr(part, "annotations"):
                             for annotation in part.annotations:
@@ -131,10 +154,28 @@ def web_search(
             if not include_sources:
                 sources = []
 
+            # Fix #1: Wrap raw search output in a per-call random boundary tag so
+            # downstream LLM steps treat it as data rather than instructions (OWASP
+            # LLM01 prompt-injection mitigation).  A static tag is bypassable by a
+            # malicious page embedding the literal closing tag; a random boundary
+            # defeats that attack because the attacker cannot predict it.
+            boundary = f"untrusted-{uuid.uuid4().hex[:12]}"
+            # Belt-and-suspenders: if the boundary appears in the content
+            # (vanishingly unlikely with a random hex token), pick a new one.
+            while f"</{boundary}>" in web_text:
+                boundary = f"untrusted-{uuid.uuid4().hex[:12]}"
+            web_context = f"<{boundary}>\n{web_text}\n</{boundary}>"
             return {"__web_context": web_context, "sources": sources}
 
-        except (APIError, RateLimitError, APITimeoutError):
-            # Graceful degradation — downstream LLMStep works with row data
+        except (APIError, RateLimitError, APITimeoutError) as exc:
+            # Fix #4: Log a warning before degrading to empty context so failures are
+            # visible in logs rather than silently dropped.
+            logger.warning(
+                "web_search degraded for row %s: %s: %s",
+                getattr(ctx, "row_index", "?"),
+                type(exc).__name__,
+                exc,
+            )
             return {"__web_context": "", "sources": []}
 
     return _search

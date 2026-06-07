@@ -7,11 +7,14 @@ for repeated execution with checkpointing.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from typing import Any
 
 import pandas as pd
 
 from ..pipeline import Pipeline
+from ..pipeline.pipeline import _merge_results_into_df
 from ..utils.logger import get_logger
 from .checkpoint import CheckpointManager
 from .config import EnrichmentConfig
@@ -94,7 +97,12 @@ class Enricher:
             overwrite_fields = self.config.overwrite_fields
 
         if data_identifier is None:
-            data_identifier = f"df_{hash(str(df.columns.tolist()) + str(len(df)))}"
+            identifier_source = json.dumps(
+                {"columns": list(df.columns), "rows": len(df)},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            data_identifier = f"df_{hashlib.sha256(identifier_source).hexdigest()[:16]}"
 
         category = "_default"
 
@@ -106,23 +114,25 @@ class Enricher:
         completed_steps: list[str] = []
         checkpoint_results: dict[str, list[dict[str, Any]]] = {}
 
-        cp = self._checkpoint.load(data_identifier, category)
+        cp = self._checkpoint.load(
+            data_identifier,
+            category,
+            expected_total_rows=len(df),
+            expected_fields=fields_dict,
+            expected_steps=self.pipeline.step_names,
+        )
         if cp is not None:
-            # Validate checkpoint compatibility
-            if cp.total_rows != len(df):
-                logger.warning(
-                    f"Checkpoint row count mismatch ({cp.total_rows} vs {len(df)}), starting fresh"
-                )
-            elif cp.fields_dict != fields_dict:
-                logger.warning("Checkpoint fields_dict mismatch, starting fresh")
-            else:
-                prior_step_results = cp.step_results
-                completed_steps = list(cp.completed_steps)
-                checkpoint_results = dict(cp.step_results)
-                logger.info(f"Resuming from checkpoint: skipping {completed_steps}")
+            completed_steps = list(cp.completed_steps)
+            prior_step_results = {
+                k: v for k, v in cp.step_results.items() if k in cp.completed_steps
+            }
+            checkpoint_results = dict(prior_step_results)
+            logger.info(f"Resuming from checkpoint: skipping {completed_steps}")
 
-        # Convert DataFrame to rows
-        rows = df.to_dict(orient="records")
+        # Convert DataFrame to rows, replacing NaN/NaT/pd.NA with None.
+        # astype(object) is required first; otherwise float columns keep nan
+        # even after where(..., None) because pandas preserves dtype.
+        rows = df.astype(object).where(pd.notna(df), None).to_dict(orient="records")
 
         # Build on_step_complete callback for checkpointing
         cb_completed = list(completed_steps)
@@ -167,6 +177,7 @@ class Enricher:
                     fields_dict=fields_dict,
                     existing_completed=list(cb_completed),
                     existing_results=dict(cb_results),
+                    partial=True,
                 )
 
         # Execute pipeline
@@ -192,19 +203,8 @@ class Enricher:
                 error_summary[err.step_name] = error_summary.get(err.step_name, 0) + 1
             logger.warning("Pipeline completed with %d row errors: %s", len(errors), error_summary)
 
-        # Write results back to DataFrame
-        df_out = df.copy()
-        for idx in range(len(df_out)):
-            for key, value in accumulated[idx].items():
-                # Filter __ internal fields
-                if key.startswith("__"):
-                    continue
-                # Respect overwrite_fields
-                if not overwrite_fields and key in df_out.columns:
-                    existing = df_out.at[df_out.index[idx], key]
-                    if pd.notna(existing) and existing != "":
-                        continue
-                df_out.at[df_out.index[idx], key] = value
+        # Write results back to DataFrame (column-wise, O(n) not O(n²))
+        df_out = _merge_results_into_df(df, accumulated, overwrite_fields=overwrite_fields)
 
         # Cleanup checkpoint on success
         self._checkpoint.cleanup(data_identifier, category)

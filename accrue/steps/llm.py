@@ -388,14 +388,39 @@ class LLMStep:
     # -- default enforcement ---------------------------------------------
 
     def _apply_defaults(self, values: dict[str, Any]) -> dict[str, Any]:
-        """Replace refusal values with field defaults where configured."""
+        """Replace refusal values with field defaults where configured.
+
+        Skip the override when the field declares an ``enum`` and the value
+        (case-insensitive, stripped) is a member of that enum — the model's
+        output is then a legitimate categorical answer, not a refusal.
+        """
         for field_name, spec in self._field_specs.items():
             if field_name not in values:
                 continue
             if "default" not in spec.model_fields_set:
                 continue
-            if _is_refusal(values[field_name]):
-                values[field_name] = spec.default
+            if not _is_refusal(values[field_name]):
+                continue
+            # Value looks like a refusal — check whether it is a valid enum member
+            if spec.enum is not None and isinstance(values[field_name], str):
+                normalized = values[field_name].strip().lower()
+                enum_lower = {v.lower() for v in spec.enum}
+                if normalized in enum_lower:
+                    logger.debug(
+                        "LLMStep._apply_defaults: field '%s' value %r matches "
+                        "REFUSAL_PATTERNS but is a declared enum member — keeping.",
+                        field_name,
+                        values[field_name],
+                    )
+                    continue
+            logger.debug(
+                "LLMStep._apply_defaults: field '%s' value %r matches "
+                "REFUSAL_PATTERNS — replacing with default %r.",
+                field_name,
+                values[field_name],
+                spec.default,
+            )
+            values[field_name] = spec.default
         return values
 
     # -- batch helpers ---------------------------------------------------
@@ -609,15 +634,15 @@ class LLMStep:
                 )
 
             except LLMAPIError as exc:
+                if not exc.retryable:
+                    raise
                 last_api_error = exc
                 if api_attempt < api_max_retries:
-                    # Exponential backoff with jitter
-                    delay = retry_base_delay * (2**api_attempt)
-                    # Respect Retry-After header if available
+                    # Full random jitter: uniform(0, base * 2^attempt)
+                    delay = random.uniform(0, retry_base_delay * (2**api_attempt))
+                    # Respect Retry-After header: use it as a floor
                     if exc.retry_after is not None:
-                        delay = max(delay, exc.retry_after)
-                    # Add jitter (0-25% of delay)
-                    delay += random.uniform(0, delay * 0.25)
+                        delay = max(delay, float(exc.retry_after))
                     logger.warning(
                         "LLMStep '%s' API error (attempt %d/%d), retrying in %.1fs: %s",
                         self.name,

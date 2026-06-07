@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -453,3 +455,106 @@ class TestBatchKeyboardInterrupt:
 
         # The batch was submitted before the poll failure
         client.submit_batch.assert_called_once()
+
+
+# -- CancelledError and submit-failure cleanup ---------------------------------
+
+
+class TestBatchCancellationCleanup:
+    @pytest.mark.asyncio
+    async def test_cancelled_error_during_poll_cancels_all_batches(self):
+        """asyncio.CancelledError during poll must cancel every submitted batch_id."""
+        client = _make_batch_client()
+        client.poll_batch = AsyncMock(side_effect=asyncio.CancelledError())
+        client.cancel_batch = AsyncMock()
+
+        step = _make_batch_step(client=client)
+        pipeline = Pipeline([step])
+
+        with pytest.raises((asyncio.CancelledError, BaseException)):
+            await pipeline.run_async([{"company": "Acme"}])
+
+        client.submit_batch.assert_called_once()
+        client.cancel_batch.assert_called_once_with("batch_test_123")
+
+    @pytest.mark.asyncio
+    async def test_submit_failure_cancels_earlier_chunks(self):
+        """If submit_batch raises on the second chunk, the first chunk must be cancelled."""
+        submit_call_count = 0
+
+        async def submit_side_effect(requests, metadata=None):
+            nonlocal submit_call_count
+            submit_call_count += 1
+            if submit_call_count == 1:
+                return "batch_chunk_1"
+            raise RuntimeError("API error on second submit")
+
+        client = AsyncMock(spec=["complete", "submit_batch", "poll_batch", "cancel_batch"])
+        client.complete = AsyncMock(return_value=_mock_llm_response('{"market_size": "$1B"}'))
+        client.submit_batch = submit_side_effect
+        client.poll_batch = AsyncMock()
+        client.cancel_batch = AsyncMock()
+
+        step = _make_batch_step(client=client)
+        pipeline = Pipeline([step])
+        config = EnrichmentConfig(batch_max_requests=1)
+
+        # Two rows with max_requests=1 produces 2 chunks; second submit will fail
+        with pytest.raises(RuntimeError, match="API error"):
+            await pipeline.run_async([{"company": "Acme"}, {"company": "Beta"}], config=config)
+
+        # First chunk was submitted and must be cancelled
+        client.cancel_batch.assert_called_once_with("batch_chunk_1")
+        # poll_batch should never be reached
+        client.poll_batch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_happy_path_no_cancel_calls(self):
+        """Normal batch execution must not call cancel_batch."""
+        client = _make_batch_client(
+            responses={
+                "row-0": '{"market_size": "$5B"}',
+                "row-1": '{"market_size": "$3B"}',
+            }
+        )
+        step = _make_batch_step(client=client)
+        pipeline = Pipeline([step])
+
+        result = await pipeline.run_async([{"company": "Acme"}, {"company": "Beta"}])
+
+        client.cancel_batch.assert_not_called()
+        assert result.data[0]["market_size"] == "$5B"
+        assert result.data[1]["market_size"] == "$3B"
+
+    @pytest.mark.asyncio
+    async def test_cancel_failure_after_submit_failure_logs_warning(self, caplog):
+        """If cancel_batch raises during cleanup, a WARNING is logged before re-raise."""
+        submit_call_count = 0
+
+        async def submit_side_effect(requests, metadata=None):
+            nonlocal submit_call_count
+            submit_call_count += 1
+            if submit_call_count == 1:
+                return "batch_chunk_1"
+            raise RuntimeError("Submit failed on chunk 2")
+
+        async def cancel_side_effect(bid):
+            raise RuntimeError(f"cancel failed for {bid}")
+
+        client = AsyncMock(spec=["complete", "submit_batch", "poll_batch", "cancel_batch"])
+        client.complete = AsyncMock(return_value=_mock_llm_response('{"market_size": "$1B"}'))
+        client.submit_batch = submit_side_effect
+        client.poll_batch = AsyncMock()
+        client.cancel_batch = cancel_side_effect
+
+        step = _make_batch_step(client=client)
+        pipeline = Pipeline([step])
+        config = EnrichmentConfig(batch_max_requests=1)
+
+        with caplog.at_level(logging.WARNING, logger="accrue.pipeline.pipeline"):
+            with pytest.raises(RuntimeError, match="Submit failed"):
+                await pipeline.run_async([{"company": "Acme"}, {"company": "Beta"}], config=config)
+
+        assert "orphaned" in caplog.text.lower() or "billable" in caplog.text.lower(), (
+            "A warning about orphaned/billable batches must be logged when cancel fails"
+        )

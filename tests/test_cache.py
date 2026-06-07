@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import os
+import sqlite3
+import sys
+import threading
+import time
 from unittest.mock import patch
+
+import pytest
 
 from accrue.core.cache import (
     CacheManager,
@@ -10,6 +18,7 @@ from accrue.core.cache import (
     canonical_json,
     compute_cache_key,
 )
+from accrue.core.config import EnrichmentConfig
 
 # ---------------------------------------------------------------------------
 # CacheManager
@@ -118,6 +127,98 @@ class TestCacheManager:
         mgr.close()
         mgr.close()  # Should not raise
 
+    # ------------------------------------------------------------------
+    # Concurrency / thread-safety tests
+    # ------------------------------------------------------------------
+
+    def test_concurrent_set_from_two_threads(self, tmp_path):
+        """Two threads sharing a CacheManager can both call .set() safely."""
+        mgr = CacheManager(cache_dir=str(tmp_path), ttl=3600)
+        errors: list[Exception] = []
+
+        def worker(key: str) -> None:
+            try:
+                mgr.set(key, "step_a", {"key": key})
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futs = [pool.submit(worker, f"key_{i}") for i in range(2)]
+            concurrent.futures.wait(futs)
+
+        assert errors == [], f"Unexpected errors: {errors}"
+        assert mgr.get("key_0") == {"key": "key_0"}
+        assert mgr.get("key_1") == {"key": "key_1"}
+        mgr.close()
+
+    def test_cross_thread_get_no_programming_error(self, tmp_path):
+        """Connection opened in thread A, .get() from thread B — no ProgrammingError."""
+        mgr = CacheManager(cache_dir=str(tmp_path), ttl=3600)
+        # Force connection open on the main thread
+        mgr.set("tk", "step_a", {"v": 99})
+
+        result: list = []
+        errors: list[Exception] = []
+
+        def reader() -> None:
+            try:
+                result.append(mgr.get("tk"))
+            except sqlite3.ProgrammingError as exc:
+                errors.append(exc)
+
+        t = threading.Thread(target=reader)
+        t.start()
+        t.join()
+
+        assert errors == [], f"ProgrammingError raised: {errors}"
+        assert result == [{"v": 99}]
+        mgr.close()
+
+    def test_busy_timeout_pragma_is_set(self, tmp_path):
+        """PRAGMA busy_timeout is 5000 ms."""
+        mgr = CacheManager(cache_dir=str(tmp_path), ttl=3600)
+        conn = mgr._ensure_connection()
+        value = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert value == 5000
+        mgr.close()
+
+    def test_ttl_cleanup_on_init_removes_expired_rows(self, tmp_path):
+        """Expired rows inserted directly are removed when a fresh CacheManager is opened."""
+        # Seed a db with an already-expired row via a raw connection
+        db_path = tmp_path / "cache.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cache (
+                key        TEXT PRIMARY KEY,
+                step_name  TEXT NOT NULL,
+                value      TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                expires_at REAL
+            )
+        """)
+        # expires_at in the past
+        conn.execute(
+            "INSERT INTO cache (key, step_name, value, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("expired_key", "step_x", '{"v":1}', time.time() - 7200, time.time() - 3600),
+        )
+        conn.commit()
+        conn.close()
+
+        # Fresh CacheManager should trigger cleanup on first connection
+        mgr = CacheManager(cache_dir=str(tmp_path), ttl=3600)
+        # Trigger _ensure_connection via a benign .get()
+        mgr.get("unrelated_key")
+
+        # Verify expired row is gone via direct DB read
+        raw = sqlite3.connect(str(db_path))
+        row = raw.execute("SELECT key FROM cache WHERE key = 'expired_key'").fetchone()
+        raw.close()
+
+        assert row is None, "Expired row should have been cleaned up on init"
+        mgr.close()
+
 
 # ---------------------------------------------------------------------------
 # canonical_json + compute_cache_key
@@ -173,12 +274,18 @@ class _FakeLLMStep:
         temperature=0.2,
         system_prompt=None,
         system_prompt_header=None,
+        max_tokens=None,
+        provider_kwargs=None,
+        field_specs=None,
     ):
         self.name = name
         self.model = model
         self.temperature = temperature
         self._custom_system_prompt = system_prompt
         self._system_prompt_header = system_prompt_header
+        self.max_tokens = max_tokens
+        self.provider_kwargs = provider_kwargs
+        self._field_specs = field_specs or {}
 
 
 class _FakeFunctionStep:
@@ -262,3 +369,86 @@ class TestComputeStepCacheKey:
         k1 = _compute_step_cache_key(step, row, {"a": 1}, {})
         k2 = _compute_step_cache_key(step, row, {"a": 2}, {})
         assert k1 != k2
+
+    # ------------------------------------------------------------------
+    # New: schema, max_tokens, provider_kwargs
+    # ------------------------------------------------------------------
+
+    def test_schema_change_invalidates_cache(self):
+        """Changing FieldSpec.type from Number to String produces a different key."""
+        from accrue.schemas.field_spec import FieldSpec
+
+        row = {"company": "Acme"}
+        step_num = _FakeLLMStep(field_specs={"score": FieldSpec(prompt="Rate 1-10", type="Number")})
+        step_str = _FakeLLMStep(field_specs={"score": FieldSpec(prompt="Rate 1-10", type="String")})
+        k1 = _compute_step_cache_key(step_num, row, {}, {})
+        k2 = _compute_step_cache_key(step_str, row, {}, {})
+        assert k1 != k2
+
+    def test_max_tokens_change_invalidates_cache(self):
+        """Different max_tokens values produce different cache keys."""
+        row = {"company": "Acme"}
+        k1 = _compute_step_cache_key(_FakeLLMStep(max_tokens=100), row, {}, {})
+        k2 = _compute_step_cache_key(_FakeLLMStep(max_tokens=500), row, {}, {})
+        assert k1 != k2
+
+    def test_provider_kwargs_change_invalidates_cache(self):
+        """Different provider_kwargs produce different cache keys."""
+        row = {"company": "Acme"}
+        k1 = _compute_step_cache_key(_FakeLLMStep(provider_kwargs={"effort": "low"}), row, {}, {})
+        k2 = _compute_step_cache_key(_FakeLLMStep(provider_kwargs={"effort": "high"}), row, {}, {})
+        assert k1 != k2
+
+    def test_provider_kwargs_none_and_empty_dict_same_key(self):
+        """None and empty dict are equivalent for backwards-compat."""
+        row = {"company": "Acme"}
+        k1 = _compute_step_cache_key(_FakeLLMStep(provider_kwargs=None), row, {}, {})
+        k2 = _compute_step_cache_key(_FakeLLMStep(provider_kwargs={}), row, {}, {})
+        assert k1 == k2
+
+    def test_function_step_key_unaffected_by_new_inputs(self):
+        """FunctionStep key is stable and not influenced by schema/max_tokens/provider_kwargs."""
+        row = {"company": "Acme"}
+        step = _FakeFunctionStep(cache_version="v1")
+        k1 = _compute_step_cache_key(step, row, {}, {})
+        k2 = _compute_step_cache_key(step, row, {}, {})
+        assert k1 == k2
+        # FunctionStep has no model — confirm it takes the function path
+        assert not hasattr(step, "max_tokens")
+        assert not hasattr(step, "provider_kwargs")
+
+
+# ---------------------------------------------------------------------------
+# XDG defaults + 0o600 permissions
+# ---------------------------------------------------------------------------
+
+
+class TestXdgCacheDirDefault:
+    def test_xdg_cache_home_respected(self, monkeypatch, tmp_path):
+        """XDG_CACHE_HOME is used as the base for cache_dir."""
+        xdg_cache = str(tmp_path / "xdg_cache")
+        monkeypatch.setenv("XDG_CACHE_HOME", xdg_cache)
+        config = EnrichmentConfig()
+        assert config.cache_dir == os.path.join(xdg_cache, "accrue")
+
+    def test_fallback_to_home_cache_when_xdg_unset(self, monkeypatch):
+        """Falls back to ~/.cache/accrue when XDG_CACHE_HOME is unset."""
+        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+        config = EnrichmentConfig()
+        expected = os.path.join(os.path.expanduser("~"), ".cache", "accrue")
+        assert config.cache_dir == expected
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only chmod")
+    def test_cache_db_has_0o600_permissions(self, tmp_path):
+        """cache.db is created with 0o600 permissions."""
+        mgr = CacheManager(cache_dir=str(tmp_path), ttl=3600)
+        mgr.set("k", "step", {"v": 1})
+        stat = (tmp_path / "cache.db").stat()
+        assert stat.st_mode & 0o777 == 0o600
+        mgr.close()
+
+    def test_custom_cache_dir_constructor_arg_still_works(self, tmp_path):
+        """Regression: explicit cache_dir= overrides the XDG default."""
+        custom = str(tmp_path / "custom_cache")
+        config = EnrichmentConfig(cache_dir=custom)
+        assert config.cache_dir == custom

@@ -7,6 +7,7 @@ failures never crash data pipelines.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from dataclasses import dataclass
@@ -103,12 +104,17 @@ class EnrichmentHooks:
 
 
 async def _fire_hook(hook: Callable | None, event: Any) -> None:
-    """Call *hook* with *event*, awaiting if async.  Silently catches errors."""
+    """Call *hook* with *event*, awaiting if async.  Silently catches errors.
+
+    Sync hooks are dispatched via ``asyncio.to_thread`` so a blocking hook
+    (e.g. one that writes to Slack or Sentry) does not freeze the event loop.
+    """
     if hook is None:
         return
     try:
-        result = hook(event)
-        if inspect.isawaitable(result):
-            await result
+        if inspect.iscoroutinefunction(hook):
+            await hook(event)
+        else:
+            await asyncio.to_thread(hook, event)
     except Exception:
         logger.warning("Hook %s raised an exception", hook, exc_info=True)

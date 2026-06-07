@@ -62,6 +62,9 @@ class OpenAIClient:
                 kwargs["base_url"] = self._base_url
             if self._http_client is not None:
                 kwargs["http_client"] = self._http_client
+            # max_retries=0: disable SDK-level retry so LLMStep's retry loop
+            # is the single source of truth and retries are not double-stacked.
+            kwargs["max_retries"] = 0
             self._client = AsyncOpenAI(**kwargs)
         return self._client
 
@@ -163,9 +166,12 @@ class OpenAIClient:
                 status_code=408,
             ) from exc
         except APIError as exc:
+            exc_status = getattr(exc, "status_code", None)
+            # Promote generic 429 to is_rate_limit (covers third-party OpenAI-compatible servers)
             raise LLMAPIError(
                 f"OpenAI API error for model '{model}': {exc}",
-                status_code=getattr(exc, "status_code", None),
+                status_code=exc_status,
+                is_rate_limit=(exc_status == 429),
             ) from exc
 
         # Extract content
@@ -236,9 +242,12 @@ class OpenAIClient:
                 status_code=408,
             ) from exc
         except APIError as exc:
+            exc_status = getattr(exc, "status_code", None)
+            # Promote generic 429 to is_rate_limit (covers third-party OpenAI-compatible servers)
             raise LLMAPIError(
                 f"OpenAI API error for model '{model}': {exc}",
-                status_code=getattr(exc, "status_code", None),
+                status_code=exc_status,
+                is_rate_limit=(exc_status == 429),
             ) from exc
 
         content = response.choices[0].message.content or ""
@@ -276,6 +285,15 @@ class OpenAIClient:
         from openai import APIError
 
         client = self._get_client()
+
+        # Validate custom_id uniqueness before touching the network
+        seen: set[str] = set()
+        for req in requests:
+            if not req.custom_id:
+                raise ValueError("BatchRequest.custom_id must be non-empty")
+            if req.custom_id in seen:
+                raise ValueError(f"Duplicate custom_id in batch: {req.custom_id!r}")
+            seen.add(req.custom_id)
 
         # Build JSONL content
         jsonl_lines: list[str] = []
@@ -351,52 +369,60 @@ class OpenAIClient:
         client = self._get_client()
         start = time.monotonic()
 
-        while True:
+        try:
+            while True:
+                try:
+                    batch = await client.batches.retrieve(batch_id)
+                except APIError as exc:
+                    raise StepError(
+                        f"OpenAI batch status check failed for {batch_id}: {exc}",
+                        step_name="batch",
+                    ) from exc
+
+                status = batch.status
+                elapsed = time.monotonic() - start
+
+                if status == "completed":
+                    logger.info("OpenAI batch %s completed (%.0fs elapsed)", batch_id, elapsed)
+                    return await self._download_batch_results(batch, batch_id)
+
+                if status in ("failed", "expired", "cancelled"):
+                    error_info = ""
+                    if hasattr(batch, "errors") and batch.errors:
+                        error_data = getattr(batch.errors, "data", [])
+                        if error_data:
+                            msgs = [getattr(e, "message", str(e)) for e in error_data[:3]]
+                            error_info = f" Errors: {msgs}"
+                    raise StepError(
+                        f"OpenAI batch {batch_id} {status} after {elapsed:.0f}s.{error_info} "
+                        f"Check the OpenAI dashboard for details.",
+                        step_name="batch",
+                    )
+
+                if elapsed > timeout:
+                    raise StepError(
+                        f"OpenAI batch {batch_id} timed out after {elapsed:.0f}s "
+                        f"(status={status}). The batch may still be processing — "
+                        f"check the OpenAI dashboard with batch ID {batch_id}.",
+                        step_name="batch",
+                    )
+
+                logger.info(
+                    "OpenAI batch %s status=%s (%.0fs elapsed), next check in %.0fs",
+                    batch_id,
+                    status,
+                    elapsed,
+                    poll_interval,
+                )
+                await asyncio.sleep(poll_interval)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # User cancelled — best-effort cancel the upstream batch to avoid
+            # orphaning a billable job.
             try:
-                batch = await client.batches.retrieve(batch_id)
-            except APIError as exc:
-                raise StepError(
-                    f"OpenAI batch status check failed for {batch_id}: {exc}",
-                    step_name="batch",
-                ) from exc
-
-            status = batch.status
-            elapsed = time.monotonic() - start
-
-            if status == "completed":
-                logger.info("OpenAI batch %s completed (%.0fs elapsed)", batch_id, elapsed)
-                return await self._download_batch_results(batch, batch_id)
-
-            if status in ("failed", "expired", "cancelled"):
-                error_info = ""
-                if hasattr(batch, "errors") and batch.errors:
-                    error_data = getattr(batch.errors, "data", [])
-                    if error_data:
-                        error_info = (
-                            f" Errors: {[getattr(e, 'message', str(e)) for e in error_data[:3]]}"
-                        )
-                raise StepError(
-                    f"OpenAI batch {batch_id} {status} after {elapsed:.0f}s.{error_info} "
-                    f"Check the OpenAI dashboard for details.",
-                    step_name="batch",
-                )
-
-            if elapsed > timeout:
-                raise StepError(
-                    f"OpenAI batch {batch_id} timed out after {elapsed:.0f}s "
-                    f"(status={status}). The batch may still be processing — "
-                    f"check the OpenAI dashboard with batch ID {batch_id}.",
-                    step_name="batch",
-                )
-
-            logger.info(
-                "OpenAI batch %s status=%s (%.0fs elapsed), next check in %.0fs",
-                batch_id,
-                status,
-                elapsed,
-                poll_interval,
-            )
-            await asyncio.sleep(poll_interval)
+                await self.cancel_batch(batch_id)
+            except Exception:
+                pass  # cancel_batch is best-effort; don't mask the original interruption
+            raise
 
     async def cancel_batch(self, batch_id: str) -> None:
         """Best-effort cancel an OpenAI batch job.
