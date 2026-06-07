@@ -26,7 +26,7 @@ from .core.hooks import (
     StepEndEvent,
     StepStartEvent,
 )
-from .pipeline import Pipeline, PipelineResult
+from .pipeline import Pipeline, PipelinePlan, PipelineResult, StepPlan
 from .schemas.base import CostSummary
 from .schemas.field_spec import FieldSpec
 from .schemas.grounding import GroundingConfig
@@ -42,6 +42,8 @@ __all__ = [
     # Primary API
     "Pipeline",
     "PipelineResult",
+    "PipelinePlan",
+    "StepPlan",
     "LLMStep",
     "FunctionStep",
     "EnrichmentConfig",

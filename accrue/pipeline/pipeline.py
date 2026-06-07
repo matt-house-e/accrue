@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import time as _time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
@@ -25,6 +26,7 @@ from ..core.hooks import (
 from ..schemas.base import CostSummary, StepUsage, UsageInfo
 from ..steps.base import Step, StepContext, StepResult
 from ..utils.logger import get_logger
+from .plan import PipelinePlan
 
 logger = get_logger(__name__)
 
@@ -285,10 +287,55 @@ class PipelineResult:
             )
 
         if path is not None:
-            from pathlib import Path
-
             Path(path).write_text(text, encoding="utf-8")
         return text
+
+    def save(self, path: str | Path) -> Path:
+        """Persist the enriched data to disk, inferring format from the extension.
+
+        Supported extensions: ``.csv``, ``.json``, ``.parquet``.  Parent
+        directories are created if they don't exist.
+
+        This is what ``Pipeline.run(..., output_file=...)`` calls internally,
+        before ``run`` returns — so a crash in your own post-processing can't
+        lose a completed (and already paid-for) run.  Calling it yourself is
+        handy when you want to save conditionally or to multiple formats.
+
+        Args:
+            path: Destination file.  The suffix selects the writer
+                (``.csv`` / ``.json`` / ``.parquet``).
+
+        Returns:
+            The :class:`~pathlib.Path` that was written.
+
+        Raises:
+            ValueError: If the extension isn't one of the supported formats.
+            ImportError: If ``.parquet`` is requested but no parquet engine
+                (e.g. pyarrow) is installed.
+        """
+        dest = Path(path)
+        suffix = dest.suffix.lower()
+        df = self.data if isinstance(self.data, pd.DataFrame) else pd.DataFrame(self.data)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        if suffix == ".csv":
+            df.to_csv(dest, index=False)
+        elif suffix == ".json":
+            df.to_json(dest, orient="records", indent=2)
+        elif suffix == ".parquet":
+            try:
+                df.to_parquet(dest, index=False)
+            except ImportError as exc:
+                raise ImportError(
+                    "Writing .parquet requires a parquet engine; "
+                    "install one with `pip install pyarrow`."
+                ) from exc
+        else:
+            raise ValueError(
+                f"Cannot infer output format from {dest.name!r}; "
+                "expected a .csv, .json, or .parquet extension."
+            )
+        return dest
 
 
 class Pipeline:
@@ -347,19 +394,114 @@ class Pipeline:
 
     # -- primary API -----------------------------------------------------
 
+    def plan(
+        self,
+        data: pd.DataFrame | list[dict[str, Any]],
+        sample_size: int = 3,
+        config: EnrichmentConfig | None = None,
+    ) -> PipelinePlan:
+        """Preview what a run will do and estimate its cost — a dry run.
+
+        Runs the pipeline over the first ``sample_size`` rows (real calls, but
+        capped) and extrapolates the measured token usage to the full dataset,
+        alongside each step's resolved prompt and JSON schema.  Use it to catch
+        a mis-built prompt or an accidental \\$50 run before committing.
+
+        Args:
+            data: The full dataset (DataFrame or ``list[dict]``).  Only the
+                first ``sample_size`` rows are actually executed.
+            sample_size: Rows to run for the preview (clamped to the dataset
+                size).
+            config: Optional :class:`EnrichmentConfig` — the same one you'd
+                pass to :meth:`run`, so the preview reflects your settings.
+
+        Returns:
+            A :class:`PipelinePlan`; call ``.summary()`` for a readable preview.
+        """
+        from ..steps.function import FunctionStep
+        from ..steps.llm import LLMStep
+        from .plan import StepPlan, extrapolate_cost
+
+        # Normalize input to rows and count the full dataset.
+        if isinstance(data, list):
+            all_rows = data
+        else:
+            all_rows = data.astype(object).where(pd.notna(data), None).to_dict(orient="records")
+        total_rows = len(all_rows)
+        n = max(0, min(sample_size, total_rows))
+        sample_rows = [dict(r) for r in all_rows[:n]]
+
+        # Introspect each step's resolved prompt + schema (off the first row).
+        first_row = sample_rows[0] if sample_rows else {}
+        step_plans: list[StepPlan] = []
+        for name in self.step_names:
+            step = self._step_map[name]
+            depends_on = list(getattr(step, "depends_on", []) or [])
+            if isinstance(step, LLMStep):
+                ctx = StepContext(row=first_row, fields={}, prior_results={})
+                step_plans.append(
+                    StepPlan(
+                        name=name,
+                        kind="llm",
+                        depends_on=depends_on,
+                        model=step.model,
+                        system_prompt=step._build_system_message(ctx),
+                        response_format=step._build_response_format(),
+                    )
+                )
+            else:
+                kind = "function" if isinstance(step, FunctionStep) else "other"
+                step_plans.append(StepPlan(name=name, kind=kind, depends_on=depends_on))
+
+        # Run the capped sample (real calls) to get outputs + measured cost.
+        sample_result = self.run(sample_rows, config=config) if sample_rows else None
+        if sample_result is not None:
+            sample_outputs = list(sample_result.data)
+            sample_cost = sample_result.cost
+            sample_errors = sample_result.errors
+        else:
+            sample_outputs, sample_cost, sample_errors = [], CostSummary(), []
+
+        return PipelinePlan(
+            steps=step_plans,
+            sample_rows=sample_rows,
+            sample_outputs=sample_outputs,
+            sample_errors=sample_errors,
+            total_rows=total_rows,
+            sample_size=n,
+            sample_cost=sample_cost,
+            estimated_cost=extrapolate_cost(sample_cost, total_rows),
+        )
+
     def run(
         self,
         data: pd.DataFrame | list[dict[str, Any]],
         config: EnrichmentConfig | None = None,
         hooks: EnrichmentHooks | None = None,
+        output_file: str | Path | None = None,
+        confirm: bool = False,
     ) -> PipelineResult:
         """Synchronous entry point — the ONE way to use Accrue.
 
         Accepts a DataFrame or ``list[dict]``. Output type matches input type.
 
+        If ``output_file`` is given, the enriched data is written to it (format
+        inferred from the extension — ``.csv`` / ``.json`` / ``.parquet``) before
+        ``run`` returns, so an error in your own post-processing can't lose a
+        completed, paid-for run.  ``result.data`` is still returned in memory.
+
+        If ``confirm=True``, a :meth:`plan` preview is printed first and you're
+        prompted ``y/n`` before the full run proceeds; answering no raises
+        ``RuntimeError`` without running the rest of the dataset.
+
         Raises ``RuntimeError`` if called from inside a running event loop
         (use ``await pipeline.run_async(data)`` in that case).
         """
+        if confirm:
+            print(self.plan(data, config=config).summary())
+            answer = input("Proceed with the full run? [y/N] ").strip().lower()
+            if answer not in {"y", "yes"}:
+                raise RuntimeError("Pipeline run aborted at confirmation prompt.")
         try:
             asyncio.get_running_loop()
             raise RuntimeError(
@@ -369,13 +511,14 @@ class Pipeline:
         except RuntimeError as exc:
             if "run_async" in str(exc):
                 raise
-        return asyncio.run(self.run_async(data, config, hooks=hooks))
+        return asyncio.run(self.run_async(data, config, hooks=hooks, output_file=output_file))
 
     async def run_async(
         self,
         data: pd.DataFrame | list[dict[str, Any]],
         config: EnrichmentConfig | None = None,
         hooks: EnrichmentHooks | None = None,
+        output_file: str | Path | None = None,
     ) -> PipelineResult:
         """Async entry point — ``await pipeline.run_async(data)``.
 
@@ -387,6 +530,11 @@ class Pipeline:
                 for most workloads.
             hooks: Optional :class:`EnrichmentHooks` for lifecycle callbacks
                 (pipeline start/end, step start/end, row complete).
+            output_file: If given, the enriched data is saved here (format
+                inferred from the extension — ``.csv`` / ``.json`` /
+                ``.parquet``) before this method returns, guarding a completed
+                run against errors in downstream user code.  See
+                :meth:`PipelineResult.save`.
 
         Returns:
             A :class:`PipelineResult` containing the enriched data, aggregated
@@ -465,7 +613,7 @@ class Pipeline:
                     if not key.startswith("__"):
                         merged[key] = value
                 result_rows.append(merged)
-            return PipelineResult(
+            result = PipelineResult(
                 data=result_rows,
                 cost=cost,
                 errors=errors,
@@ -475,7 +623,7 @@ class Pipeline:
             )
         else:
             df_out = self._build_result_df(data, accumulated, config)
-            return PipelineResult(
+            result = PipelineResult(
                 data=df_out,
                 cost=cost,
                 errors=errors,
@@ -483,6 +631,12 @@ class Pipeline:
                 step_elapsed_seconds=step_elapsed,
                 field_specs=all_fields,
             )
+
+        # Persist before returning so downstream user errors can't lose a
+        # completed run (see issue #10).
+        if output_file is not None:
+            result.save(output_file)
+        return result
 
     def runner(self, config: EnrichmentConfig | None = None) -> Any:
         """Create a reusable :class:`Enricher` runner for this pipeline.
