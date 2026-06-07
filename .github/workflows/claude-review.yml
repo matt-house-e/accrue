@@ -19,7 +19,14 @@ concurrency:
 
 jobs:
   review:
-    if: github.event.pull_request.draft == false
+    # Skip fork PRs: GitHub withholds secrets and the OIDC id-token from
+    # `pull_request` runs on forks, so the action can't auth (empty
+    # ANTHROPIC_API_KEY + failed OIDC token) and the job hard-fails with a
+    # red X. Gating here makes fork PRs skip the review instead. Maintainers
+    # can still review a fork PR on demand via the `@claude` mention bot.
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read
