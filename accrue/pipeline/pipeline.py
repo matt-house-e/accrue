@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import time as _time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
@@ -285,10 +286,55 @@ class PipelineResult:
             )
 
         if path is not None:
-            from pathlib import Path
-
             Path(path).write_text(text, encoding="utf-8")
         return text
+
+    def save(self, path: str | Path) -> Path:
+        """Persist the enriched data to disk, inferring format from the extension.
+
+        Supported extensions: ``.csv``, ``.json``, ``.parquet``.  Parent
+        directories are created if they don't exist.
+
+        This is what ``Pipeline.run(..., output_file=...)`` calls internally,
+        before ``run`` returns — so a crash in your own post-processing can't
+        lose a completed (and already paid-for) run.  Calling it yourself is
+        handy when you want to save conditionally or to multiple formats.
+
+        Args:
+            path: Destination file.  The suffix selects the writer
+                (``.csv`` / ``.json`` / ``.parquet``).
+
+        Returns:
+            The :class:`~pathlib.Path` that was written.
+
+        Raises:
+            ValueError: If the extension isn't one of the supported formats.
+            ImportError: If ``.parquet`` is requested but no parquet engine
+                (e.g. pyarrow) is installed.
+        """
+        dest = Path(path)
+        suffix = dest.suffix.lower()
+        df = self.data if isinstance(self.data, pd.DataFrame) else pd.DataFrame(self.data)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        if suffix == ".csv":
+            df.to_csv(dest, index=False)
+        elif suffix == ".json":
+            df.to_json(dest, orient="records", indent=2)
+        elif suffix == ".parquet":
+            try:
+                df.to_parquet(dest, index=False)
+            except ImportError as exc:
+                raise ImportError(
+                    "Writing .parquet requires a parquet engine; "
+                    "install one with `pip install pyarrow`."
+                ) from exc
+        else:
+            raise ValueError(
+                f"Cannot infer output format from {dest.name!r}; "
+                "expected a .csv, .json, or .parquet extension."
+            )
+        return dest
 
 
 class Pipeline:
@@ -352,10 +398,16 @@ class Pipeline:
         data: pd.DataFrame | list[dict[str, Any]],
         config: EnrichmentConfig | None = None,
         hooks: EnrichmentHooks | None = None,
+        output_file: str | Path | None = None,
     ) -> PipelineResult:
         """Synchronous entry point — the ONE way to use Accrue.
 
         Accepts a DataFrame or ``list[dict]``. Output type matches input type.
+
+        If ``output_file`` is given, the enriched data is written to it (format
+        inferred from the extension — ``.csv`` / ``.json`` / ``.parquet``) before
+        ``run`` returns, so an error in your own post-processing can't lose a
+        completed, paid-for run.  ``result.data`` is still returned in memory.
 
         Raises ``RuntimeError`` if called from inside a running event loop
         (use ``await pipeline.run_async(data)`` in that case).
@@ -369,13 +421,14 @@ class Pipeline:
         except RuntimeError as exc:
             if "run_async" in str(exc):
                 raise
-        return asyncio.run(self.run_async(data, config, hooks=hooks))
+        return asyncio.run(self.run_async(data, config, hooks=hooks, output_file=output_file))
 
     async def run_async(
         self,
         data: pd.DataFrame | list[dict[str, Any]],
         config: EnrichmentConfig | None = None,
         hooks: EnrichmentHooks | None = None,
+        output_file: str | Path | None = None,
     ) -> PipelineResult:
         """Async entry point — ``await pipeline.run_async(data)``.
 
@@ -387,6 +440,11 @@ class Pipeline:
                 for most workloads.
             hooks: Optional :class:`EnrichmentHooks` for lifecycle callbacks
                 (pipeline start/end, step start/end, row complete).
+            output_file: If given, the enriched data is saved here (format
+                inferred from the extension — ``.csv`` / ``.json`` /
+                ``.parquet``) before this method returns, guarding a completed
+                run against errors in downstream user code.  See
+                :meth:`PipelineResult.save`.
 
         Returns:
             A :class:`PipelineResult` containing the enriched data, aggregated
@@ -465,7 +523,7 @@ class Pipeline:
                     if not key.startswith("__"):
                         merged[key] = value
                 result_rows.append(merged)
-            return PipelineResult(
+            result = PipelineResult(
                 data=result_rows,
                 cost=cost,
                 errors=errors,
@@ -475,7 +533,7 @@ class Pipeline:
             )
         else:
             df_out = self._build_result_df(data, accumulated, config)
-            return PipelineResult(
+            result = PipelineResult(
                 data=df_out,
                 cost=cost,
                 errors=errors,
@@ -483,6 +541,12 @@ class Pipeline:
                 step_elapsed_seconds=step_elapsed,
                 field_specs=all_fields,
             )
+
+        # Persist before returning so downstream user errors can't lose a
+        # completed run (see issue #10).
+        if output_file is not None:
+            result.save(output_file)
+        return result
 
     def runner(self, config: EnrichmentConfig | None = None) -> Any:
         """Create a reusable :class:`Enricher` runner for this pipeline.

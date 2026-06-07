@@ -33,3 +33,14 @@ OpenAI is the default provider and requires no extra configuration. Anthropic an
 ## Results
 
 `Pipeline.run()` returns a `PipelineResult` containing enriched data, cost information, and any errors. The output type matches the input type: pass in a DataFrame and get a DataFrame back, pass in a list of dicts and get a list of dicts back. `CostSummary` breaks down token usage and cache hit rates per step.
+
+## Saving results
+
+A finished pipeline run has already cost you tokens and time, so don't let a typo in your own save logic throw it away. Pass `output_file` to `run()` (or `run_async()`) and the enriched data is written to disk **before `run()` returns** — the format is inferred from the extension (`.csv`, `.json`, or `.parquet`):
+
+```python
+result = pipeline.run(data, output_file="output/results.csv")
+# results are already on disk; result.data is still in memory as usual
+```
+
+`result.data` is still returned in memory exactly as before. You can also persist on demand with `result.save("output/results.json")` — handy for writing multiple formats or saving conditionally. Writing `.parquet` requires a parquet engine (`pip install pyarrow`).
