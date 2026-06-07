@@ -1,6 +1,8 @@
 ---
-description: Cut a release — bump version, draft CHANGELOG, tag, push
+name: release
+description: Cut an accrue release — bump the version in pyproject.toml (and __init__.py), draft the CHANGELOG from commits since the last tag, commit, tag, push, and trigger the PyPI publish workflow. Use when the user wants to cut, ship, or publish a new accrue release or version bump.
 argument-hint: <new-version e.g. 1.3.0>
+allowed-tools: Read, Edit, Grep, Glob, Bash(git:*), Bash(gh:*), Bash(grep:*), Bash(ruff:*), Bash(pytest:*), Bash(python -m build:*), Bash(uv:*)
 ---
 
 You are cutting release v$ARGUMENTS of accrue.

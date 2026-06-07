@@ -1,5 +1,7 @@
 ---
-description: Find drift between code and docs, propose patches
+name: sync-docs
+description: Audit the accrue repo for drift between the source (accrue/) and the docs (docs/ + README.md) — undocumented public API, missing step-type guides, stale CLAUDE.md tables, broken cross-refs — and surface proposed patches without applying them. Use when the user wants to check or fix doc drift.
+allowed-tools: Read, Grep, Glob, Bash(grep:*), Bash(gh:*)
 ---
 
 Audit the accrue repo for drift between `accrue/` (the source) and `docs/` + `README.md` (the docs).
