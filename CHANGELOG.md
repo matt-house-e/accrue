@@ -9,10 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Agentic SDLC scaffolding: GitHub Actions for `@claude` mention, PR review, weekly maintenance, and dogfooded issue triage. Repo-scoped slash commands under `.claude/commands/`. Local `PostToolUse` hook for ruff-on-edit. See `AGENTS.md`.
+- **`PipelineResult.report(format, path, disable)`** — heuristic-driven Markdown/HTML run summary. Headlines suspicious patterns (enum collapse, numeric clipping, length anomalies, retry storms, refusal phrases, cache thrash, cost outliers) with a probable cause and a suggested action; backed by a per-step stats table. Pass `disable=[...]` to mute individual heuristic codes. See `docs/guides/report.md`. (#32)
+- `PipelineResult` now exposes `pipeline_elapsed_seconds`, `step_elapsed_seconds`, and `field_specs`, populated by `Pipeline.run_async()` so reporters and custom heuristics can introspect.
 
 ### Changed
 - **`EnrichmentConfig.enable_caching` now defaults to `True`** (was `False`). Re-runs of unchanged inputs no longer re-pay the API cost. Opt out with `EnrichmentConfig(enable_caching=False)` for one-off runs.
 - **`LLMStep` auto-detects provider from model name.** `claude-*` → `AnthropicClient`, `gemini-*` → `GoogleClient`, anything else (or any model with `base_url` set) → `OpenAIClient`. Previously every Claude/Gemini user had to pass `client=AnthropicClient()` or `client=GoogleClient()` explicitly. Explicit `client=` still wins. (#23)
+- **`Pipeline.execute()` returns a 4-tuple** `(accumulated, errors, cost, step_elapsed_seconds)` instead of a 3-tuple. Internal API (not exported in `accrue.__all__`); callers using `Pipeline.run()` / `run_async()` are unaffected.
 
 ### Fixed
 - `LLMStep.parse_response` now strips markdown code fences before `json.loads`. Fixes parse failures with Claude Haiku + grounding tools, where the structured-output constraint is disabled and the model wraps JSON in ` ``` ` fences. (#7)

@@ -128,7 +128,7 @@ class TestPipelineExecution:
             ]
         )
         rows = [{"company": "Acme"}, {"company": "Beta"}]
-        results, errors, cost = await p.execute(rows, all_fields={"f1": {"prompt": "test"}})
+        results, errors, cost, _ = await p.execute(rows, all_fields={"f1": {"prompt": "test"}})
 
         assert len(results) == 2
         assert results[0] == {"f1": "f1_value"}
@@ -143,7 +143,7 @@ class TestPipelineExecution:
                 FunctionStep("b", fn=_identity_fn(["f2"]), fields=["f2"]),
             ]
         )
-        results, errors, cost = await p.execute([{"x": 1}], all_fields={"f1": {}, "f2": {}})
+        results, errors, cost, _ = await p.execute([{"x": 1}], all_fields={"f1": {}, "f2": {}})
 
         assert results[0] == {"f1": "f1_value", "f2": "f2_value"}
         assert errors == []
@@ -166,7 +166,7 @@ class TestPipelineExecution:
         )
 
         rows = [{"input": "hello"}, {"input": "world"}]
-        results, errors, cost = await p.execute(rows, all_fields={})
+        results, errors, cost, _ = await p.execute(rows, all_fields={})
 
         assert results[0]["final"] == "hello_processed_done"
         assert results[1]["final"] == "world_processed_done"
@@ -202,14 +202,14 @@ class TestPipelineExecution:
             ]
         )
 
-        results, errors, cost = await p.execute([{"x": 0}], all_fields={})
+        results, errors, cost, _ = await p.execute([{"x": 0}], all_fields={})
         assert results[0] == {"a_out": 1, "b_out": 11, "c_out": 101, "d_out": 112}
         assert errors == []
 
     @pytest.mark.asyncio
     async def test_empty_rows(self):
         p = Pipeline([FunctionStep("a", fn=lambda ctx: {"f": 1}, fields=["f"])])
-        results, errors, cost = await p.execute([], all_fields={})
+        results, errors, cost, _ = await p.execute([], all_fields={})
         assert results == []
         assert errors == []
 
@@ -228,7 +228,7 @@ class TestPipelineExecution:
 
         p = Pipeline([FunctionStep("a", fn=slow_fn, fields=["f"])])
         config = EnrichmentConfig(max_workers=2, on_error="continue")
-        results, errors, cost = await p.execute(
+        results, errors, cost, _ = await p.execute(
             [{"x": i} for i in range(5)],
             all_fields={},
             config=config,
@@ -257,7 +257,7 @@ class TestPipelineExecution:
             ]
         )
 
-        results, errors, cost = await p.execute([{"q": "test"}], all_fields={})
+        results, errors, cost, _ = await p.execute([{"q": "test"}], all_fields={})
         assert results[0]["summary"] == "Based on: search data"
         # Internal fields are still in results — Enricher filters them later
         assert results[0]["__web_ctx"] == "search data"
@@ -275,7 +275,7 @@ class TestCostAggregation:
                 FunctionStep("a", fn=_identity_fn(["f1"]), fields=["f1"]),
             ]
         )
-        results, errors, cost = await p.execute([{"x": 1}], all_fields={})
+        results, errors, cost, _ = await p.execute([{"x": 1}], all_fields={})
         assert cost.total_tokens == 0
         assert cost.steps == {}
 
@@ -301,7 +301,7 @@ class TestCostAggregation:
                 )
 
         p = Pipeline([UsageStep()])
-        results, errors, cost = await p.execute(
+        results, errors, cost, _ = await p.execute(
             [{"x": 1}, {"x": 2}],
             all_fields={},
         )
@@ -524,7 +524,7 @@ class TestWorkerPoolBoundedTaskCount:
         rows = [{"i": i} for i in range(num_rows)]
         config = EnrichmentConfig(max_workers=max_workers)
 
-        results, errors, cost = await p.execute(rows, all_fields={}, config=config)
+        results, errors, cost, _ = await p.execute(rows, all_fields={}, config=config)
 
         assert errors == [], f"Unexpected errors: {errors}"
         assert len(results) == num_rows
