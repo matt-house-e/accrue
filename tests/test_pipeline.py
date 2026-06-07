@@ -524,7 +524,7 @@ class TestWorkerPoolBoundedTaskCount:
         rows = [{"i": i} for i in range(num_rows)]
         config = EnrichmentConfig(max_workers=max_workers)
 
-        results, errors, cost = await p.execute(rows, all_fields={}, config=config)
+        results, errors, cost, _ = await p.execute(rows, all_fields={}, config=config)
 
         assert errors == [], f"Unexpected errors: {errors}"
         assert len(results) == num_rows

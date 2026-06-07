@@ -349,7 +349,7 @@ class TestOnErrorContinueRegression:
         rows = [{"__idx": i} for i in range(5)]
         config = EnrichmentConfig(on_error="continue")
 
-        results, errors, cost = await p.execute(rows, all_fields={}, config=config)
+        results, errors, cost, _ = await p.execute(rows, all_fields={}, config=config)
 
         assert len(errors) == 2
         failed = {e.row_index for e in errors}
