@@ -1,6 +1,8 @@
 ---
-description: Pick up a GitHub issue end-to-end — read it, plan, code, test, open a PR
+name: ship-issue
+description: Pick up an accrue GitHub issue end-to-end — read it, plan against the repo invariants, branch, code, add tests, run ruff + pytest, and open a PR. Use when the user wants to implement, ship, or work on a specific accrue issue by number.
 argument-hint: <issue-number>
+allowed-tools: Read, Edit, Write, Grep, Glob, Bash(git:*), Bash(gh:*), Bash(ruff:*), Bash(pytest:*), Bash(uv:*)
 ---
 
 You are shipping issue #$ARGUMENTS in the accrue repo.

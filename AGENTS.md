@@ -13,10 +13,10 @@ The patterns here are taken from the official documentation, not guessed. Citati
 | Weekly maintenance | Sunday 02:00 UTC + manual `workflow_dispatch` | `.github/workflows/weekly-maintenance.yml` |
 | Accrue-triages-accrue | New issue opened | `.github/workflows/accrue-triage.yml` |
 | Lint-on-edit (local) | After every Edit/Write tool call by Claude Code | `.claude/settings.json` + `.claude/hooks/lint-changed.sh` |
-| `/ship-issue <num>` | Local Claude Code | `.claude/commands/ship-issue.md` |
-| `/release <version>` | Local Claude Code | `.claude/commands/release.md` |
-| `/sync-docs` | Local Claude Code | `.claude/commands/sync-docs.md` |
-| `/triage-issues` | Local Claude Code | `.claude/commands/triage-issues.md` |
+| `/ship-issue <num>` | Local Claude Code | `.claude/skills/ship-issue/SKILL.md` |
+| `/release <version>` | Local Claude Code | `.claude/skills/release/SKILL.md` |
+| `/sync-docs` | Local Claude Code | `.claude/skills/sync-docs/SKILL.md` |
+| `/triage-issues` | Local Claude Code | `.claude/skills/triage-issues/SKILL.md` |
 
 ## Required secrets
 
@@ -41,7 +41,7 @@ When working in this repo with Claude Code, four project-scoped commands appear 
 - **`/sync-docs`** — diff `accrue/` against `docs/` + `README.md`, surface drift, propose patches.
 - **`/triage-issues`** — sweep open issues, apply labels, ask for repro on bug reports, link near-duplicates.
 
-`.claude/commands/` is where these live. It's still the supported location, though Claude Code is moving toward `.claude/skills/` as the unified home for commands+skills — both work today.
+`.claude/skills/` is where these live — one directory per skill, each holding a `SKILL.md` with a `name`, a `description` (used for the `/` menu and JIT relevance matching), an optional `argument-hint`, and a scoped `allowed-tools` list. This is Claude Code's unified home for commands+skills; the older `.claude/commands/` layout is deprecated.
 
 `.claude/settings.json` adds a **PostToolUse hook** that runs `ruff check` + `ruff format --check` on every Python file Claude edits. If it fails, the hook exits 2, stderr is fed back to Claude, and Claude fixes it before stopping. This is the "self-healing dev loop" pattern — one of the most-used hook configurations in the docs.
 
@@ -59,7 +59,7 @@ This is on purpose: the easiest way to dogfood a data-enrichment library is to u
 
 ## Adding a new agent or command
 
-1. **New slash command** — drop a markdown file in `.claude/commands/`. Filename is the command name. Frontmatter format: `description`, optional `argument-hint`. Body is the prompt.
+1. **New slash command / skill** — create `.claude/skills/<name>/SKILL.md`. The directory name is the command name (`/<name>`). Frontmatter: `name`, `description` (shows in the `/` menu and drives JIT relevance), optional `argument-hint`, and `allowed-tools` to scope what it can do. Body is the prompt.
 2. **New workflow** — add a YAML file under `.github/workflows/`. Always pin `@v1`. Use `prompt:` (not the deprecated `direct_prompt:`). Scope tools via `claude_args: --allowedTools "..."`.
 3. **New hook** — extend `.claude/settings.json`. Useful events for this repo: `PostToolUse` (file-level checks), `Stop` (turn-end checks), `PreToolUse` with `if: "Bash(rm *)"` (block destructive shell). Hook scripts go in `.claude/hooks/`.
 4. **Update this file** — every new entry-point gets a row in the TL;DR table above.

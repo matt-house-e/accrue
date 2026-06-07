@@ -32,7 +32,7 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          # The action picks up CLAUDE.md, AGENTS.md, and .claude/commands/
+          # The action picks up CLAUDE.md, AGENTS.md, and .claude/skills/
           # automatically when it spins up Claude Code in the runner.
           claude_args: |
             --max-turns 20
