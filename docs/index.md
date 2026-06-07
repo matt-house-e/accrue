@@ -44,6 +44,7 @@ print(result.cost)  # Token usage breakdown
 - **Batch API** -- `LLMStep(batch=True)` for high-volume jobs at 50% cost via OpenAI and Anthropic batch endpoints
 - **Grounding** -- Web search grounding with citations via `LLMStep(grounding=True)`
 - **Conditional steps** -- `run_if` / `skip_if` predicates for per-row branching
+- **Dry-run + cost preview** -- `pipeline.plan(df)` previews prompts, schemas, and sample outputs and estimates the full-run cost before you spend
 - **Hooks and observability** -- Progress callbacks, cost tracking, checkpoint recovery
 
 ## Quick Links
