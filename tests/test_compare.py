@@ -1,0 +1,215 @@
+"""Tests for ``accrue.compare()`` — diffing two ``PipelineResult`` objects."""
+
+from __future__ import annotations
+
+import warnings
+
+import pandas as pd
+import pytest
+
+from accrue.pipeline.compare import (
+    ComparisonResult,
+    _align_rows,
+    _cells_equal,
+    compare,
+)
+from accrue.pipeline.pipeline import PipelineResult
+
+# -- helpers ------------------------------------------------------------------
+
+
+def _result(data, field_specs=None) -> PipelineResult:
+    return PipelineResult(data=data, field_specs=field_specs or {})
+
+
+# -- _align_rows ---------------------------------------------------------------
+
+
+class TestAlignRows:
+    def test_both_default_range_index_same_length(self):
+        df_a = pd.DataFrame({"x": [1, 2, 3]})
+        df_b = pd.DataFrame({"x": [4, 5, 6]})
+        pos_a, pos_b, mode = _align_rows(df_a, df_b)
+        assert mode == "positional"
+        assert pos_a == [0, 1, 2]
+        assert pos_b == [0, 1, 2]
+
+    def test_both_default_range_index_different_length_warns(self):
+        df_a = pd.DataFrame({"x": [1, 2, 3, 4]})
+        df_b = pd.DataFrame({"x": [4, 5]})
+        with pytest.warns(UserWarning, match="row counts differ"):
+            pos_a, pos_b, mode = _align_rows(df_a, df_b)
+        assert mode == "positional"
+        assert pos_a == [0, 1]
+        assert pos_b == [0, 1]
+
+    def test_both_real_unique_index_aligns_by_label(self):
+        df_a = pd.DataFrame({"x": [1, 2, 3]}, index=["r1", "r2", "r3"])
+        df_b = pd.DataFrame({"x": [9, 8, 7]}, index=["r3", "r1", "r2"])
+        pos_a, pos_b, mode = _align_rows(df_a, df_b)
+        assert mode == "label"
+        # Order follows df_a's index order: r1, r2, r3.
+        assert [df_a.index[i] for i in pos_a] == ["r1", "r2", "r3"]
+        assert [df_b.index[i] for i in pos_b] == ["r1", "r2", "r3"]
+
+    def test_real_index_partial_overlap_warns_and_compares_intersection(self):
+        df_a = pd.DataFrame({"x": [1, 2, 3]}, index=["r1", "r2", "r3"])
+        df_b = pd.DataFrame({"x": [9, 8]}, index=["r2", "r4"])
+        with pytest.warns(UserWarning, match="no matching index label"):
+            pos_a, pos_b, mode = _align_rows(df_a, df_b)
+        assert mode == "label"
+        assert [df_a.index[i] for i in pos_a] == ["r2"]
+        assert [df_b.index[i] for i in pos_b] == ["r2"]
+
+    def test_duplicate_labels_falls_back_to_positional(self):
+        df_a = pd.DataFrame({"x": [1, 2, 3]}, index=["r1", "r1", "r2"])
+        df_b = pd.DataFrame({"x": [9, 8, 7]}, index=["r1", "r2", "r3"])
+        with pytest.warns(UserWarning, match="non-unique"):
+            pos_a, pos_b, mode = _align_rows(df_a, df_b)
+        assert mode == "positional"
+        assert pos_a == [0, 1, 2]
+        assert pos_b == [0, 1, 2]
+
+    def test_mixed_default_and_real_index_falls_back_to_positional(self):
+        df_a = pd.DataFrame({"x": [1, 2, 3]})  # default RangeIndex
+        df_b = pd.DataFrame({"x": [9, 8, 7]}, index=["r1", "r2", "r3"])
+        with pytest.warns(UserWarning, match="custom index"):
+            pos_a, pos_b, mode = _align_rows(df_a, df_b)
+        assert mode == "positional"
+        assert pos_a == [0, 1, 2]
+        assert pos_b == [0, 1, 2]
+
+
+# -- _cells_equal ---------------------------------------------------------------
+
+
+class TestCellsEqual:
+    def test_both_nan_is_equal(self):
+        assert _cells_equal(float("nan"), float("nan")) is True
+
+    def test_none_and_nan_is_equal(self):
+        assert _cells_equal(None, float("nan")) is True
+
+    def test_null_vs_value_is_not_equal(self):
+        assert _cells_equal(None, "x") is False
+        assert _cells_equal("x", None) is False
+
+    def test_plain_scalars(self):
+        assert _cells_equal("a", "a") is True
+        assert _cells_equal("a", "b") is False
+        assert _cells_equal(1, 1) is True
+        assert _cells_equal(1, 2) is False
+
+    def test_list_cells_do_not_raise(self):
+        assert _cells_equal(["a", "b"], ["a", "b"]) is True
+        assert _cells_equal(["a", "b"], ["a", "c"]) is False
+
+    def test_dict_cells_do_not_raise(self):
+        assert _cells_equal({"a": 1}, {"a": 1}) is True
+        assert _cells_equal({"a": 1}, {"a": 2}) is False
+
+    def test_dict_key_order_does_not_matter(self):
+        assert _cells_equal({"a": 1, "b": 2}, {"b": 2, "a": 1}) is True
+
+
+# -- compare() / ComparisonResult -----------------------------------------------
+
+
+class TestCompare:
+    def test_returns_comparison_result_with_overlapping_fields(self):
+        df_a = pd.DataFrame({"category": ["A", "B"], "score": [1, 2]})
+        df_b = pd.DataFrame({"category": ["A", "C"], "score": [1, 3]})
+        a = _result(df_a, {"category": {"enum": ["A", "B", "C"]}, "score": {"type": "Number"}})
+        b = _result(df_b, {"category": {"enum": ["A", "B", "C"]}, "score": {"type": "Number"}})
+
+        diff = compare(a, b)
+        assert isinstance(diff, ComparisonResult)
+        assert diff.fields == ["category", "score"]
+        assert diff.label_a == "A"
+        assert diff.label_b == "B"
+        assert len(diff.aligned_a) == 2
+        assert len(diff.aligned_b) == 2
+
+    def test_custom_labels(self):
+        df = pd.DataFrame({"x": [1]})
+        a, b = _result(df, {"x": {}}), _result(df, {"x": {}})
+        diff = compare(a, b, label_a="v1", label_b="v2")
+        assert diff.label_a == "v1"
+        assert diff.label_b == "v2"
+
+    def test_schema_mismatch_warns_and_compares_overlap_only(self):
+        df_a = pd.DataFrame({"category": ["A"], "extra_a": [1]})
+        df_b = pd.DataFrame({"category": ["A"], "extra_b": [2]})
+        a = _result(df_a, {"category": {}, "extra_a": {}})
+        b = _result(df_b, {"category": {}, "extra_b": {}})
+
+        with pytest.warns(UserWarning, match="field-spec schemas differ"):
+            diff = compare(a, b)
+        # extra_a/extra_b aren't columns on both sides, so they're dropped
+        # even though the union-of-spec-keys check is what fired the warning.
+        assert diff.fields == ["category"]
+
+    def test_field_only_in_one_field_spec_but_column_in_both_is_included(self):
+        # b's pipeline didn't declare a spec for "tag" (e.g. it came from a
+        # FunctionStep with no FieldSpec), but the column is present on both
+        # sides, so it's still compared, using a's spec for classification.
+        df_a = pd.DataFrame({"tag": ["x"]})
+        df_b = pd.DataFrame({"tag": ["y"]})
+        a = _result(df_a, {"tag": {"type": "String"}})
+        b = _result(df_b, {})
+
+        diff = compare(a, b)
+        assert diff.fields == ["tag"]
+        assert diff.field_specs["tag"] == {"type": "String"}
+
+    def test_no_schema_mismatch_warning_when_specs_match(self):
+        df = pd.DataFrame({"x": [1]})
+        a, b = _result(df, {"x": {}}), _result(df, {"x": {}})
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            compare(a, b)
+
+    def test_identical_runs_with_null_cells_report_zero_changes(self):
+        df_a = pd.DataFrame({"score": [1.0, None, 3.0], "category": ["A", None, "C"]})
+        df_b = df_a.copy()
+        a = _result(df_a, {"score": {"type": "Number"}, "category": {"enum": ["A", "C"]}})
+        b = _result(df_b, {"score": {"type": "Number"}, "category": {"enum": ["A", "C"]}})
+
+        diff = compare(a, b)
+        for f in diff.fields:
+            col_a = diff.aligned_a[f].tolist()
+            col_b = diff.aligned_b[f].tolist()
+            assert all(_cells_equal(x, y) for x, y in zip(col_a, col_b))
+
+    def test_json_and_list_field_cells_do_not_raise(self):
+        df_a = pd.DataFrame(
+            {
+                "tags": [["a", "b"], ["c"]],
+                "meta": [{"k": 1}, {"k": 2}],
+            }
+        )
+        df_b = pd.DataFrame(
+            {
+                "tags": [["a", "b"], ["d"]],
+                "meta": [{"k": 1}, {"k": 3}],
+            }
+        )
+        a = _result(df_a, {"tags": {"type": "List[String]"}, "meta": {"type": "JSON"}})
+        b = _result(df_b, {"tags": {"type": "List[String]"}, "meta": {"type": "JSON"}})
+
+        diff = compare(a, b)
+        # Must not raise comparing these columns cell-by-cell.
+        for f in diff.fields:
+            col_a = diff.aligned_a[f].tolist()
+            col_b = diff.aligned_b[f].tolist()
+            results = [_cells_equal(x, y) for x, y in zip(col_a, col_b)]
+        assert results == [True, False]
+
+    def test_list_input_normalised_to_dataframe(self):
+        rows_a = [{"x": 1}, {"x": 2}]
+        rows_b = [{"x": 1}, {"x": 3}]
+        a = _result(rows_a, {"x": {"type": "Number"}})
+        b = _result(rows_b, {"x": {"type": "Number"}})
+        diff = compare(a, b)
+        assert isinstance(diff.aligned_a, pd.DataFrame)
+        assert diff.aligned_a["x"].tolist() == [1, 2]
