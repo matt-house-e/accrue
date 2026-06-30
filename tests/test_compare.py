@@ -478,3 +478,64 @@ class TestCostDelta:
         delta = diff.cost_delta()
         field_names = {f.name for f in dataclasses.fields(delta)}
         assert not any("dollar" in n or n.startswith("$") or "price" in n for n in field_names)
+
+
+# -- summary() --------------------------------------------------------------------
+
+
+class TestSummary:
+    def test_identical_runs_short_circuit_to_no_differences(self):
+        df = pd.DataFrame({"category": ["A", "B"]})
+        a = _result(df, {"category": {"enum": ["A", "B"]}})
+        b = _result(df.copy(), {"category": {"enum": ["A", "B"]}})
+        diff = compare(a, b, label_a="v1", label_b="v2")
+        out = diff.summary()
+
+        assert "No differences detected" in out
+        assert "0 rows changed" in out
+        assert "2 rows identical" in out
+        # No per-field/cost sections on the early-return path.
+        assert "Per-field churn" not in out
+        assert "Cost delta" not in out
+
+    def test_header_shows_labels_and_models_not_prompt_rev(self):
+        df = pd.DataFrame({"score": [1, 2]})
+        cost_a = CostSummary(steps={"s": StepUsage(model="gpt-4.1-mini")})
+        cost_b = CostSummary(steps={"s": StepUsage(model="gpt-4.1-mini")})
+        a = _result(df, {"score": {"type": "Number"}}, cost=cost_a)
+        b = _result(pd.DataFrame({"score": [1, 5]}), {"score": {"type": "Number"}}, cost=cost_b)
+        diff = compare(a, b, label_a="v1", label_b="v2")
+        out = diff.summary()
+
+        assert "v1" in out and "v2" in out
+        assert "gpt-4.1-mini" in out
+        assert "prompt-rev" not in out
+
+    def test_includes_totals_and_per_field_churn_and_cost_delta(self):
+        df_a = pd.DataFrame({"category": ["AI", "Other"], "score": [1, 2]})
+        df_b = pd.DataFrame({"category": ["AI", "AI"], "score": [1, 9]})
+        a = _result(
+            df_a,
+            {"category": {"enum": ["AI", "Other"]}, "score": {"type": "Number"}},
+            cost=CostSummary(total_tokens=100),
+        )
+        b = _result(
+            df_b,
+            {"category": {"enum": ["AI", "Other"]}, "score": {"type": "Number"}},
+            cost=CostSummary(total_tokens=150),
+        )
+        diff = compare(a, b)
+        out = diff.summary()
+
+        assert "2 rows compared" in out
+        assert "1 rows changed in at least one field" in out
+        assert "Per-field churn" in out
+        assert "category" in out
+        assert "score" in out
+        assert "Cost delta" in out
+
+    def test_ends_with_newline(self):
+        df = pd.DataFrame({"x": [1]})
+        a, b = _result(df, {"x": {}}), _result(df.copy(), {"x": {}})
+        diff = compare(a, b)
+        assert diff.summary().endswith("\n")

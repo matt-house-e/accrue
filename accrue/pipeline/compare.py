@@ -22,7 +22,7 @@ from typing import Any
 import pandas as pd
 
 from .pipeline import PipelineResult
-from .report import _is_null
+from .report import _format_seconds, _format_tokens, _is_null
 
 __all__ = ["compare", "ComparisonResult"]
 
@@ -241,6 +241,79 @@ class CostDelta:
 
 
 # ---------------------------------------------------------------------------
+# Text fragments shared by summary() (Markdown) and report() (HTML)
+#
+# Each of these returns plain text with `backtick` spans only -- no other
+# markdown -- so the same string can be dropped into a Markdown bullet list
+# as-is, or passed through report.py's _md_inline_to_html() for HTML.
+# ---------------------------------------------------------------------------
+
+
+def _models_str(cost: Any) -> str:
+    """Distinct, sorted model names used across a run's steps (or '—')."""
+    models = sorted({s.model for s in cost.steps.values() if s.model})
+    return ", ".join(models) if models else "—"
+
+
+def _format_header(label_a: str, cost_a: Any, label_b: str, cost_b: Any) -> str:
+    return f"Comparing `{label_a}` ({_models_str(cost_a)}) vs. `{label_b}` ({_models_str(cost_b)})"
+
+
+def _format_enum_shift(fc: FieldChurn, limit: int = 5) -> str:
+    """'<value>' <pctA>% → <pctB>%' for the values with the largest shift, biggest first."""
+    freq_a, freq_b = fc.freq_a or {}, fc.freq_b or {}
+    keys = sorted(set(freq_a) | set(freq_b))
+    if not keys:
+        return ""
+    ranked = sorted(keys, key=lambda k: abs(freq_b.get(k, 0.0) - freq_a.get(k, 0.0)), reverse=True)
+    shown = ranked[:limit]
+    parts = [
+        f"{k!r} {freq_a.get(k, 0.0) * 100:.0f}% → {freq_b.get(k, 0.0) * 100:.0f}%" for k in shown
+    ]
+    if len(ranked) > limit:
+        parts.append("…")
+    return ", ".join(parts)
+
+
+def _format_field_churn_line(fc: FieldChurn) -> str:
+    """One line per field for the 'Per-field churn' section, no leading bullet marker."""
+    head = f"`{fc.field}`: {fc.changed} changed ({fc.changed_pct:.1f}%)"
+    if fc.kind == "enum":
+        shift = _format_enum_shift(fc)
+        return f"{head} — distribution shifted: {shift}" if shift else head
+    if fc.kind == "numeric":
+        if fc.mean_delta is None:
+            return head
+        sign = "+" if fc.mean_delta >= 0 else ""
+        return f"{head} — mean delta {sign}{fc.mean_delta:.2f}"
+    # text (String, or differs-only for Boolean/Date/JSON/List[String])
+    head = f"`{fc.field}`: {fc.changed} changed (text)"
+    if fc.len_delta_tokens is None:
+        return head
+    sign = "+" if fc.len_delta_tokens >= 0 else ""
+    return f"{head} — avg length {sign}{fc.len_delta_tokens:.0f} tokens"
+
+
+def _format_cost_delta_lines(cd: CostDelta, label_b: str) -> list[str]:
+    """Lines for the 'Cost delta' section: token deltas, cache hit rate, wall time."""
+
+    def _pct(delta: int, base: int) -> str:
+        if base == 0:
+            return "n/a" if delta == 0 else "new"
+        sign = "+" if delta >= 0 else ""
+        return f"{sign}{delta / base * 100:.0f}%"
+
+    return [
+        f"`{label_b}` used {_pct(cd.prompt_tokens_delta, cd.prompt_tokens_a)} input tokens, "
+        f"{_pct(cd.completion_tokens_delta, cd.completion_tokens_a)} output tokens "
+        f"({_format_tokens(cd.total_tokens_a)} → {_format_tokens(cd.total_tokens_b)} total).",
+        f"Cache hit rate: {cd.cache_hit_rate_a * 100:.0f}% → {cd.cache_hit_rate_b * 100:.0f}%.",
+        f"Wall time: {_format_seconds(cd.elapsed_seconds_a)} → "
+        f"{_format_seconds(cd.elapsed_seconds_b)}.",
+    ]
+
+
+# ---------------------------------------------------------------------------
 # compare() + ComparisonResult
 # ---------------------------------------------------------------------------
 
@@ -449,6 +522,46 @@ class ComparisonResult:
             elapsed_seconds_b=elapsed_b,
             elapsed_seconds_delta=elapsed_b - elapsed_a,
         )
+
+    def summary(self) -> str:
+        """Markdown summary — headline numbers, per-field churn, cost delta.
+
+        Mirrors the shape of ``PipelineResult.report()``: pasteable into
+        Slack/GitHub. Identical runs short-circuit to a one-line "no
+        differences" message instead of an empty churn/cost section.
+        """
+        total = len(self.aligned_a)
+        changed_n = len(self.changed_rows())
+        identical_n = total - changed_n
+
+        lines: list[str] = [
+            "# Pipeline Comparison Report",
+            "",
+            _format_header(self.label_a, self.result_a.cost, self.label_b, self.result_b.cost),
+            "",
+            f"**{total:,} rows compared**",
+            f"- {changed_n:,} rows changed in at least one field",
+            f"- {identical_n:,} rows identical",
+            "",
+        ]
+
+        if changed_n == 0:
+            lines.append("No differences detected between the two runs.")
+            return "\n".join(lines).rstrip() + "\n"
+
+        if self.fields:
+            lines.append("**Per-field churn:**")
+            shifts = self.distribution_shift()
+            for f in self.fields:
+                lines.append(f"- {_format_field_churn_line(shifts[f])}")
+            lines.append("")
+
+        lines.append("**Cost delta:**")
+        for line in _format_cost_delta_lines(self.cost_delta(), self.label_b):
+            lines.append(f"- {line}")
+        lines.append("")
+
+        return "\n".join(lines).rstrip() + "\n"
 
 
 def compare(
