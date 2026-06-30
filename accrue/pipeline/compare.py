@@ -214,6 +214,32 @@ class FieldChurn:
         return (self.changed / self.total * 100) if self.total else 0.0
 
 
+@dataclass
+class CostDelta:
+    """Token/cache/latency delta between two pipeline runs.
+
+    No pricing fields by design -- there is no pricing data anywhere in
+    Accrue, so "cost" here means tokens, cache efficiency, and wall time
+    only.
+    """
+
+    prompt_tokens_a: int
+    prompt_tokens_b: int
+    prompt_tokens_delta: int
+    completion_tokens_a: int
+    completion_tokens_b: int
+    completion_tokens_delta: int
+    total_tokens_a: int
+    total_tokens_b: int
+    total_tokens_delta: int
+    cache_hit_rate_a: float
+    cache_hit_rate_b: float
+    cache_hit_rate_delta: float
+    elapsed_seconds_a: float
+    elapsed_seconds_b: float
+    elapsed_seconds_delta: float
+
+
 # ---------------------------------------------------------------------------
 # compare() + ComparisonResult
 # ---------------------------------------------------------------------------
@@ -380,6 +406,49 @@ class ComparisonResult:
                     len_delta_tokens=len_delta,
                 )
         return result
+
+    def cost_delta(self) -> CostDelta:
+        """Token, cache-hit-rate, and wall-time delta between the two runs.
+
+        ``StepUsage.cache_hit_rate`` is a per-step property only -- there
+        is no top-level aggregate on ``CostSummary``, so the overall rate
+        for each side is computed here as
+        ``sum(cache_hits) / sum(cache_hits + cache_misses)`` across that
+        side's ``cost.steps`` (0.0 if neither ever ran, instead of
+        dividing by zero).
+
+        No ``$``/pricing fields -- see :class:`CostDelta`.
+        """
+        cost_a, cost_b = self.result_a.cost, self.result_b.cost
+
+        def _cache_rate(cost: Any) -> float:
+            hits = sum(s.cache_hits for s in cost.steps.values())
+            total = sum(s.cache_hits + s.cache_misses for s in cost.steps.values())
+            return hits / total if total > 0 else 0.0
+
+        rate_a, rate_b = _cache_rate(cost_a), _cache_rate(cost_b)
+        elapsed_a = self.result_a.pipeline_elapsed_seconds
+        elapsed_b = self.result_b.pipeline_elapsed_seconds
+
+        return CostDelta(
+            prompt_tokens_a=cost_a.total_prompt_tokens,
+            prompt_tokens_b=cost_b.total_prompt_tokens,
+            prompt_tokens_delta=cost_b.total_prompt_tokens - cost_a.total_prompt_tokens,
+            completion_tokens_a=cost_a.total_completion_tokens,
+            completion_tokens_b=cost_b.total_completion_tokens,
+            completion_tokens_delta=(
+                cost_b.total_completion_tokens - cost_a.total_completion_tokens
+            ),
+            total_tokens_a=cost_a.total_tokens,
+            total_tokens_b=cost_b.total_tokens,
+            total_tokens_delta=cost_b.total_tokens - cost_a.total_tokens,
+            cache_hit_rate_a=rate_a,
+            cache_hit_rate_b=rate_b,
+            cache_hit_rate_delta=rate_b - rate_a,
+            elapsed_seconds_a=elapsed_a,
+            elapsed_seconds_b=elapsed_b,
+            elapsed_seconds_delta=elapsed_b - elapsed_a,
+        )
 
 
 def compare(

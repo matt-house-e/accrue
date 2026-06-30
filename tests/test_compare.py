@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 
 import pandas as pd
@@ -15,12 +16,25 @@ from accrue.pipeline.compare import (
     compare,
 )
 from accrue.pipeline.pipeline import PipelineResult
+from accrue.schemas.base import CostSummary, StepUsage
 
 # -- helpers ------------------------------------------------------------------
 
 
-def _result(data, field_specs=None, errors=None) -> PipelineResult:
-    return PipelineResult(data=data, field_specs=field_specs or {}, errors=errors or [])
+def _result(
+    data,
+    field_specs=None,
+    errors=None,
+    cost=None,
+    pipeline_elapsed_seconds=0.0,
+) -> PipelineResult:
+    return PipelineResult(
+        data=data,
+        field_specs=field_specs or {},
+        errors=errors or [],
+        cost=cost or CostSummary(),
+        pipeline_elapsed_seconds=pipeline_elapsed_seconds,
+    )
 
 
 # -- _align_rows ---------------------------------------------------------------
@@ -389,3 +403,78 @@ class TestDistributionShift:
         shift = diff.distribution_shift()["meta"]
         assert shift.kind == "text"
         assert shift.changed == 1
+
+
+# -- cost_delta() -----------------------------------------------------------------
+
+
+class TestCostDelta:
+    def test_token_deltas(self):
+        df = pd.DataFrame({"x": [1]})
+        cost_a = CostSummary(
+            total_prompt_tokens=100,
+            total_completion_tokens=50,
+            total_tokens=150,
+            steps={"s": StepUsage(prompt_tokens=100, completion_tokens=50, total_tokens=150)},
+        )
+        cost_b = CostSummary(
+            total_prompt_tokens=112,
+            total_completion_tokens=59,
+            total_tokens=171,
+            steps={"s": StepUsage(prompt_tokens=112, completion_tokens=59, total_tokens=171)},
+        )
+        a = _result(df, {"x": {}}, cost=cost_a)
+        b = _result(df.copy(), {"x": {}}, cost=cost_b)
+        diff = compare(a, b)
+        delta = diff.cost_delta()
+
+        assert delta.prompt_tokens_delta == 12
+        assert delta.completion_tokens_delta == 9
+        assert delta.total_tokens_delta == 21
+
+    def test_cache_hit_rate_is_aggregated_across_steps(self):
+        df = pd.DataFrame({"x": [1]})
+        cost_a = CostSummary(
+            steps={
+                "s1": StepUsage(cache_hits=90, cache_misses=10),
+                "s2": StepUsage(cache_hits=0, cache_misses=100),
+            }
+        )
+        cost_b = CostSummary(steps={"s1": StepUsage(cache_hits=0, cache_misses=100)})
+        a = _result(df, {"x": {}}, cost=cost_a)
+        b = _result(df.copy(), {"x": {}}, cost=cost_b)
+        diff = compare(a, b)
+        delta = diff.cost_delta()
+
+        # 90 hits / 200 total = 0.45 on A; 0 on B.
+        assert delta.cache_hit_rate_a == pytest.approx(0.45)
+        assert delta.cache_hit_rate_b == pytest.approx(0.0)
+        assert delta.cache_hit_rate_delta == pytest.approx(-0.45)
+
+    def test_cache_hit_rate_guards_divide_by_zero(self):
+        df = pd.DataFrame({"x": [1]})
+        a = _result(df, {"x": {}}, cost=CostSummary())
+        b = _result(df.copy(), {"x": {}}, cost=CostSummary())
+        diff = compare(a, b)
+        delta = diff.cost_delta()
+        assert delta.cache_hit_rate_a == 0.0
+        assert delta.cache_hit_rate_b == 0.0
+        assert delta.cache_hit_rate_delta == 0.0
+
+    def test_latency_delta(self):
+        df = pd.DataFrame({"x": [1]})
+        a = _result(df, {"x": {}}, pipeline_elapsed_seconds=10.0)
+        b = _result(df.copy(), {"x": {}}, pipeline_elapsed_seconds=14.5)
+        diff = compare(a, b)
+        delta = diff.cost_delta()
+        assert delta.elapsed_seconds_a == 10.0
+        assert delta.elapsed_seconds_b == 14.5
+        assert delta.elapsed_seconds_delta == pytest.approx(4.5)
+
+    def test_no_pricing_fields(self):
+        df = pd.DataFrame({"x": [1]})
+        a, b = _result(df, {"x": {}}), _result(df.copy(), {"x": {}})
+        diff = compare(a, b)
+        delta = diff.cost_delta()
+        field_names = {f.name for f in dataclasses.fields(delta)}
+        assert not any("dollar" in n or n.startswith("$") or "price" in n for n in field_names)
