@@ -596,3 +596,20 @@ class TestReport:
         diff = compare(a, b)
         out = diff.report(output_format="html")
         assert "<script>alert(1)</script>" not in out
+
+
+# -- public exports ---------------------------------------------------------------
+
+
+class TestPublicExports:
+    def test_compare_is_top_level_callable(self):
+        import accrue
+
+        assert callable(accrue.compare)
+        assert accrue.ComparisonResult is ComparisonResult
+
+    def test_exported_from_pipeline_namespace(self):
+        from accrue import pipeline
+
+        assert callable(pipeline.compare)
+        assert pipeline.ComparisonResult is ComparisonResult
