@@ -215,6 +215,50 @@ class ComparisonResult:
     pos_a: list[int]
     pos_b: list[int]
 
+    def changed_rows(self, field: str | None = None) -> pd.DataFrame:
+        """Before/after values for aligned rows that changed.
+
+        Args:
+            field: If given, only consider this output field (must be in
+                ``.fields``). If ``None`` (default), a row counts as
+                changed if *any* compared field differs.
+
+        Returns:
+            A DataFrame indexed by aligned-row position, with two columns
+            per considered field: ``"{field}_{label_a}"`` and
+            ``"{field}_{label_b}"``. Empty if nothing changed.
+
+        A row that errored on exactly one side counts as changed even if
+        its (typically ``None``-filled) values happen to compare equal —
+        an error means that side's output for the row isn't trustworthy,
+        independent of which field you're filtering to.
+        """
+        if field is not None and field not in self.fields:
+            raise KeyError(f"{field!r} is not a comparable output field; available: {self.fields}")
+        target_fields = [field] if field is not None else self.fields
+
+        error_pos_a = {e.row_index for e in self.result_a.errors}
+        error_pos_b = {e.row_index for e in self.result_b.errors}
+
+        col_a = {f: self.aligned_a[f].tolist() for f in target_fields}
+        col_b = {f: self.aligned_b[f].tolist() for f in target_fields}
+
+        changed_idx: list[int] = []
+        for i in range(len(self.aligned_a)):
+            errored_a = self.pos_a[i] in error_pos_a
+            errored_b = self.pos_b[i] in error_pos_b
+            if errored_a != errored_b:
+                changed_idx.append(i)
+                continue
+            if any(not _cells_equal(col_a[f][i], col_b[f][i]) for f in target_fields):
+                changed_idx.append(i)
+
+        suffix_a, suffix_b = f"_{self.label_a}", f"_{self.label_b}"
+        before = self.aligned_a.loc[changed_idx, target_fields].add_suffix(suffix_a)
+        after = self.aligned_b.loc[changed_idx, target_fields].add_suffix(suffix_b)
+        ordered_cols = [c for f in target_fields for c in (f + suffix_a, f + suffix_b)]
+        return pd.concat([before, after], axis=1)[ordered_cols]
+
 
 def compare(
     a: PipelineResult,

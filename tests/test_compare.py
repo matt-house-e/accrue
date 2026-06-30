@@ -7,6 +7,7 @@ import warnings
 import pandas as pd
 import pytest
 
+from accrue.core.exceptions import RowError
 from accrue.pipeline.compare import (
     ComparisonResult,
     _align_rows,
@@ -18,8 +19,8 @@ from accrue.pipeline.pipeline import PipelineResult
 # -- helpers ------------------------------------------------------------------
 
 
-def _result(data, field_specs=None) -> PipelineResult:
-    return PipelineResult(data=data, field_specs=field_specs or {})
+def _result(data, field_specs=None, errors=None) -> PipelineResult:
+    return PipelineResult(data=data, field_specs=field_specs or {}, errors=errors or [])
 
 
 # -- _align_rows ---------------------------------------------------------------
@@ -213,3 +214,77 @@ class TestCompare:
         diff = compare(a, b)
         assert isinstance(diff.aligned_a, pd.DataFrame)
         assert diff.aligned_a["x"].tolist() == [1, 2]
+
+
+# -- changed_rows() -------------------------------------------------------------
+
+
+class TestChangedRows:
+    def test_no_changes_returns_empty_dataframe(self):
+        df = pd.DataFrame({"category": ["A", "B"], "score": [1, 2]})
+        a = _result(df, {"category": {}, "score": {"type": "Number"}})
+        b = _result(df.copy(), {"category": {}, "score": {"type": "Number"}})
+        diff = compare(a, b)
+        out = diff.changed_rows()
+        assert out.empty
+        assert list(out.columns) == ["category_A", "category_B", "score_A", "score_B"]
+
+    def test_flags_rows_with_any_field_difference(self):
+        df_a = pd.DataFrame({"category": ["A", "B", "C"], "score": [1, 2, 3]})
+        df_b = pd.DataFrame({"category": ["A", "X", "C"], "score": [1, 2, 9]})
+        a = _result(df_a, {"category": {}, "score": {"type": "Number"}})
+        b = _result(df_b, {"category": {}, "score": {"type": "Number"}})
+        diff = compare(a, b)
+        out = diff.changed_rows()
+        assert len(out) == 2
+        assert out["category_A"].tolist() == ["B", "C"]
+        assert out["category_B"].tolist() == ["X", "C"]
+        assert out["score_A"].tolist() == [2, 3]
+        assert out["score_B"].tolist() == [2, 9]
+
+    def test_field_filter_only_considers_that_field(self):
+        df_a = pd.DataFrame({"category": ["A", "B"], "score": [1, 2]})
+        df_b = pd.DataFrame({"category": ["A", "X"], "score": [9, 2]})
+        a = _result(df_a, {"category": {}, "score": {"type": "Number"}})
+        b = _result(df_b, {"category": {}, "score": {"type": "Number"}})
+        diff = compare(a, b)
+
+        by_category = diff.changed_rows("category")
+        assert list(by_category.columns) == ["category_A", "category_B"]
+        assert len(by_category) == 1
+        assert by_category["category_A"].tolist() == ["B"]
+
+        by_score = diff.changed_rows("score")
+        assert list(by_score.columns) == ["score_A", "score_B"]
+        assert len(by_score) == 1
+        assert by_score["score_A"].tolist() == [1]
+
+    def test_unknown_field_raises_key_error(self):
+        df = pd.DataFrame({"x": [1]})
+        a, b = _result(df, {"x": {}}), _result(df.copy(), {"x": {}})
+        diff = compare(a, b)
+        with pytest.raises(KeyError):
+            diff.changed_rows("nope")
+
+    def test_error_on_one_side_only_counts_as_changed(self):
+        # Both sides have the same value for the row, but A errored on
+        # row 0 -- that row must still be flagged as a change.
+        df_a = pd.DataFrame({"x": [None, "same"]})
+        df_b = pd.DataFrame({"x": [None, "same"]})
+        err = RowError(row_index=0, step_name="s", error=ValueError("x"))
+        a = _result(df_a, {"x": {}}, errors=[err])
+        b = _result(df_b, {"x": {}})
+        diff = compare(a, b)
+        out = diff.changed_rows()
+        assert len(out) == 1
+
+    def test_identical_with_errors_on_both_sides_same_row_not_flagged(self):
+        df_a = pd.DataFrame({"x": [None, "same"]})
+        df_b = pd.DataFrame({"x": [None, "same"]})
+        err_a = RowError(row_index=0, step_name="s", error=ValueError("x"))
+        err_b = RowError(row_index=0, step_name="s", error=ValueError("y"))
+        a = _result(df_a, {"x": {}}, errors=[err_a])
+        b = _result(df_b, {"x": {}}, errors=[err_b])
+        diff = compare(a, b)
+        out = diff.changed_rows()
+        assert out.empty
