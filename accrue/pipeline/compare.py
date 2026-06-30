@@ -17,12 +17,13 @@ from __future__ import annotations
 import json
 import warnings
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from .pipeline import PipelineResult
-from .report import _format_seconds, _format_tokens, _is_null
+from .report import _HTML_STYLE, _format_seconds, _format_tokens, _is_null, _md_inline_to_html
 
 __all__ = ["compare", "ComparisonResult"]
 
@@ -562,6 +563,80 @@ class ComparisonResult:
         lines.append("")
 
         return "\n".join(lines).rstrip() + "\n"
+
+    def report(self, output_format: str = "markdown", path: str | None = None) -> str:
+        """Render the comparison — Markdown (mirrors :meth:`summary`) or self-contained HTML.
+
+        Mirrors :meth:`PipelineResult.report`'s signature.
+
+        Args:
+            output_format: ``"markdown"`` (default) or ``"html"``.
+            path: If given, also write the rendered report to this path
+                (UTF-8).
+
+        Returns:
+            The rendered report as a string.
+
+        Raises:
+            ValueError: If ``output_format`` isn't ``"markdown"`` or ``"html"``.
+        """
+        fmt = output_format.lower()
+        if fmt == "markdown":
+            text = self.summary()
+        elif fmt == "html":
+            text = self._render_html()
+        else:
+            raise ValueError(
+                f"Unknown report format {output_format!r}; expected 'markdown' or 'html'."
+            )
+
+        if path is not None:
+            Path(path).write_text(text, encoding="utf-8")
+        return text
+
+    def _render_html(self) -> str:
+        """Self-contained HTML rendering of the same content as :meth:`summary`."""
+        total = len(self.aligned_a)
+        changed_n = len(self.changed_rows())
+        identical_n = total - changed_n
+
+        header = _format_header(self.label_a, self.result_a.cost, self.label_b, self.result_b.cost)
+        parts: list[str] = [
+            "<!doctype html>",
+            '<html lang="en"><head>',
+            '<meta charset="utf-8">',
+            "<title>Pipeline Comparison Report</title>",
+            f"<style>{_HTML_STYLE}</style>",
+            "</head><body>",
+            "<h1>Pipeline Comparison Report</h1>",
+            f'<p class="headline">{_md_inline_to_html(header)}</p>',
+            f"<p><strong>{total:,} rows compared</strong> &middot; "
+            f"{changed_n:,} changed &middot; {identical_n:,} identical</p>",
+        ]
+
+        if changed_n == 0:
+            parts.append("<h2>No differences detected</h2>")
+            parts.append("<p>The two runs produced identical output on every compared field.</p>")
+            parts.append("</body></html>")
+            return "\n".join(parts) + "\n"
+
+        if self.fields:
+            parts.append("<h2>Per-field churn</h2>")
+            parts.append('<ul class="findings">')
+            shifts = self.distribution_shift()
+            for f in self.fields:
+                line = _md_inline_to_html(_format_field_churn_line(shifts[f]))
+                parts.append(f"<li>{line}</li>")
+            parts.append("</ul>")
+
+        parts.append("<h2>Cost delta</h2>")
+        parts.append('<ul class="findings">')
+        for line in _format_cost_delta_lines(self.cost_delta(), self.label_b):
+            parts.append(f"<li>{_md_inline_to_html(line)}</li>")
+        parts.append("</ul>")
+
+        parts.append("</body></html>")
+        return "\n".join(parts) + "\n"
 
 
 def compare(

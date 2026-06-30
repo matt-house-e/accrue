@@ -539,3 +539,60 @@ class TestSummary:
         a, b = _result(df, {"x": {}}), _result(df.copy(), {"x": {}})
         diff = compare(a, b)
         assert diff.summary().endswith("\n")
+
+
+# -- report() ---------------------------------------------------------------------
+
+
+class TestReport:
+    def test_default_markdown_matches_summary(self):
+        df_a = pd.DataFrame({"x": [1, 2]})
+        df_b = pd.DataFrame({"x": [1, 9]})
+        a, b = _result(df_a, {"x": {"type": "Number"}}), _result(df_b, {"x": {"type": "Number"}})
+        diff = compare(a, b)
+        assert diff.report() == diff.summary()
+
+    def test_html_format_is_self_contained(self):
+        df_a = pd.DataFrame({"category": ["A", "B"]})
+        df_b = pd.DataFrame({"category": ["A", "C"]})
+        a = _result(df_a, {"category": {"enum": ["A", "B", "C"]}})
+        b = _result(df_b, {"category": {"enum": ["A", "B", "C"]}})
+        diff = compare(a, b)
+        out = diff.report(output_format="html")
+        assert out.startswith("<!doctype html>")
+        assert "</body></html>" in out
+        assert "Pipeline Comparison Report" in out
+        assert "category" in out
+
+    def test_html_identical_runs(self):
+        df = pd.DataFrame({"x": [1]})
+        a, b = _result(df, {"x": {}}), _result(df.copy(), {"x": {}})
+        diff = compare(a, b)
+        out = diff.report(output_format="html")
+        assert "No differences detected" in out
+
+    def test_unknown_format_raises(self):
+        df = pd.DataFrame({"x": [1]})
+        a, b = _result(df, {"x": {}}), _result(df.copy(), {"x": {}})
+        diff = compare(a, b)
+        with pytest.raises(ValueError, match="Unknown report format"):
+            diff.report(output_format="json")
+
+    def test_path_writes_file(self, tmp_path):
+        df_a = pd.DataFrame({"x": [1, 2]})
+        df_b = pd.DataFrame({"x": [1, 9]})
+        a, b = _result(df_a, {"x": {"type": "Number"}}), _result(df_b, {"x": {"type": "Number"}})
+        diff = compare(a, b)
+        target = tmp_path / "diff.html"
+        out = diff.report(output_format="html", path=str(target))
+        assert target.exists()
+        assert target.read_text(encoding="utf-8") == out
+
+    def test_html_escapes_dangerous_field_values(self):
+        df_a = pd.DataFrame({"category": ["<script>alert(1)</script>"]})
+        df_b = pd.DataFrame({"category": ["safe"]})
+        a = _result(df_a, {"category": {"enum": ["<script>alert(1)</script>", "safe"]}})
+        b = _result(df_b, {"category": {"enum": ["<script>alert(1)</script>", "safe"]}})
+        diff = compare(a, b)
+        out = diff.report(output_format="html")
+        assert "<script>alert(1)</script>" not in out
