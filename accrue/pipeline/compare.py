@@ -18,7 +18,7 @@ import json
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -44,7 +44,9 @@ def _is_default_range_index(idx: pd.Index) -> bool:
     return isinstance(idx, pd.RangeIndex) and idx.equals(pd.RangeIndex(len(idx)))
 
 
-def _align_rows(df_a: pd.DataFrame, df_b: pd.DataFrame) -> tuple[list[int], list[int], str]:
+def _align_rows(
+    df_a: pd.DataFrame, df_b: pd.DataFrame
+) -> tuple[list[int], list[int], Literal["positional", "label"]]:
     """Pair up rows of *df_a* and *df_b* for comparison.
 
     Returns ``(positions_a, positions_b, mode)`` where ``positions_a[i]``
@@ -196,7 +198,7 @@ class FieldChurn:
     """
 
     field: str
-    kind: str
+    kind: Literal["enum", "numeric", "text"]
     changed: int
     total: int
     freq_a: dict[str, float] | None = None
@@ -260,18 +262,21 @@ def _format_header(label_a: str, cost_a: Any, label_b: str, cost_b: Any) -> str:
     return f"Comparing `{label_a}` ({_models_str(cost_a)}) vs. `{label_b}` ({_models_str(cost_b)})"
 
 
-def _format_enum_shift(fc: FieldChurn, limit: int = 5) -> str:
+_ENUM_SHIFT_LIMIT = 5
+
+
+def _format_enum_shift(fc: FieldChurn) -> str:
     """'<value>' <pctA>% → <pctB>%' for the values with the largest shift, biggest first."""
     freq_a, freq_b = fc.freq_a or {}, fc.freq_b or {}
     keys = sorted(set(freq_a) | set(freq_b))
     if not keys:
         return ""
     ranked = sorted(keys, key=lambda k: abs(freq_b.get(k, 0.0) - freq_a.get(k, 0.0)), reverse=True)
-    shown = ranked[:limit]
+    shown = ranked[:_ENUM_SHIFT_LIMIT]
     parts = [
         f"{k!r} {freq_a.get(k, 0.0) * 100:.0f}% → {freq_b.get(k, 0.0) * 100:.0f}%" for k in shown
     ]
-    if len(ranked) > limit:
+    if len(ranked) > _ENUM_SHIFT_LIMIT:
         parts.append("…")
     return ", ".join(parts)
 
@@ -362,7 +367,7 @@ class ComparisonResult:
     field_specs: dict[str, dict[str, Any]]
     aligned_a: pd.DataFrame
     aligned_b: pd.DataFrame
-    align_mode: str
+    align_mode: Literal["positional", "label"]
     pos_a: list[int]
     pos_b: list[int]
 
@@ -524,6 +529,12 @@ class ComparisonResult:
             elapsed_seconds_delta=elapsed_b - elapsed_a,
         )
 
+    def _row_counts(self) -> tuple[int, int, int]:
+        """``(total, changed, identical)`` aligned-row counts."""
+        total = len(self.aligned_a)
+        changed_n = len(self.changed_rows())
+        return total, changed_n, total - changed_n
+
     def summary(self) -> str:
         """Markdown summary — headline numbers, per-field churn, cost delta.
 
@@ -531,9 +542,7 @@ class ComparisonResult:
         Slack/GitHub. Identical runs short-circuit to a one-line "no
         differences" message instead of an empty churn/cost section.
         """
-        total = len(self.aligned_a)
-        changed_n = len(self.changed_rows())
-        identical_n = total - changed_n
+        total, changed_n, identical_n = self._row_counts()
 
         lines: list[str] = [
             "# Pipeline Comparison Report",
@@ -596,9 +605,7 @@ class ComparisonResult:
 
     def _render_html(self) -> str:
         """Self-contained HTML rendering of the same content as :meth:`summary`."""
-        total = len(self.aligned_a)
-        changed_n = len(self.changed_rows())
-        identical_n = total - changed_n
+        total, changed_n, identical_n = self._row_counts()
 
         header = _format_header(self.label_a, self.result_a.cost, self.label_b, self.result_b.cost)
         parts: list[str] = [
