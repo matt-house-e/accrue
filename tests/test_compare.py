@@ -288,3 +288,104 @@ class TestChangedRows:
         diff = compare(a, b)
         out = diff.changed_rows()
         assert out.empty
+
+
+# -- distribution_shift() --------------------------------------------------------
+
+
+class TestDistributionShift:
+    def test_enum_field_frequency_table(self):
+        df_a = pd.DataFrame({"category": ["AI", "AI", "Other", "Other", "Other"]})
+        df_b = pd.DataFrame({"category": ["AI", "AI", "AI", "Other", "Other"]})
+        a = _result(df_a, {"category": {"enum": ["AI", "Other"]}})
+        b = _result(df_b, {"category": {"enum": ["AI", "Other"]}})
+        diff = compare(a, b)
+        shift = diff.distribution_shift()["category"]
+
+        assert shift.kind == "enum"
+        assert shift.changed == 1
+        assert shift.freq_a == {"AI": 0.4, "Other": 0.6}
+        assert shift.freq_b == {"AI": 0.6, "Other": 0.4}
+
+    def test_enum_field_with_container_values_does_not_raise(self):
+        # Defensive: enum classification keys off the spec, not the dtype,
+        # but value_counts() must still tolerate non-scalar cells.
+        df_a = pd.DataFrame({"tags": [["a"], ["a"], ["b"]]})
+        df_b = pd.DataFrame({"tags": [["a"], ["b"], ["b"]]})
+        a = _result(df_a, {"tags": {"enum": ["a", "b"]}})
+        b = _result(df_b, {"tags": {"enum": ["a", "b"]}})
+        diff = compare(a, b)
+        shift = diff.distribution_shift()["tags"]
+        assert shift.kind == "enum"
+        assert sum(shift.freq_a.values()) == pytest.approx(1.0)
+
+    def test_numeric_field_mean_delta(self):
+        df_a = pd.DataFrame({"score": [10, 20, 30]})
+        df_b = pd.DataFrame({"score": [10, 25, 40]})
+        a = _result(df_a, {"score": {"type": "Number"}})
+        b = _result(df_b, {"score": {"type": "Number"}})
+        diff = compare(a, b)
+        shift = diff.distribution_shift()["score"]
+
+        assert shift.kind == "numeric"
+        assert shift.changed == 2
+        assert shift.mean_a == pytest.approx(20.0)
+        assert shift.mean_b == pytest.approx(25.0)
+        assert shift.mean_delta == pytest.approx(5.0)
+        assert shift.std_a is not None and shift.std_b is not None
+
+    def test_numeric_field_non_numeric_values_coerced_to_nan(self):
+        df_a = pd.DataFrame({"score": ["10", "oops", "30"]})
+        df_b = pd.DataFrame({"score": ["10", "20", "30"]})
+        a = _result(df_a, {"score": {"type": "Number"}})
+        b = _result(df_b, {"score": {"type": "Number"}})
+        diff = compare(a, b)
+        shift = diff.distribution_shift()["score"]
+        assert shift.mean_a == pytest.approx(20.0)  # (10 + 30) / 2, "oops" dropped
+        assert shift.mean_b == pytest.approx(20.0)
+
+    def test_numeric_field_all_non_numeric_yields_none_mean(self):
+        df = pd.DataFrame({"score": ["nope", "also-nope"]})
+        a = _result(df, {"score": {"type": "Number"}})
+        b = _result(df.copy(), {"score": {"type": "Number"}})
+        diff = compare(a, b)
+        shift = diff.distribution_shift()["score"]
+        assert shift.mean_a is None
+        assert shift.mean_delta is None
+
+    def test_string_field_differs_count_and_token_length_delta(self):
+        df_a = pd.DataFrame({"summary": ["short text", "another one here"]})
+        df_b = pd.DataFrame({"summary": ["short text", "a much longer summary here now"]})
+        a = _result(df_a, {"summary": {"type": "String"}})
+        b = _result(df_b, {"summary": {"type": "String"}})
+        diff = compare(a, b)
+        shift = diff.distribution_shift()["summary"]
+
+        assert shift.kind == "text"
+        assert shift.changed == 1
+        assert shift.avg_len_tokens_a is not None
+        assert shift.avg_len_tokens_b is not None
+        assert shift.len_delta_tokens > 0
+
+    def test_boolean_field_differs_count_only_no_length_delta(self):
+        df_a = pd.DataFrame({"flag": [True, False]})
+        df_b = pd.DataFrame({"flag": [True, True]})
+        a = _result(df_a, {"flag": {"type": "Boolean"}})
+        b = _result(df_b, {"flag": {"type": "Boolean"}})
+        diff = compare(a, b)
+        shift = diff.distribution_shift()["flag"]
+
+        assert shift.kind == "text"
+        assert shift.changed == 1
+        assert shift.avg_len_tokens_a is None
+        assert shift.len_delta_tokens is None
+
+    def test_json_field_differs_count_only_does_not_raise(self):
+        df_a = pd.DataFrame({"meta": [{"k": 1}, {"k": 2}]})
+        df_b = pd.DataFrame({"meta": [{"k": 1}, {"k": 9}]})
+        a = _result(df_a, {"meta": {"type": "JSON"}})
+        b = _result(df_b, {"meta": {"type": "JSON"}})
+        diff = compare(a, b)
+        shift = diff.distribution_shift()["meta"]
+        assert shift.kind == "text"
+        assert shift.changed == 1

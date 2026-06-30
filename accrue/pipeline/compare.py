@@ -163,6 +163,57 @@ def _value_counts_safe(series: pd.Series) -> pd.Series:
     return pd.Series(stringified, dtype=object).value_counts()
 
 
+def _frequency_table(series: pd.Series) -> dict[str, float]:
+    """value -> fraction of non-null rows, for an enum/categorical column."""
+    counts = _value_counts_safe(series)
+    total = int(counts.sum())
+    if total == 0:
+        return {}
+    return {str(k): v / total for k, v in counts.items()}
+
+
+# ---------------------------------------------------------------------------
+# Per-field churn
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FieldChurn:
+    """Before/after churn for a single output field.
+
+    ``kind`` selects which of the type-specific attributes are populated:
+
+    - ``"enum"``: ``freq_a``/``freq_b`` — value -> fraction frequency
+      tables.
+    - ``"numeric"``: ``mean_a``/``mean_b``/``std_a``/``std_b``/``mean_delta``.
+    - ``"text"``: ``avg_len_tokens_a``/``avg_len_tokens_b``/``len_delta_tokens``
+      (populated only for ``type: String``; ``None`` for Boolean/Date/JSON/
+      List[String], which only get a differs-count).
+
+    Numeric fields with no coercible values, or text fields with no rows,
+    leave their type-specific attributes as ``None`` rather than raising.
+    """
+
+    field: str
+    kind: str
+    changed: int
+    total: int
+    freq_a: dict[str, float] | None = None
+    freq_b: dict[str, float] | None = None
+    mean_a: float | None = None
+    mean_b: float | None = None
+    std_a: float | None = None
+    std_b: float | None = None
+    mean_delta: float | None = None
+    avg_len_tokens_a: float | None = None
+    avg_len_tokens_b: float | None = None
+    len_delta_tokens: float | None = None
+
+    @property
+    def changed_pct(self) -> float:
+        return (self.changed / self.total * 100) if self.total else 0.0
+
+
 # ---------------------------------------------------------------------------
 # compare() + ComparisonResult
 # ---------------------------------------------------------------------------
@@ -258,6 +309,77 @@ class ComparisonResult:
         after = self.aligned_b.loc[changed_idx, target_fields].add_suffix(suffix_b)
         ordered_cols = [c for f in target_fields for c in (f + suffix_a, f + suffix_b)]
         return pd.concat([before, after], axis=1)[ordered_cols]
+
+    def distribution_shift(self) -> dict[str, FieldChurn]:
+        """Per-field churn, classified by each field's spec.
+
+        - Enum fields (``spec["enum"]`` truthy): before/after frequency
+          tables.
+        - Numeric fields (``spec["type"] == "Number"``): mean/std and the
+          mean delta, coercing with ``pd.to_numeric(errors="coerce")`` so
+          stray non-numeric values don't raise.
+        - Everything else (String/Boolean/Date/JSON/List[String]): a
+          differs-count; String fields additionally get an approximate
+          token-length delta (``len(str(v)) // 4``, matching ``report.py``'s
+          length-anomaly heuristic).
+
+        Returns:
+            ``field name -> FieldChurn``, in the same order as ``.fields``.
+        """
+        result: dict[str, FieldChurn] = {}
+        n = len(self.aligned_a)
+        for f in self.fields:
+            spec = self.field_specs.get(f, {})
+            series_a, series_b = self.aligned_a[f], self.aligned_b[f]
+            vals_a, vals_b = series_a.tolist(), series_b.tolist()
+            changed = sum(1 for x, y in zip(vals_a, vals_b) if not _cells_equal(x, y))
+
+            if spec.get("enum"):
+                result[f] = FieldChurn(
+                    field=f,
+                    kind="enum",
+                    changed=changed,
+                    total=n,
+                    freq_a=_frequency_table(series_a),
+                    freq_b=_frequency_table(series_b),
+                )
+            elif spec.get("type") == "Number":
+                num_a = pd.to_numeric(series_a, errors="coerce")
+                num_b = pd.to_numeric(series_b, errors="coerce")
+                mean_a = float(num_a.mean()) if num_a.notna().any() else None
+                mean_b = float(num_b.mean()) if num_b.notna().any() else None
+                std_a = float(num_a.std()) if num_a.notna().sum() > 1 else None
+                std_b = float(num_b.std()) if num_b.notna().sum() > 1 else None
+                mean_delta = mean_b - mean_a if mean_a is not None and mean_b is not None else None
+                result[f] = FieldChurn(
+                    field=f,
+                    kind="numeric",
+                    changed=changed,
+                    total=n,
+                    mean_a=mean_a,
+                    mean_b=mean_b,
+                    std_a=std_a,
+                    std_b=std_b,
+                    mean_delta=mean_delta,
+                )
+            else:
+                len_a = len_b = len_delta = None
+                if spec.get("type", "String") == "String":
+                    lens_a = [len(str(v)) // 4 for v in vals_a if not _is_null(v)]
+                    lens_b = [len(str(v)) // 4 for v in vals_b if not _is_null(v)]
+                    len_a = sum(lens_a) / len(lens_a) if lens_a else None
+                    len_b = sum(lens_b) / len(lens_b) if lens_b else None
+                    len_delta = len_b - len_a if len_a is not None and len_b is not None else None
+                result[f] = FieldChurn(
+                    field=f,
+                    kind="text",
+                    changed=changed,
+                    total=n,
+                    avg_len_tokens_a=len_a,
+                    avg_len_tokens_b=len_b,
+                    len_delta_tokens=len_delta,
+                )
+        return result
 
 
 def compare(
