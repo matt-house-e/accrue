@@ -26,7 +26,14 @@ from .core.hooks import (
     StepEndEvent,
     StepStartEvent,
 )
-from .pipeline import Pipeline, PipelinePlan, PipelineResult, StepPlan
+from .pipeline import (
+    ComparisonResult,
+    Pipeline,
+    PipelinePlan,
+    PipelineResult,
+    StepPlan,
+    compare,
+)
 from .schemas.base import CostSummary
 from .schemas.field_spec import FieldSpec
 from .schemas.grounding import GroundingConfig
@@ -47,6 +54,8 @@ __all__ = [
     "LLMStep",
     "FunctionStep",
     "EnrichmentConfig",
+    "compare",
+    "ComparisonResult",
     # Hooks
     "EnrichmentHooks",
     "PipelineStartEvent",
