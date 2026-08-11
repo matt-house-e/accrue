@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Pipeline.execute()` returns a 4-tuple** `(accumulated, errors, cost, step_elapsed_seconds)` instead of a 3-tuple. Internal API (not exported in `accrue.__all__`); callers using `Pipeline.run()` / `run_async()` are unaffected.
 
 ### Fixed
+- Anthropic: `cache_creation_input_tokens` and `cache_read_input_tokens` are now carried through `UsageInfo`, `StepUsage`, and `CostSummary`, and counted in `total_tokens`. Cost reports previously omitted prompt-cache tokens, under-reporting the bill by up to ~63x on cached workloads. The pipeline summary now shows cache write/read totals so silent prompt-cache failures are visible. (#108)
 - `LLMStep.parse_response` now strips markdown code fences before `json.loads`. Fixes parse failures with Claude Haiku + grounding tools, where the structured-output constraint is disabled and the model wraps JSON in ` ``` ` fences. (#7)
 - `accrue/__init__.py` `__version__` was out of sync with `pyproject.toml`.
 - Google provider: Option-B rate-limit fallback now uses a word-boundary regex (`\brate[\s_-]?limit\b`) instead of bare `"rate" in exc_str`, preventing false positives on words like "iterate" or "accelerator". (#80)

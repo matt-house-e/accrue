@@ -170,10 +170,15 @@ class AnthropicClient:
 
         usage = None
         if response.usage:
+            u = response.usage
+            cache_write = getattr(u, "cache_creation_input_tokens", 0) or 0
+            cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
             usage = UsageInfo(
-                prompt_tokens=response.usage.input_tokens,
-                completion_tokens=response.usage.output_tokens,
-                total_tokens=response.usage.input_tokens + response.usage.output_tokens,
+                prompt_tokens=u.input_tokens,
+                completion_tokens=u.output_tokens,
+                cache_write_tokens=cache_write,
+                cache_read_tokens=cache_read,
+                total_tokens=u.input_tokens + u.output_tokens + cache_write + cache_read,
                 model=model,
             )
 
@@ -353,10 +358,15 @@ class AnthropicClient:
                 content = _extract_text(message)
                 usage = None
                 if message.usage:
+                    u = message.usage
+                    cache_write = getattr(u, "cache_creation_input_tokens", 0) or 0
+                    cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
                     usage = UsageInfo(
-                        prompt_tokens=message.usage.input_tokens,
-                        completion_tokens=message.usage.output_tokens,
-                        total_tokens=message.usage.input_tokens + message.usage.output_tokens,
+                        prompt_tokens=u.input_tokens,
+                        completion_tokens=u.output_tokens,
+                        cache_write_tokens=cache_write,
+                        cache_read_tokens=cache_read,
+                        total_tokens=u.input_tokens + u.output_tokens + cache_write + cache_read,
                         model=message.model,
                     )
                 responses[custom_id] = LLMResponse(content=content, usage=usage)

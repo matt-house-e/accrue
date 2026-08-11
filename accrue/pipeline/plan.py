@@ -152,6 +152,8 @@ def extrapolate_cost(sample_cost: CostSummary, total_rows: int) -> CostSummary:
             scaled = StepUsage(
                 prompt_tokens=round(usage.prompt_tokens * factor),
                 completion_tokens=round(usage.completion_tokens * factor),
+                cache_write_tokens=round(usage.cache_write_tokens * factor),
+                cache_read_tokens=round(usage.cache_read_tokens * factor),
                 total_tokens=round(usage.total_tokens * factor),
                 rows_processed=total_rows,
                 cache_misses=total_rows,
@@ -160,6 +162,8 @@ def extrapolate_cost(sample_cost: CostSummary, total_rows: int) -> CostSummary:
         est.steps[name] = scaled
         est.total_prompt_tokens += scaled.prompt_tokens
         est.total_completion_tokens += scaled.completion_tokens
+        est.total_cache_write_tokens += scaled.cache_write_tokens
+        est.total_cache_read_tokens += scaled.cache_read_tokens
         est.total_tokens += scaled.total_tokens
     return est
 

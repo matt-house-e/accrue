@@ -281,21 +281,27 @@ class TestCostAggregation:
 
     @pytest.mark.asyncio
     async def test_cost_from_step_with_usage(self):
-        """Step that returns usage info gets aggregated."""
+        """Step that returns usage info gets aggregated, cache tokens included."""
         from accrue.schemas.base import UsageInfo
 
         class UsageStep:
             name = "llm_mock"
             fields = ["f1"]
             depends_on = []
+            _call = 0
 
             async def run(self, ctx):
+                self._call += 1
+                cache_write = 100 if self._call == 1 else 200
+                cache_read = 50 if self._call == 1 else 100
                 return StepResult(
                     values={"f1": "val"},
                     usage=UsageInfo(
                         prompt_tokens=100,
                         completion_tokens=50,
-                        total_tokens=150,
+                        cache_write_tokens=cache_write,
+                        cache_read_tokens=cache_read,
+                        total_tokens=150 + cache_write + cache_read,
                         model="test-model",
                     ),
                 )
@@ -307,9 +313,14 @@ class TestCostAggregation:
         )
         assert cost.total_prompt_tokens == 200
         assert cost.total_completion_tokens == 100
-        assert cost.total_tokens == 300
+        # Row 1: 100 write / 50 read; row 2: 200 write / 100 read.
+        assert cost.total_cache_write_tokens == 300
+        assert cost.total_cache_read_tokens == 150
+        assert cost.total_tokens == 750
         assert "llm_mock" in cost.steps
         assert cost.steps["llm_mock"].rows_processed == 2
+        assert cost.steps["llm_mock"].cache_write_tokens == 300
+        assert cost.steps["llm_mock"].cache_read_tokens == 150
         assert cost.steps["llm_mock"].model == "test-model"
 
 

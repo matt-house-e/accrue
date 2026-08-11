@@ -55,7 +55,12 @@ def _make_succeeded_entry(custom_id: str, content: str = '{"result": "ok"}'):
             type="succeeded",
             message=SimpleNamespace(
                 content=[SimpleNamespace(type="text", text=content)],
-                usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+                usage=SimpleNamespace(
+                    input_tokens=10,
+                    output_tokens=5,
+                    cache_creation_input_tokens=200,
+                    cache_read_input_tokens=7,
+                ),
                 model="claude-sonnet-4-20250514",
             ),
         ),
@@ -188,6 +193,12 @@ class TestAnthropicPollBatch:
         assert len(result.responses) == 2
         assert result.responses["row-0"].content == '{"market_size": "$5B"}'
         assert result.failed_ids == []
+
+        # Cache tokens flow through the batch usage into total_tokens.
+        usage = result.responses["row-0"].usage
+        assert usage.cache_write_tokens == 200
+        assert usage.cache_read_tokens == 7
+        assert usage.total_tokens == 10 + 5 + 200 + 7
 
     @pytest.mark.asyncio
     async def test_timeout_raises(self):
