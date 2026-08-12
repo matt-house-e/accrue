@@ -9,7 +9,9 @@ class UsageInfo(BaseModel):
     Attributes:
         prompt_tokens: Number of tokens in the prompt/input.
         completion_tokens: Number of tokens in the completion/output.
-        total_tokens: Sum of prompt and completion tokens.
+        cache_creation_tokens: Tokens written to the prompt cache.
+        cache_read_tokens: Tokens read from the prompt cache.
+        total_tokens: Sum of prompt, completion, and cache tokens.
         model: Model identifier that served the request.
     """
 
@@ -17,6 +19,9 @@ class UsageInfo(BaseModel):
     completion_tokens: int = 0
     total_tokens: int = 0
     model: str = ""
+
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
 
 
 class StepUsage(BaseModel):

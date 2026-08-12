@@ -23,7 +23,9 @@ class TestLLMResponse:
         assert r.citations == []
 
     def test_creation_with_usage(self):
-        usage = UsageInfo(prompt_tokens=10, completion_tokens=5, total_tokens=15, model="test")
+        usage = UsageInfo(
+            prompt_tokens=10, completion_tokens=5, total_tokens=15, model="test"
+        )
         r = LLMResponse(content="hello", usage=usage)
         assert r.usage.total_tokens == 15
 
@@ -103,12 +105,16 @@ class TestLLMAPIError:
 
     def test_retryable_override_false(self):
         """explicit retryable=False overrides the auto-logic."""
-        e = LLMAPIError("rate limited", status_code=429, is_rate_limit=True, retryable=False)
+        e = LLMAPIError(
+            "rate limited", status_code=429, is_rate_limit=True, retryable=False
+        )
         assert e.retryable is False
 
     def test_third_party_429_promoted(self):
         """Generic APIError with status_code=429 is treated as rate-limit retryable."""
-        e = LLMAPIError("429 from third-party server", status_code=429, is_rate_limit=True)
+        e = LLMAPIError(
+            "429 from third-party server", status_code=429, is_rate_limit=True
+        )
         assert e.retryable is True
         assert e.is_rate_limit is True
 
@@ -258,7 +264,9 @@ class TestOpenAIClientResponses:
             output=[
                 SimpleNamespace(
                     type="message",
-                    content=[SimpleNamespace(type="output_text", text="{}", annotations=[])],
+                    content=[
+                        SimpleNamespace(type="output_text", text="{}", annotations=[])
+                    ],
                 )
             ],
             usage=None,
@@ -394,7 +402,9 @@ class TestOpenAIClientResponses:
                 SimpleNamespace(
                     type="message",
                     content=[
-                        SimpleNamespace(type="output_text", text='{"f": "v"}', annotations=[])
+                        SimpleNamespace(
+                            type="output_text", text='{"f": "v"}', annotations=[]
+                        )
                     ],
                 )
             ],
@@ -441,7 +451,9 @@ class TestOpenAIClientResponses:
                 SimpleNamespace(
                     type="message",
                     content=[
-                        SimpleNamespace(type="output_text", text='{"f": "v"}', annotations=[])
+                        SimpleNamespace(
+                            type="output_text", text='{"f": "v"}', annotations=[]
+                        )
                     ],
                 )
             ],
@@ -548,7 +560,9 @@ class TestOpenAIClientChatCompletions:
     async def test_complete_uses_chat_completions(self):
         mock_response = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content='{"f": 1}'))],
-            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            usage=SimpleNamespace(
+                prompt_tokens=10, completion_tokens=5, total_tokens=15
+            ),
         )
         mock_inner = MagicMock()
         mock_inner.chat.completions.create = AsyncMock(return_value=mock_response)
@@ -638,7 +652,9 @@ class TestAnthropicClient:
         }
 
         mock_response = SimpleNamespace(
-            content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
+            content=[
+                SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)
+            ],
             usage=SimpleNamespace(input_tokens=10, output_tokens=5),
         )
         mock_inner = MagicMock()
@@ -662,13 +678,57 @@ class TestAnthropicClient:
         assert result.content == '{"f1": "val"}'
 
     @pytest.mark.asyncio
+    async def test_cache_tokens_are_preserved_in_usage(self):
+        """Anthropic cache creation/read tokens are included in UsageInfo."""
+        self._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        mock_response = SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    text="hello",
+                    type="text",
+                    citations=None,
+                )
+            ],
+            usage=SimpleNamespace(
+                input_tokens=120,
+                output_tokens=1420,
+                cache_creation_input_tokens=95537,
+                cache_read_input_tokens=0,
+            ),
+        )
+
+        mock_inner = MagicMock()
+        mock_inner.messages.create = AsyncMock(return_value=mock_response)
+
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+
+        result = await client.complete(
+            messages=[{"role": "user", "content": "hi"}],
+            model="claude-sonnet-4-5-20250929",
+            temperature=0.2,
+            max_tokens=1000,
+        )
+
+        assert result.usage is not None
+        assert result.usage.prompt_tokens == 120
+        assert result.usage.completion_tokens == 1420
+        assert result.usage.cache_creation_tokens == 95537
+        assert result.usage.cache_read_tokens == 0
+        assert result.usage.total_tokens == 97077
+
+    @pytest.mark.asyncio
     async def test_json_object_ignored(self):
         """json_object has no Anthropic equivalent — no output_config set."""
         self._install_mock_anthropic()
         from accrue.steps.providers.anthropic import AnthropicClient
 
         mock_response = SimpleNamespace(
-            content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
+            content=[
+                SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)
+            ],
             usage=SimpleNamespace(input_tokens=10, output_tokens=5),
         )
         mock_inner = MagicMock()
@@ -732,7 +792,9 @@ class TestAnthropicClient:
         }
 
         mock_response = SimpleNamespace(
-            content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
+            content=[
+                SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)
+            ],
             usage=SimpleNamespace(input_tokens=10, output_tokens=5),
         )
         mock_inner = MagicMock()
@@ -762,7 +824,9 @@ class TestAnthropicClient:
         from accrue.steps.providers.anthropic import AnthropicClient
 
         mock_response = SimpleNamespace(
-            content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
+            content=[
+                SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)
+            ],
             usage=SimpleNamespace(input_tokens=10, output_tokens=5),
         )
         mock_inner = MagicMock()
@@ -807,7 +871,9 @@ class TestAnthropicClient:
         from accrue.steps.providers.anthropic import AnthropicClient
 
         mock_response = SimpleNamespace(
-            content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
+            content=[
+                SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)
+            ],
             usage=SimpleNamespace(input_tokens=10, output_tokens=5),
         )
         mock_inner = MagicMock()
@@ -842,7 +908,9 @@ class TestAnthropicClient:
 
         mock_response = SimpleNamespace(
             content=[
-                SimpleNamespace(type="text", text="I'll search for that.", citations=None),
+                SimpleNamespace(
+                    type="text", text="I'll search for that.", citations=None
+                ),
                 SimpleNamespace(
                     type="server_tool_use",
                     id="srvtoolu_123",
@@ -884,7 +952,10 @@ class TestAnthropicClient:
             tools=[{"type": "web_search"}],
         )
 
-        assert result.content == "I'll search for that.Based on search results, here is the answer."
+        assert (
+            result.content
+            == "I'll search for that.Based on search results, here is the answer."
+        )
         assert len(result.citations) == 1
         assert result.citations[0].url == "https://example.com/article"
         assert result.citations[0].title == "Example Article"
@@ -902,7 +973,9 @@ class TestAnthropicClient:
             "json_schema": {"name": "test", "schema": schema, "strict": True},
         }
         mock_response = SimpleNamespace(
-            content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
+            content=[
+                SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)
+            ],
             usage=SimpleNamespace(input_tokens=10, output_tokens=5),
         )
         mock_inner = MagicMock()
@@ -911,7 +984,9 @@ class TestAnthropicClient:
         client = AnthropicClient(api_key="test")
         client._client = mock_inner
 
-        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+        with caplog.at_level(
+            logging.WARNING, logger="accrue.steps.providers.anthropic"
+        ):
             for _ in range(5):
                 await client.complete(
                     messages=[{"role": "user", "content": "hi"}],
@@ -941,7 +1016,9 @@ class TestAnthropicClient:
             "json_schema": {"name": "test", "schema": schema, "strict": True},
         }
         mock_response = SimpleNamespace(
-            content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
+            content=[
+                SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)
+            ],
             usage=SimpleNamespace(input_tokens=10, output_tokens=5),
         )
         mock_inner = MagicMock()
@@ -950,7 +1027,9 @@ class TestAnthropicClient:
         client = AnthropicClient(api_key="test")
         client._client = mock_inner
 
-        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+        with caplog.at_level(
+            logging.WARNING, logger="accrue.steps.providers.anthropic"
+        ):
             await client.complete(
                 messages=[{"role": "user", "content": "hi"}],
                 model="claude-sonnet-4-5-20250929",
@@ -974,7 +1053,9 @@ class TestAnthropicClient:
             "json_schema": {"name": "test", "schema": schema, "strict": True},
         }
         mock_response = SimpleNamespace(
-            content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
+            content=[
+                SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)
+            ],
             usage=SimpleNamespace(input_tokens=10, output_tokens=5),
         )
         mock_inner = MagicMock()
@@ -983,7 +1064,9 @@ class TestAnthropicClient:
         # First client — exhaust its warning
         client_a = AnthropicClient(api_key="test")
         client_a._client = mock_inner
-        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+        with caplog.at_level(
+            logging.WARNING, logger="accrue.steps.providers.anthropic"
+        ):
             for _ in range(3):
                 await client_a.complete(
                     messages=[{"role": "user", "content": "hi"}],
@@ -999,7 +1082,9 @@ class TestAnthropicClient:
         # Second client — must still fire its own warning
         client_b = AnthropicClient(api_key="test")
         client_b._client = mock_inner
-        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+        with caplog.at_level(
+            logging.WARNING, logger="accrue.steps.providers.anthropic"
+        ):
             await client_b.complete(
                 messages=[{"role": "user", "content": "hi"}],
                 model="claude-sonnet-4-5-20250929",
@@ -1254,7 +1339,9 @@ class TestGoogleClient:
             tools=[
                 {
                     "type": "web_search",
-                    "provider_kwargs": {"dynamic_retrieval_config": {"mode": "dynamic"}},
+                    "provider_kwargs": {
+                        "dynamic_retrieval_config": {"mode": "dynamic"}
+                    },
                 }
             ],
         )

@@ -48,7 +48,9 @@ class AnthropicClient:
             try:
                 from anthropic import AsyncAnthropic
             except ImportError:
-                raise ImportError("anthropic package required: pip install accrue[anthropic]")
+                raise ImportError(
+                    "anthropic package required: pip install accrue[anthropic]"
+                )
             key = self._api_key or os.environ.get("ANTHROPIC_API_KEY")
             if not key:
                 raise StepError(
@@ -112,7 +114,11 @@ class AnthropicClient:
         # Structured outputs: Anthropic uses output_config.format (GA)
         # json_schema → constrained decoding; json_object → no equivalent, skip
         # IMPORTANT: output_config.format is incompatible with web search citations
-        if anthropic_tools and response_format and response_format.get("type") == "json_schema":
+        if (
+            anthropic_tools
+            and response_format
+            and response_format.get("type") == "json_schema"
+        ):
             if not self._warned_grounding_schema:
                 logger.warning(
                     "Anthropic grounding (web search tools) is incompatible with strict "
@@ -121,7 +127,11 @@ class AnthropicClient:
                     "the grounded context, or disable grounding for this step."
                 )
                 self._warned_grounding_schema = True
-        if not anthropic_tools and response_format and response_format.get("type") == "json_schema":
+        if (
+            not anthropic_tools
+            and response_format
+            and response_format.get("type") == "json_schema"
+        ):
             inner = response_format.get("json_schema", {})
             schema = inner.get("schema", {})
             if schema:
@@ -168,12 +178,27 @@ class AnthropicClient:
         # Extract citations from web_search_result_location blocks
         citations = _extract_citations(response) if anthropic_tools else []
 
+        # Extract text from potentially multi-block response
+        content = _extract_text(response)
+
+        # Extract citations from web_search_result_location blocks
+        citations = _extract_citations(response) if anthropic_tools else []
+
         usage = None
         if response.usage:
             usage = UsageInfo(
                 prompt_tokens=response.usage.input_tokens,
                 completion_tokens=response.usage.output_tokens,
-                total_tokens=response.usage.input_tokens + response.usage.output_tokens,
+                cache_creation_tokens=getattr(
+                    response.usage, "cache_creation_input_tokens", 0
+                ),
+                cache_read_tokens=getattr(response.usage, "cache_read_input_tokens", 0),
+                total_tokens=(
+                    response.usage.input_tokens
+                    + response.usage.output_tokens
+                    + getattr(response.usage, "cache_creation_input_tokens", 0)
+                    + getattr(response.usage, "cache_read_input_tokens", 0)
+                ),
                 model=model,
             )
 
@@ -238,7 +263,9 @@ class AnthropicClient:
                 inner = req.response_format.get("json_schema", {})
                 schema = inner.get("schema", {})
                 if schema:
-                    params["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+                    params["output_config"] = {
+                        "format": {"type": "json_schema", "schema": schema}
+                    }
 
             # Forward provider_kwargs (e.g. thinking, effort)
             if req.provider_kwargs:
@@ -253,7 +280,9 @@ class AnthropicClient:
 
         try:
             batch = await client.messages.batches.create(requests=anthropic_requests)
-            logger.info("Anthropic batch submitted: %s (%d requests)", batch.id, len(requests))
+            logger.info(
+                "Anthropic batch submitted: %s (%d requests)", batch.id, len(requests)
+            )
             return batch.id
         except Exception as exc:
             raise LLMAPIError(
@@ -297,7 +326,9 @@ class AnthropicClient:
                 elapsed = time.monotonic() - start
 
                 if status == "ended":
-                    logger.info("Anthropic batch %s ended (%.0fs elapsed)", batch_id, elapsed)
+                    logger.info(
+                        "Anthropic batch %s ended (%.0fs elapsed)", batch_id, elapsed
+                    )
                     return await self._collect_batch_results(client, batch_id)
 
                 if elapsed > timeout:
@@ -336,7 +367,9 @@ class AnthropicClient:
             await client.messages.batches.cancel(batch_id)
             logger.info("Anthropic batch %s cancel requested", batch_id)
         except Exception:
-            logger.warning("Failed to cancel Anthropic batch %s", batch_id, exc_info=True)
+            logger.warning(
+                "Failed to cancel Anthropic batch %s", batch_id, exc_info=True
+            )
 
     async def _collect_batch_results(self, client: Any, batch_id: str) -> BatchResult:
         """Stream and parse results from a completed Anthropic batch."""
@@ -356,7 +389,18 @@ class AnthropicClient:
                     usage = UsageInfo(
                         prompt_tokens=message.usage.input_tokens,
                         completion_tokens=message.usage.output_tokens,
-                        total_tokens=message.usage.input_tokens + message.usage.output_tokens,
+                        cache_creation_tokens=getattr(
+                            message.usage, "cache_creation_input_tokens", 0
+                        ),
+                        cache_read_tokens=getattr(
+                            message.usage, "cache_read_input_tokens", 0
+                        ),
+                        total_tokens=(
+                            message.usage.input_tokens
+                            + message.usage.output_tokens
+                            + getattr(message.usage, "cache_creation_input_tokens", 0)
+                            + getattr(message.usage, "cache_read_input_tokens", 0)
+                        ),
                         model=message.model,
                     )
                 responses[custom_id] = LLMResponse(content=content, usage=usage)
@@ -365,7 +409,9 @@ class AnthropicClient:
                 error_msg = getattr(result, "error", {})
                 if hasattr(error_msg, "message"):
                     error_msg = error_msg.message
-                errors[custom_id] = str(error_msg) if error_msg else f"result type: {result.type}"
+                errors[custom_id] = (
+                    str(error_msg) if error_msg else f"result type: {result.type}"
+                )
 
         return BatchResult(
             responses=responses,
