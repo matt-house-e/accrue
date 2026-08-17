@@ -264,6 +264,32 @@ class OpenAIClient:
 
     # -- Batch API ---------------------------------------------------------
 
+    @property
+    def supports_batch(self) -> bool:
+        """True only for native OpenAI.
+
+        The Batch API (file upload + ``/v1/batches``) is not part of the
+        OpenAI-compatible surface third-party gateways implement, so a
+        configured ``base_url`` means no batch path.  Read by
+        :func:`~accrue.steps.providers.base.is_batch_capable`.
+        """
+        return self._base_url is None
+
+    def _require_native_batch(self) -> None:
+        """Raise unless this client talks to native OpenAI.
+
+        Raises:
+            StepError: When a ``base_url`` is configured.
+        """
+        if self._base_url:
+            raise StepError(
+                f"The OpenAI Batch API is not available through base_url "
+                f"'{self._base_url}'. OpenAI-compatible gateways (OpenRouter, Groq, "
+                f"Together, vLLM, Ollama) implement chat completions but not the "
+                f"batch endpoints. Set batch=False on this step to run in realtime.",
+                step_name="batch",
+            )
+
     async def submit_batch(
         self,
         requests: list[BatchRequest],
@@ -281,9 +307,13 @@ class OpenAIClient:
 
         Returns:
             The OpenAI batch job ID.
+
+        Raises:
+            StepError: When a ``base_url`` is configured (no batch endpoint).
         """
         from openai import APIError
 
+        self._require_native_batch()
         client = self._get_client()
 
         # Validate custom_id uniqueness before touching the network
@@ -362,10 +392,12 @@ class OpenAIClient:
             Aggregated batch result.
 
         Raises:
-            StepError: On failure, expiration, or timeout.
+            StepError: On failure, expiration, timeout, or when a ``base_url``
+                is configured (no batch endpoint).
         """
         from openai import APIError
 
+        self._require_native_batch()
         client = self._get_client()
         start = time.monotonic()
 

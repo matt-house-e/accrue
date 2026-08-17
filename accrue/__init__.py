@@ -38,7 +38,12 @@ from .schemas.base import CostSummary
 from .schemas.field_spec import FieldSpec
 from .schemas.grounding import GroundingConfig
 from .steps import FunctionStep, LLMStep, Step, StepContext, StepResult
-from .steps.providers.base import BatchCapableLLMClient, BatchRequest, BatchResult
+from .steps.providers.base import (
+    BatchCapableLLMClient,
+    BatchRequest,
+    BatchResult,
+    is_batch_capable,
+)
 from .utils.logger import setup_logging
 from .utils.web_search import web_search
 
@@ -75,6 +80,7 @@ __all__ = [
     "web_search",
     # Batch API
     "BatchCapableLLMClient",
+    "is_batch_capable",
     "BatchRequest",
     "BatchResult",
     # Results & errors

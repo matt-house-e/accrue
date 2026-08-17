@@ -199,7 +199,7 @@ Parse and validate an LLM response. Performs JSON decoding, Pydantic validation,
 is_batch_eligible: bool
 ```
 
-`True` when `batch=True` and the resolved client implements `BatchCapableLLMClient`.
+`True` when `batch=True` and the resolved client is batch-capable in its current configuration (`is_batch_capable`). Implementing `BatchCapableLLMClient` is not sufficient on its own — `OpenAIClient` with a `base_url` has the methods but no batch endpoint behind them. When `batch=True` and the client cannot batch, this returns `False`, the step runs in realtime, and a warning is logged once.
 
 ---
 
@@ -631,7 +631,7 @@ class LLMClient(Protocol):
 from accrue import BatchCapableLLMClient
 ```
 
-Extended protocol for providers that support batch API operations. The pipeline checks `isinstance(client, BatchCapableLLMClient)` to decide the execution path.
+Extended protocol for providers that support batch API operations. The pipeline decides the execution path with `is_batch_capable(client)` rather than a bare `isinstance`, since a `runtime_checkable` Protocol only checks that the methods exist — it cannot tell native OpenAI from a gateway that has no batch endpoint.
 
 ```python
 @runtime_checkable
@@ -726,7 +726,7 @@ OpenAIClient(
 
 Default adapter. Native OpenAI (no `base_url`) uses the Responses API with web search, structured outputs, and inline citations. Third-party providers with a `base_url` (Ollama, Groq, DeepSeek, Together, Fireworks, vLLM, Mistral, LM Studio) use Chat Completions for compatibility.
 
-Implements `BatchCapableLLMClient` (native OpenAI only).
+Implements `BatchCapableLLMClient`, but reports `supports_batch = False` when `base_url` is set — gateways expose chat completions without the batch endpoints. Calling `submit_batch()` / `poll_batch()` on a `base_url` client raises `StepError`.
 
 ### AnthropicClient
 
@@ -947,6 +947,7 @@ from accrue import (
     BatchCapableLLMClient,
     BatchRequest,
     BatchResult,
+    is_batch_capable,
 
     # Utilities
     web_search,

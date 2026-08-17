@@ -72,6 +72,19 @@ from accrue import BatchCapableLLMClient, BatchRequest, BatchResult
   `submit_batch()`, `poll_batch()`, and `cancel_batch()`. A custom client that
   implements these methods can run `LLMStep(batch=True)` through the batch
   path; otherwise Accrue falls back to realtime calls.
+- `is_batch_capable(client)` is the check Accrue actually uses. It combines the
+  `isinstance` test with an optional `supports_batch` property, so an adapter
+  whose batch support depends on how it was built can opt out at runtime:
+
+  ```python
+  class MyClient:
+      @property
+      def supports_batch(self) -> bool:
+          return self._endpoint_has_batch_api
+  ```
+
+  Clients that omit `supports_batch` are treated as capable, so existing custom
+  adapters need no changes.
 
 ## Monitoring batch runs
 
@@ -109,7 +122,8 @@ The Anthropic adapter uses the Message Batches API. System messages automaticall
 ## Constraints and gotchas
 
 - **Incompatible with `grounding`.** Batch APIs do not support tool use (web search). Setting both `batch=True` and `grounding=True` raises a `PipelineError` at construction time.
-- **Client must implement `BatchCapableLLMClient`.** The built-in OpenAI and Anthropic adapters do. Custom clients that only implement `LLMClient` will silently fall back to realtime execution.
+- **Client must be batch-capable.** The built-in OpenAI and Anthropic adapters are. Clients that only implement `LLMClient` fall back to realtime execution with a logged warning.
+- **`base_url` disables batch.** OpenAI-compatible gateways (OpenRouter, Groq, Together, vLLM, Ollama) implement chat completions but not the batch endpoints, so `OpenAIClient` with a `base_url` set reports itself as not batch-capable. A step combining `batch=True` with `base_url` runs in realtime at standard pricing and warns; calling `submit_batch()` on such a client directly raises a `StepError`.
 - **Long-running.** Batches can take minutes to hours depending on provider load and batch size. The `batch_timeout` config (default 24 hours) controls the maximum wait.
 - **Enable caching.** Without caching, re-running a pipeline resubmits all rows. The `for_batch()` preset enables caching by default.
 - **Enable checkpointing.** If the process crashes mid-poll, checkpointing lets you resume without resubmitting completed steps. The `for_batch()` preset enables this too.

@@ -149,8 +149,12 @@ class BatchCapableLLMClient(LLMClient, Protocol):
 
     Providers that implement this protocol can submit batch jobs (JSONL upload,
     async polling, result download) for 50% cost savings on supported models.
-    The pipeline checks ``isinstance(client, BatchCapableLLMClient)`` to decide
-    whether a step can use the batch execution path.
+
+    Implementing the three methods is necessary but not always sufficient — use
+    :func:`is_batch_capable`, not a bare ``isinstance``, to decide whether a
+    step can take the batch path.  An adapter whose batch support depends on
+    how it was constructed may expose a ``supports_batch`` property to opt out
+    at runtime; clients that omit it are treated as always capable.
     """
 
     async def submit_batch(
@@ -197,3 +201,32 @@ class BatchCapableLLMClient(LLMClient, Protocol):
             batch_id: Provider batch job identifier to cancel.
         """
         ...
+
+
+def is_batch_capable(client: Any) -> bool:
+    """True when *client* can run batch jobs **in its current configuration**.
+
+    Two gates, because batch support is not purely structural:
+
+    1. The client implements :class:`BatchCapableLLMClient` (structural).
+    2. It has not opted out via a falsy ``supports_batch`` attribute (runtime).
+
+    The second gate exists because one adapter class can be batch-capable in
+    one configuration and not in another.  :class:`~accrue.providers.OpenAIClient`
+    speaks to the OpenAI Batch API natively, but to an OpenAI-*compatible*
+    gateway (OpenRouter, Groq, Together, vLLM, Ollama) when ``base_url`` is set
+    — and those implement chat completions without the batch endpoints.
+    ``isinstance`` cannot see that difference: a ``runtime_checkable`` Protocol
+    only checks that the methods exist, and they exist either way.
+
+    Args:
+        client: Any LLM client adapter.
+
+    Returns:
+        ``True`` when the batch execution path is safe to take.  Clients that
+        do not define ``supports_batch`` are treated as capable, so custom
+        adapters implementing the three batch methods keep working unchanged.
+    """
+    if not isinstance(client, BatchCapableLLMClient):
+        return False
+    return bool(getattr(client, "supports_batch", True))
