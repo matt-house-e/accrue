@@ -55,7 +55,16 @@ The first row of a step writes the cache entry (billed at 1.25x input); every su
 
 Three consequences worth knowing:
 
-- **A prefix below the model's minimum is not cached at all.** Anthropic only caches a prefix past a model-dependent floor — 1024 tokens on most current models, 512 on the newest Opus, up to 4096 on some smaller and older ones. Under the floor, `cache_control` is silently ignored: no error, just zero cache tokens. Accrue's auto-generated system half is only ~200-450 tokens for a typical step, so **caching does nothing until you add real static context** — a substantial `system_prompt_header` (or `system_prompt`), or unusually rich field specs. If `result.cost` reports zero cache write/read tokens on a small step, that is the floor, not a regression.
+- **A prefix below the model's minimum is not cached at all.** Anthropic caches a prefix only past a per-model floor, and **the floor is not lower on newer models** — it varies by model, not by generation:
+
+  | Minimum cacheable prefix | Models |
+  |---|---|
+  | 512 tokens | Opus 5 |
+  | 1024 tokens | Opus 4.8, Sonnet 5, Sonnet 4.6, Sonnet 4.5 |
+  | 2048 tokens | Opus 4.7 |
+  | 4096 tokens | **Haiku 4.5**, Opus 4.6, Opus 4.5 |
+
+  Under the floor, `cache_control` is silently ignored — no error, just zero cache tokens. Accrue's auto-generated system half is roughly 850 characters for a one-field step and 1,800 for a three-field step with enums, formats, and examples (order of a few hundred tokens), so on every model in the table **caching does nothing until you add real static context** — a substantial `system_prompt_header` (or `system_prompt`), or unusually rich field specs. Haiku 4.5 needs the most: a step has to clear 4096 tokens of static prefix before caching does anything at all. If `result.cost` reports zero cache write/read tokens on a small step, that is the floor, not a regression.
 - Cache entries are scoped to the exact prefix, so changing `system_prompt_header`, field specs, or the model starts a fresh entry.
 - With `max_workers > 1` on a cold cache, the workers in the first wave all start before any entry exists, so each writes its own. The cache settles from the second wave onward.
 
