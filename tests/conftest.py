@@ -22,6 +22,8 @@ Tests that need a specific cache location can still pass
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
 
@@ -69,25 +71,37 @@ def _scrub_provider_env_vars(monkeypatch):
 def _block_network(monkeypatch):
     """Raise on any real outbound HTTP in unit tests.
 
-    Patches both the async and sync ``httpx`` send methods so accidental
-    real API calls fail loudly with a clear message rather than hanging or
-    leaking billing charges.  Integration tests that need real network access
-    must be decorated with ``@pytest.mark.integration`` and kept under
-    ``tests/integration/`` (excluded from the default pytest run via
-    ``norecursedirs``).
-    """
-    import httpx
+    Patches the sync and async ``send`` methods of *every* HTTP client library a
+    provider SDK might be using, so accidental real API calls fail loudly with a
+    clear message rather than hanging or leaking billing charges.
 
+    ``openai>=3`` switched from ``httpx`` to the ``httpx2`` package, while
+    ``anthropic`` and ``google-genai`` still ship ``httpx`` — so an install can
+    legitimately have one, the other, or both. Patching only the first one found
+    would leave the other's traffic unguarded without any test failing. Neither
+    package is a direct accrue dependency, so both imports are optional.
+
+    Integration tests that need real network access must be decorated with
+    ``@pytest.mark.integration`` and kept under ``tests/integration/`` (excluded
+    from the default pytest run via ``norecursedirs``).
+    """
     _msg = (
         "Unit test attempted a real network call — "
         "mock the provider client or use pytest.mark.integration"
     )
 
-    def _raise_async(self, *args, **kwargs):
+    def _raise(self, *args, **kwargs):
         raise RuntimeError(_msg)
 
-    def _raise_sync(self, *args, **kwargs):
-        raise RuntimeError(_msg)
+    patched = False
+    for mod_name in ("httpx", "httpx2"):
+        try:
+            mod = importlib.import_module(mod_name)
+        except ModuleNotFoundError:
+            continue
+        monkeypatch.setattr(mod.AsyncClient, "send", _raise)
+        monkeypatch.setattr(mod.Client, "send", _raise)
+        patched = True
 
-    monkeypatch.setattr(httpx.AsyncClient, "send", _raise_async)
-    monkeypatch.setattr(httpx.Client, "send", _raise_sync)
+    if not patched:  # pragma: no cover — guards against a silently inert fixture
+        raise RuntimeError("network block is inert: neither httpx nor httpx2 is installed")
