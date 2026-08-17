@@ -5,8 +5,8 @@ Composable enrichment pipeline engine. The gap between Instructor (single LLM ca
 ## Commands
 
 ```bash
-pytest                          # Run all tests (791)
-pytest tests/unit/              # Unit tests only
+pytest                          # Run all tests (803) — tests/integration excluded via norecursedirs
+pytest tests/integration/       # Integration tests (11), opt-in only
 pytest -x -q                    # Fast fail
 python -m build                 # Build package
 pip install -e ".[dev]"         # Dev install
