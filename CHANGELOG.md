@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Internal
 - CI: Markdown is excluded from ruff (`extend-exclude = ["*.md"]`). The dev extras are unbounded, so CI resolved ruff 0.16, which began formatting Python code blocks inside Markdown and failed `ruff format --check` on 24 untouched files across `README.md`, `docs/`, and `.claude/skills/`. The network-blocking test fixture also now patches `httpx2` as well as `httpx`, since `openai>=3` moved to the `httpx2` package and CI installs only `.[dev]`, which pulls neither on its own. `main` had been red since both landed. (#113)
+- CI: `test.yml` now also runs weekly on a schedule. Because the dev extras are deliberately unbounded, an upstream release can break `main` with no commit landing here — which is exactly what happened twice in 2026, leaving `main` red for six weeks because nothing triggered a build. A scheduled run against a fresh dependency resolution catches that class of breakage in days, with no LLM involved.
+- The scheduled maintenance workflow was rewritten and moved to `maintenance.yml`, monthly. It now posts only when it finds something (the old prompt explicitly required posting even when clean, which produced ten near-identical issues), maintains one rolling issue instead of a dated one per run, sweeps every exported symbol for doc drift rather than three at random, and can see CI and PR state — the previous tool allowlist excluded `gh run` and `gh pr`, so it was structurally unable to notice the outage above. Version coherence and CHANGELOG-section checks moved out of the LLM sweep into `tests/test_repo_metadata.py`, where they run on every commit.
 
 ## [1.3.0] - 2026-05-19
 

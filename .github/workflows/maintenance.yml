@@ -1,0 +1,100 @@
+name: Repo maintenance (scheduled)
+
+# Runs monthly, plus on-demand via the Actions tab.
+#
+# Design notes, because the previous version got these wrong:
+#
+#  - It posts ONLY when it finds something. The old prompt said "if
+#    everything is clean, still post the issue" — that instruction alone
+#    produced ten near-identical issues and made this workflow the single
+#    largest contributor to the open-issue queue.
+#  - It edits ONE rolling issue instead of opening a new one each run, so
+#    findings persist across runs instead of being re-derived (and sometimes
+#    lost — a real CHANGELOG defect was reported three runs running, then
+#    reported as a clean PASS on the fourth).
+#  - Version coherence, "does CHANGELOG.md exist", and examples-import sanity
+#    are gone. They ran ten times against files that had not changed in months
+#    and never once produced a finding. The first two are now pytest
+#    assertions in tests/test_repo_metadata.py, which run on every commit and
+#    cannot hallucinate; the third is covered by the test suite.
+#  - Doc drift sweeps EVERY exported symbol. Sampling three at random covered
+#    half the public API in ten weeks and hid two undocumented exports the
+#    whole time.
+#  - The tool list includes `gh run` and `gh pr`. Without them the agent could
+#    not see that CI was red or that PRs were stuck — exactly what it missed
+#    for six weeks.
+#  - Sonnet, not Opus. Nothing here is beyond grep and `gh issue list`, and the
+#    Opus runs produced at least one confidently-wrong claim anyway.
+
+on:
+  schedule:
+    - cron: "0 6 1 * *"
+  workflow_dispatch:
+
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        # A benign turn-cap overrun used to paint this workflow red *after* it
+        # had already done its job, which trains everyone to ignore the red.
+        continue-on-error: true
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            REPO: ${{ github.repository }}
+
+            Repo maintenance sweep for accrue. Read CLAUDE.md before starting.
+
+            Run these checks. Every one is meant to produce a finding only when
+            something is actually wrong — silence is the expected outcome.
+
+            1. **Build health** — `gh run list --workflow=test.yml --branch main
+               --limit 5`. Flag if the most recent run on main failed or is
+               stuck. State the failing job and the error line.
+            2. **Stalled pull requests** — open PRs with no update in 14+ days.
+               For each, say whether it is blocked on review, on CI, or on the
+               author. Check `gh pr checks <n>` before guessing.
+            3. **Bugs with no fix in flight** — open issues labelled `bug` with
+               no linked PR and no assignee. These are the highest-priority
+               finding in this sweep; list them first.
+            4. **Doc drift** — read the `__all__` list in accrue/__init__.py and
+               check EVERY symbol in it, not a sample. A symbol counts as
+               documented if it appears in README.md, docs/getting-started/,
+               docs/guides/, or docs/reference/. Report only the ones that
+               appear nowhere, and say which file would be the natural home.
+            5. **Long-stale issues** — open issues with no activity in 180+ days.
+               One line each. Do not re-litigate ones that have been reported
+               before and deliberately left open.
+
+            OUTPUT RULES — follow these exactly:
+
+            - If NO check produced a finding, do nothing at all. Do not create
+              an issue, do not edit one, do not comment. Print "clean — nothing
+              to report" and stop. A silent run is a successful run.
+            - If any check produced a finding, maintain a SINGLE rolling issue
+              titled exactly "Repo maintenance — open findings".
+              Look for it first:
+              `gh issue list --state open --search "Repo maintenance — open findings in:title"`
+              If it exists, rewrite its body with `gh issue edit <n> --body-file`.
+              If it does not, create it with `gh issue create`.
+            - Never open a second maintenance issue. Never open a dated one.
+            - Write the body as a short checklist of only the checks that found
+              something. Omit clean checks entirely — do not list them as
+              passing.
+            - For each finding give the evidence (file:line, issue/PR number, or
+              the command output), not just the claim. If you could not verify
+              something, say so rather than asserting it.
+          claude_args: |
+            --max-turns 40
+            --model claude-sonnet-5
+            --allowedTools "Read,Grep,Glob,Bash(gh issue:*),Bash(gh pr:*),Bash(gh run:*),Bash(git:*),Bash(grep:*),Bash(find:*)"

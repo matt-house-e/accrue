@@ -5,9 +5,21 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Weekly run against a *fresh* dependency resolution. The dev extras are
+  # deliberately unbounded (ruff>=…, openai>=…, pytest>=…), so an upstream
+  # release can break main without a single commit landing here. In 2026 that
+  # happened twice — ruff 0.16 began formatting Markdown, and openai 3.0 moved
+  # to the httpx2 package — and main sat red for six weeks because nothing
+  # triggered a build. This is the cheapest possible detector: no LLM, no
+  # tokens, just the gate we already run. See #113.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Include the event so a Monday scheduled run can't cancel an in-flight
+  # push build on main (or the reverse).
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
