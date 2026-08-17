@@ -150,6 +150,46 @@ FunctionStep(
 )
 ```
 
+## Writing a custom Step
+
+`FunctionStep` covers most non-LLM logic. When you need more — your own caching
+behaviour, your own usage accounting, or state held across rows — implement the
+`Step` protocol directly. A step is any object with a `name`, a `fields` list,
+`depends_on`, and an async `run(ctx) -> StepResult`:
+
+```python
+from accrue import Pipeline, Step, StepContext, StepResult
+
+class GeocodeStep:
+    """Resolve an address to coordinates via an external service."""
+
+    name = "geocode"
+    fields = ["lat", "lon"]
+    depends_on: list[str] = []
+
+    async def run(self, ctx: StepContext) -> StepResult:
+        lat, lon = await lookup(ctx.row["address"])
+        return StepResult(values={"lat": lat, "lon": lon})
+
+assert isinstance(GeocodeStep(), Step)  # runtime_checkable
+pipeline = Pipeline([GeocodeStep()])
+```
+
+`Step` is a `runtime_checkable` `Protocol`, so there is no base class to inherit
+— satisfying the shape is enough.
+
+`StepResult` is what every step hands back:
+
+| Attribute | Meaning |
+|---|---|
+| `values` | `dict[str, Any]` — field name → produced value. Filtered to the step's declared `fields`, same as `FunctionStep`. |
+| `usage` | Optional `UsageInfo`. LLM steps populate it; leave it `None` unless your step calls a model and you want its tokens in `result.cost`. |
+| `metadata` | Arbitrary dict for logging and debugging. Not written to the output frame. |
+
+Steps must be pure with respect to their inputs — read from `ctx`, return a
+`StepResult`, don't mutate `ctx.row`. See the [API reference](../reference/api.md)
+for the full `Step`, `StepContext`, and `StepResult` definitions.
+
 ## Gotchas
 
 - FunctionStep only accepts `fields` as `list[str]`. Dict field specs (with prompts, types, etc.) are an LLMStep feature.

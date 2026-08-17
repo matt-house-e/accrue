@@ -1,11 +1,11 @@
 # Accrue
 
-Composable enrichment pipeline engine. The gap between Instructor (single LLM call) and Clay (full SaaS platform). v1.0.0, Python 3.10+.
+Composable enrichment pipeline engine. The gap between Instructor (single LLM call) and Clay (full SaaS platform). v1.3.0, Python 3.10+.
 
 ## Commands
 
 ```bash
-pytest                          # Run all tests (483)
+pytest                          # Run all tests (791)
 pytest tests/unit/              # Unit tests only
 pytest -x -q                    # Fast fail
 python -m build                 # Build package
@@ -47,7 +47,15 @@ Types: `feat`, `fix`, `docs`, `refactor`, `test`
 
 **Always include labels.** Format: `[Type]: [Component] Description`
 
-Labels: `type:{epic,story,task,bug,spike}`, `priority:{critical,high,medium,low}`, `component:{core,steps,pipeline,data,testing,docs,infra}`
+Labels that actually exist on the repo (`gh label list` is the source of truth):
+
+- Type: `bug`, `enhancement`, `documentation`, `question`, `duplicate`, `invalid`, `wontfix`
+- Priority: `priority:{high,medium,low}`
+- Other: `backlog` (not on the near-term roadmap), `meta` (dev tooling, not user-facing),
+  `good first issue`, `help wanted`, `needs info`, `release`
+
+There is no `type:*` or `component:*` namespace — `gh issue create --label type:task`
+fails. Create the label first if you want a new one.
 
 See `docs/guides/` for details.
 

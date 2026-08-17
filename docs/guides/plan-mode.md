@@ -30,6 +30,35 @@ or assert on it in a test). The structured fields are also available directly on
 the `PipelinePlan`: `steps`, `sample_rows`, `sample_outputs`, `sample_errors`,
 `total_rows`, `sample_size`, `sample_cost`, and `estimated_cost`.
 
+### Inspecting individual steps
+
+`plan.steps` is a list of `StepPlan` objects — one per step, in execution order —
+so you can assert on a single step instead of string-matching `summary()`:
+
+```python
+from accrue import StepPlan  # exported at the top level
+
+plan = pipeline.plan(df)
+
+for step in plan.steps:
+    print(step.name, step.kind, step.depends_on)
+
+# Catch a prompt regression before paying for a full run
+enrich = next(s for s in plan.steps if s.name == "enrich")
+assert "investment thesis" in enrich.system_prompt
+```
+
+| Attribute | Meaning |
+|---|---|
+| `name` | Step name |
+| `kind` | `"llm"`, `"function"`, or `"other"` (a custom `Step`) |
+| `depends_on` | Names of upstream steps this one consumes |
+| `model` | Model identifier (LLM steps only) |
+| `system_prompt` | The resolved system prompt — the static, cacheable half (LLM steps only) |
+| `response_format` | The `response_format` the step will send: a JSON schema dict, or `{"type": "json_object"}` for freeform (LLM steps only) |
+
+The non-LLM attributes are `None` on function and custom steps.
+
 ## Cost estimation
 
 The estimate extrapolates the sample's *measured* tokens to the full dataset.
