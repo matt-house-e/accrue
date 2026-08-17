@@ -1,47 +1,82 @@
-"""Dynamic system prompt builder for LLMStep.
+"""Dynamic prompt builder for LLMStep.
 
 Follows the OpenAI GPT-4.1 cookbook pattern:
   - Markdown headers (``#``) for instruction sections
   - XML tags for data boundaries (``<row_data>``, ``<field_specifications>``)
-  - Static content at top (enables OpenAI prompt caching)
-  - Variable content at bottom (row data, field specs, prior results)
+  - Static content first (enables prompt caching)
+  - Variable content last (row data, prior results)
   - Sandwich pattern: key constraints reiterated after dynamic content
 
 Only describes field specification keys that are actually used across the
 step's fields — avoids confusing GPT-4.1's literal instruction-following
 with irrelevant sections.
+
+**The static/variable boundary is load-bearing, not cosmetic.**
+:func:`build_prompt` returns the prompt already split in two:
+
+  - :attr:`PromptParts.system` is derived only from step configuration, so it
+    is byte-identical for every row of a given step. Providers cache on a
+    prefix match (Anthropic explicitly via ``cache_control``, OpenAI
+    automatically), and a prefix that changes per row can never be re-read —
+    it is only ever re-written, at 1.25x base input rates.
+  - :attr:`PromptParts.user` carries everything row-specific.
+
+Keep row data out of ``system``. Anything moved across that line silently
+turns prompt caching from a discount into a surcharge.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..schemas.field_spec import FieldSpec
 
+#: Task instruction closing the user message, before the final reminder.
+TASK_INSTRUCTION = "Analyze the provided data and return the requested fields as JSON."
 
-def build_system_message(
+
+class PromptParts(NamedTuple):
+    """A prompt split at the static/variable boundary.
+
+    Attributes:
+        system: Static instructions and field specifications. Identical for
+            every row of a given step — this is the cacheable prefix.
+        user: Row data, prior results, and the closing reminder. Differs per
+            row.
+    """
+
+    system: str
+    user: str
+
+
+def build_prompt(
     field_specs: dict[str, FieldSpec],
     row: dict[str, Any],
     prior_results: dict[str, Any] | None = None,
     custom_system_prompt: str | None = None,
     system_prompt_header: str | None = None,
-) -> str:
-    """Build the full system message for an LLM enrichment call.
+) -> PromptParts:
+    """Build the system and user messages for an LLM enrichment call.
+
+    The two halves are returned together so the static/variable split cannot
+    be applied by accident or half-applied — see the module docstring.
 
     Args:
         field_specs: Mapping of field name → validated FieldSpec.
         row: The input row data.
         prior_results: Merged outputs from dependency steps (or None).
         custom_system_prompt: If provided, replaces the auto-generated
-            instruction portion (Role + Keys + Output Rules). Data sections
-            are still appended. When set, ``system_prompt_header`` is ignored.
+            instruction portion (Role + Keys + Output Rules). Field
+            specifications are still appended. When set,
+            ``system_prompt_header`` is ignored.
         system_prompt_header: Domain context injected as a ``# Context``
             section between Role and Field Specification Keys. Ignored when
             ``custom_system_prompt`` is set.
 
     Returns:
-        Complete system message string.
+        :class:`PromptParts` with the cacheable ``system`` half and the
+        row-specific ``user`` half.
     """
     field_names = list(field_specs.keys())
 
@@ -50,14 +85,27 @@ def build_system_message(
     else:
         instructions = _build_instructions(field_specs, field_names, system_prompt_header)
 
-    data = _build_data_section(field_specs, row, prior_results)
-    reminder = _build_reminder(field_names)
+    # Static half: instructions + field specs. Both derive from step config
+    # alone, so this string is identical across every row of the step.
+    system = f"{instructions}\n\n{_build_field_specs_xml(field_specs)}"
 
-    return f"{instructions}\n\n{data}\n\n{reminder}"
+    # Variable half: row data, prior results, then the task line and the
+    # reminder. The reminder stays last (sandwich pattern) — it is one line,
+    # so leaving it uncached costs nothing, while hoisting it into the cached
+    # prefix would put row data after it and weaken the constraint.
+    user_parts = [f"<row_data>\n{json.dumps(row, default=str)}\n</row_data>"]
+    if prior_results:
+        user_parts.append(
+            f"<prior_results>\n{json.dumps(prior_results, default=str)}\n</prior_results>"
+        )
+    user_parts.append(TASK_INSTRUCTION)
+    user_parts.append(_build_reminder(field_names))
+
+    return PromptParts(system=system, user="\n\n".join(user_parts))
 
 
 # ---------------------------------------------------------------------------
-# Instruction portion (static — cacheable by OpenAI)
+# Instruction portion (static — cacheable)
 # ---------------------------------------------------------------------------
 
 
@@ -165,29 +213,8 @@ def _build_output_rules(
 
 
 # ---------------------------------------------------------------------------
-# Data section (variable — row-specific)
+# Field specifications (static — derived from step config, never from the row)
 # ---------------------------------------------------------------------------
-
-
-def _build_data_section(
-    field_specs: dict[str, FieldSpec],
-    row: dict[str, Any],
-    prior_results: dict[str, Any] | None,
-) -> str:
-    """Build the XML-delimited data: row, field specs, prior results."""
-    parts: list[str] = []
-
-    # Row data
-    parts.append(f"<row_data>\n{json.dumps(row, default=str)}\n</row_data>")
-
-    # Field specifications as XML
-    parts.append(_build_field_specs_xml(field_specs))
-
-    # Prior results (only if present)
-    if prior_results:
-        parts.append(f"<prior_results>\n{json.dumps(prior_results, default=str)}\n</prior_results>")
-
-    return "\n\n".join(parts)
 
 
 def _build_field_specs_xml(field_specs: dict[str, FieldSpec]) -> str:

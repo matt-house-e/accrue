@@ -26,10 +26,11 @@ class StepPlan:
         kind: ``"llm"``, ``"function"``, or ``"other"`` (custom Step).
         depends_on: Names of upstream steps this one consumes.
         model: Model identifier (LLM steps only).
-        system_prompt: The resolved system prompt for the first sample row
-            (LLM steps only).  Prior-step fields are empty in this preview —
-            it shows the prompt *template* applied to one row, not a
-            mid-pipeline render.
+        system_prompt: The resolved system prompt (LLM steps only) — the
+            static, cacheable half of the prompt: instructions plus field
+            specifications.  Row data and prior results travel in the user
+            message and are not shown here; see ``sample_rows`` for the input
+            each step receives.
         response_format: The ``response_format`` the step will send — a JSON
             schema dict, or ``{"type": "json_object"}`` for freeform — (LLM
             steps only).

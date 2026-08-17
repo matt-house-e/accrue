@@ -16,7 +16,7 @@ from ..schemas.field_spec import FieldSpec
 from ..schemas.grounding import GroundingConfig
 from ..utils.logger import get_logger
 from .base import StepContext, StepResult
-from .prompt_builder import build_system_message
+from .prompt_builder import PromptParts, build_prompt
 from .providers.base import BatchCapableLLMClient, LLMAPIError, LLMClient, LLMResponse
 from .providers.openai import OpenAIClient
 from .schema_builder import build_json_schema, build_response_model
@@ -355,9 +355,14 @@ class LLMStep:
 
     # -- message building ------------------------------------------------
 
-    def _build_system_message(self, ctx: StepContext) -> str:
-        """Build the full system message using the dynamic prompt builder."""
-        return build_system_message(
+    def _build_prompt(self, ctx: StepContext) -> PromptParts:
+        """Build the system/user prompt halves using the dynamic prompt builder.
+
+        The ``system`` half is identical for every row of this step, which is
+        what makes provider prompt caching actually hit — see
+        :mod:`accrue.steps.prompt_builder`.
+        """
+        return build_prompt(
             field_specs=self._field_specs,
             row=ctx.row,
             prior_results=ctx.prior_results or None,
@@ -463,15 +468,14 @@ class LLMStep:
         if max_tokens is None:
             max_tokens = 4000
 
-        system_content = self._build_system_message(ctx)
+        prompt = self._build_prompt(ctx)
         tools = self._build_tools_config()
 
+        # The system message holds only step-static content so providers can
+        # cache it across rows; row data rides in the user message.
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": system_content},
-            {
-                "role": "user",
-                "content": "Analyze the provided data and return the requested fields as JSON.",
-            },
+            {"role": "system", "content": prompt.system},
+            {"role": "user", "content": prompt.user},
         ]
 
         call_kwargs: dict[str, Any] = {

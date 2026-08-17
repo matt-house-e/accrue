@@ -209,9 +209,11 @@ When `schema` is set, structured output auto-detection defaults to `json_object`
 
 ## System prompt tiers
 
-Accrue builds the system prompt automatically from field specs and row data. You can inject context or replace the prompt entirely.
+Accrue builds the prompt automatically from field specs and row data. You can inject context or replace the instruction portion entirely.
 
-**Tier 1 (default):** Auto-generated from field specs and row data. No configuration needed. The prompt includes the field names, types, formats, enums, examples, and bad examples in a structured format.
+The system message holds only what is constant for the step — instructions and field specifications — so providers can cache it across rows. Row data and prior-step results are sent in the user message. See [prompt caching](providers.md#anthropic) for why that split matters to your bill.
+
+**Tier 1 (default):** Auto-generated from field specs. No configuration needed. The prompt includes the field names, types, formats, enums, examples, and bad examples in a structured format.
 
 **Tier 2: `system_prompt_header`** -- injected as a context section within the auto-generated prompt. Use this to add domain knowledge or instructions without losing the field spec formatting:
 

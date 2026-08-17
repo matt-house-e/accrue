@@ -731,6 +731,75 @@ class TestAnthropicClient:
         assert result.usage.cache_read_tokens == 0
 
     @pytest.mark.asyncio
+    async def test_cached_system_block_is_identical_across_rows(self):
+        """Issue #107: the cache_control block must not change between rows.
+
+        Anthropic reads a cached prefix only on an exact match.  Before the
+        prompt split, the row's own JSON was inside this block, so every call
+        wrote a fresh entry (1.25x input) and none was ever read (0.1x).
+        """
+        self._install_mock_anthropic()
+        from accrue.steps.base import StepContext
+        from accrue.steps.llm import LLMStep
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        def _resp(cache_write: int, cache_read: int):
+            return SimpleNamespace(
+                content=[SimpleNamespace(text='{"f1": "v"}', type="text", citations=None)],
+                usage=SimpleNamespace(
+                    input_tokens=40,
+                    output_tokens=10,
+                    cache_creation_input_tokens=cache_write,
+                    cache_read_input_tokens=cache_read,
+                ),
+            )
+
+        mock_inner = MagicMock()
+        # Cold call writes the prefix; warm call reads it back.
+        mock_inner.messages.create = AsyncMock(side_effect=[_resp(19000, 0), _resp(0, 19000)])
+
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+
+        step = LLMStep(
+            name="analyze",
+            fields={"f1": "Estimate something"},
+            client=client,
+            model="claude-sonnet-4-5-20250929",
+            system_prompt_header="A long static domain briefing.",
+        )
+
+        usages = []
+        for row in ({"company": "Acme"}, {"company": "Globex"}):
+            ctx = StepContext(row=row, fields={}, prior_results={})
+            messages, kwargs = step.build_messages(ctx)
+            resp = await client.complete(
+                messages=messages,
+                model=kwargs["model"],
+                temperature=kwargs["temperature"],
+                max_tokens=kwargs["max_tokens"],
+            )
+            usages.append(resp.usage)
+
+        first, second = mock_inner.messages.create.call_args_list
+        cached_a = first.kwargs["system"][0]
+        cached_b = second.kwargs["system"][0]
+
+        assert cached_a["cache_control"] == {"type": "ephemeral"}
+        assert cached_a["text"] == cached_b["text"]
+        assert "Acme" not in cached_a["text"]
+        assert "Globex" not in cached_b["text"]
+        # The row data still reaches the model — via the user message.
+        assert "Acme" in first.kwargs["messages"][-1]["content"]
+        assert "Globex" in second.kwargs["messages"][-1]["content"]
+
+        # A stable prefix is what makes cache_read_tokens non-zero at all.
+        assert usages[0].cache_write_tokens == 19000
+        assert usages[0].cache_read_tokens == 0
+        assert usages[1].cache_write_tokens == 0
+        assert usages[1].cache_read_tokens == 19000
+
+    @pytest.mark.asyncio
     async def test_json_object_ignored(self):
         """json_object has no Anthropic equivalent — no output_config set."""
         self._install_mock_anthropic()

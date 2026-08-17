@@ -42,7 +42,31 @@ The provider is auto-detected from the `claude-` model prefix. No explicit `clie
 
 **Custom client (optional):** For non-default Anthropic SDK options pass `client=AnthropicClient(...)` explicitly — overrides auto-detection.
 
-**Prompt caching:** Accrue automatically adds `cache_control: {"type": "ephemeral"}` to system messages. On repeated calls with the same system prompt, Anthropic caches the prompt tokens for roughly 90% savings on system prompt input costs. No configuration required.
+**Prompt caching:** Accrue automatically adds `cache_control: {"type": "ephemeral"}` to system messages. No configuration required.
+
+Anthropic reads a cached prefix only on an exact match, so Accrue splits every LLM prompt at the static/variable boundary and sends the two halves separately:
+
+| Half | Contents | Varies per row? |
+|---|---|---|
+| `system` (cached) | Role, your `system_prompt_header` (or `system_prompt`), field spec key descriptions, output rules, and the `<field_specifications>` block | No |
+| `user` | `<row_data>`, `<prior_results>`, the task instruction, and the closing reminder | Yes |
+
+The first row of a step writes the cache entry (billed at 1.25x input); every subsequent row reads it at 0.1x. Savings therefore scale with how much of your prompt is static: a step with a large `system_prompt_header` and rich field specs saves most, a step whose prompt is almost entirely row data saves little or nothing (see the floor below). Earlier versions built the row's own JSON into the cached block, so the prefix changed on every call and the cache never hit — see [#107](https://github.com/matt-house-e/accrue/issues/107).
+
+Three consequences worth knowing:
+
+- **A prefix below the model's minimum is not cached at all.** Anthropic caches a prefix only past a per-model floor, and **the floor is not lower on newer models** — it varies by model, not by generation:
+
+  | Minimum cacheable prefix | Models |
+  |---|---|
+  | 512 tokens | Opus 5 |
+  | 1024 tokens | Opus 4.8, Sonnet 5, Sonnet 4.6, Sonnet 4.5 |
+  | 2048 tokens | Opus 4.7 |
+  | 4096 tokens | **Haiku 4.5**, Opus 4.6, Opus 4.5 |
+
+  Under the floor, `cache_control` is silently ignored — no error, just zero cache tokens. Accrue's auto-generated system half is roughly 850 characters for a one-field step and 1,800 for a three-field step with enums, formats, and examples (order of a few hundred tokens), so on every model in the table **caching does nothing until you add real static context** — a substantial `system_prompt_header` (or `system_prompt`), or unusually rich field specs. Haiku 4.5 needs the most: a step has to clear 4096 tokens of static prefix before caching does anything at all. If `result.cost` reports zero cache write/read tokens on a small step, that is the floor, not a regression.
+- Cache entries are scoped to the exact prefix, so changing `system_prompt_header`, field specs, or the model starts a fresh entry.
+- With `max_workers > 1` on a cold cache, the workers in the first wave all start before any entry exists, so each writes its own. The cache settles from the second wave onward.
 
 **Cache token accounting:** Anthropic reports cache-creation and cache-read tokens separately from `input_tokens`. Accrue carries them as `cache_write_tokens` and `cache_read_tokens` on `UsageInfo`, aggregates them into `StepUsage` and `CostSummary`, and counts them in `total_tokens`, so cost reports reflect the real bill. The three input classes are priced differently (1.0x base input, 1.25x cache write, 0.1x cache read), so the cache fields stay separate from `prompt_tokens`. Providers and models that do not report cache tokens simply yield zeros.
 

@@ -251,44 +251,41 @@ class TestProviderAutoDetect:
             step._resolve_client()
 
 
-# -- system message building --------------------------------------------
+# -- prompt building -----------------------------------------------------
 
 
 class TestLLMStepMessageBuilding:
     def test_includes_row_and_fields(self):
         step = LLMStep(name="llm", fields={"market_size": "Estimate market size"})
-        ctx = _make_ctx()
-        msg = step._build_system_message(ctx)
+        parts = step._build_prompt(_make_ctx())
 
-        assert "Acme" in msg
-        assert "market_size" in msg
+        assert "market_size" in parts.system
         # Uses XML data boundaries (not old JSON injection)
-        assert "<row_data>" in msg
-        assert "<field_specifications>" in msg
+        assert "<field_specifications>" in parts.system
+        assert "Acme" in parts.user
+        assert "<row_data>" in parts.user
 
     def test_includes_prior_results(self):
         step = LLMStep(name="llm", fields={"f1": "test"})
-        ctx = _make_ctx(prior_results={"search_ctx": "relevant info"})
-        msg = step._build_system_message(ctx)
+        parts = step._build_prompt(_make_ctx(prior_results={"search_ctx": "relevant info"}))
 
-        assert "<prior_results>" in msg
-        assert "relevant info" in msg
+        assert "<prior_results>" in parts.user
+        assert "relevant info" in parts.user
 
     def test_omits_prior_results_when_empty(self):
         step = LLMStep(name="llm", fields={"f1": "test"})
-        ctx = _make_ctx(prior_results={})
-        msg = step._build_system_message(ctx)
+        parts = step._build_prompt(_make_ctx(prior_results={}))
 
-        assert "<prior_results>" not in msg
+        assert "<prior_results>" not in parts.user
 
     def test_custom_system_prompt(self):
         step = LLMStep(name="llm", fields={"f1": "test"}, system_prompt="Custom prompt.")
-        ctx = _make_ctx()
-        msg = step._build_system_message(ctx)
+        parts = step._build_prompt(_make_ctx())
 
-        assert msg.startswith("Custom prompt.")
-        # Custom prompt still gets XML data appended
-        assert "<row_data>" in msg
+        assert parts.system.startswith("Custom prompt.")
+        # Custom prompt still gets the field spec XML appended
+        assert "<field_specifications>" in parts.system
+        assert "<row_data>" in parts.user
 
     def test_system_prompt_header_passed_to_builder(self):
         step = LLMStep(
@@ -296,11 +293,10 @@ class TestLLMStepMessageBuilding:
             fields={"f1": "test"},
             system_prompt_header="Analyzing European markets.",
         )
-        ctx = _make_ctx()
-        msg = step._build_system_message(ctx)
+        parts = step._build_prompt(_make_ctx())
 
-        assert "# Context" in msg
-        assert "Analyzing European markets." in msg
+        assert "# Context" in parts.system
+        assert "Analyzing European markets." in parts.system
 
     def test_dynamic_prompt_describes_used_keys_only(self):
         step = LLMStep(
@@ -309,21 +305,31 @@ class TestLLMStepMessageBuilding:
                 "f1": {"prompt": "test", "enum": ["A", "B"]},
             },
         )
-        ctx = _make_ctx()
-        msg = step._build_system_message(ctx)
+        parts = step._build_prompt(_make_ctx())
 
         # enum is used → described
-        assert "enum" in msg.lower()
+        assert "enum" in parts.system.lower()
         # format is NOT used → not described
-        assert "**format**" not in msg
+        assert "**format**" not in parts.system
 
     def test_sandwich_pattern_reminder(self):
         step = LLMStep(name="llm", fields={"f1": "test"})
-        ctx = _make_ctx()
-        msg = step._build_system_message(ctx)
+        parts = step._build_prompt(_make_ctx())
 
-        # Reminder section at end
-        assert msg.strip().endswith("No additional text.")
+        # Reminder section at the end of the user message
+        assert parts.user.strip().endswith("No additional text.")
+
+    def test_system_message_is_stable_across_rows(self):
+        """Issue #107 — the cached prefix must not vary per row."""
+        step = LLMStep(name="llm", fields={"market_size": "Estimate market size"})
+        a, _ = step.build_messages(_make_ctx(row={"company": "Acme"}))
+        b, _ = step.build_messages(_make_ctx(row={"company": "Globex"}))
+
+        assert a[0]["role"] == "system"
+        assert a[0]["content"] == b[0]["content"]
+        assert a[1]["content"] != b[1]["content"]
+        assert "Acme" not in a[0]["content"]
+        assert "Acme" in a[1]["content"]
 
 
 # -- successful run ------------------------------------------------------

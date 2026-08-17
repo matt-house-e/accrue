@@ -198,8 +198,8 @@ class TestInlineFieldSpecs:
             fields={},
             prior_results={},
         )
-        msg = step._build_system_message(ctx)
-        assert "Estimate TAM in billions USD" in msg
+        parts = step._build_prompt(ctx)
+        assert "Estimate TAM in billions USD" in parts.system
 
     def test_collect_field_specs_from_pipeline(self):
         pipeline = Pipeline(
