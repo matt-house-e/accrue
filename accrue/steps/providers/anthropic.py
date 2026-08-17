@@ -96,6 +96,11 @@ class AnthropicClient:
             # Prompt caching: wrap system content in a content block with
             # cache_control so Anthropic caches the system prompt prefix.
             # Rows 2-N pay 0.1x on the cached system prompt (90% savings).
+            #
+            # This only pays off because LLMStep keeps row-specific content out
+            # of the system message (see accrue.steps.prompt_builder). Anything
+            # per-row in here makes the prefix change every call, so every call
+            # writes a fresh entry at 1.25x and none ever reads one.
             kwargs["system"] = [
                 {
                     "type": "text",
@@ -229,7 +234,8 @@ class AnthropicClient:
                 "messages": chat_messages,
             }
             if system_content:
-                # Prompt caching for batch requests
+                # Prompt caching for batch requests — same static-prefix
+                # requirement as the realtime path above.
                 params["system"] = [
                     {
                         "type": "text",

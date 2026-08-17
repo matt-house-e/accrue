@@ -454,7 +454,7 @@ class Pipeline:
                         kind="llm",
                         depends_on=depends_on,
                         model=step.model,
-                        system_prompt=step._build_system_message(ctx),
+                        system_prompt=step._build_prompt(ctx).system,
                         response_format=step._build_response_format(),
                     )
                 )
