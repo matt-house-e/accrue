@@ -212,6 +212,20 @@ class TestAnthropicBatchTemperature:
         assert len(warnings) == 1
 
     @pytest.mark.asyncio
+    async def test_no_warning_when_provider_kwargs_supplies_a_temperature(self, caplog):
+        """Nothing is dropped when the escape hatch puts a temperature back."""
+        import logging
+
+        req = _make_batch_request(0, model="claude-sonnet-5")
+        req.provider_kwargs = {"temperature": 0.9}
+
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            _, params = await self._submit([req])
+
+        assert params[0]["temperature"] == 0.9
+        assert "does not accept an explicit temperature" not in caplog.text
+
+    @pytest.mark.asyncio
     async def test_submit_failure_gains_temperature_hint(self):
         from accrue.steps.providers.anthropic import AnthropicClient
         from accrue.steps.providers.base import LLMAPIError

@@ -123,10 +123,11 @@ class AnthropicClient:
             max_tokens=max_tokens,
         )
         # Omit temperature for models that reject an explicit value (issue #109).
+        # The warning is deferred until after provider_kwargs is merged below,
+        # so the documented escape hatch does not trigger a "value was dropped"
+        # warning about a value it puts straight back.
         if temperature is not None and _supports_temperature(model):
             kwargs["temperature"] = temperature
-        else:
-            self._warn_temperature_dropped(model, temperature)
 
         if system_content:
             # Prompt caching: wrap system content in a content block with
@@ -177,6 +178,10 @@ class AnthropicClient:
         # like thinking, effort, etc.)
         if provider_kwargs:
             kwargs.update(provider_kwargs)
+
+        # Warn only when no temperature reaches the API at all (issue #109).
+        if "temperature" not in kwargs:
+            self._warn_temperature_dropped(model, temperature)
 
         try:
             from anthropic import APIError, APITimeoutError, RateLimitError
@@ -268,11 +273,10 @@ class AnthropicClient:
                 "max_tokens": req.max_tokens,
                 "messages": chat_messages,
             }
-            # Same temperature rule as the realtime path (issue #109).
+            # Same temperature rule as the realtime path (issue #109), including
+            # deferring the warning until after provider_kwargs is merged below.
             if req.temperature is not None and _supports_temperature(req.model):
                 params["temperature"] = req.temperature
-            else:
-                self._warn_temperature_dropped(req.model, req.temperature)
             if system_content:
                 # Prompt caching for batch requests — same static-prefix
                 # requirement as the realtime path above.
@@ -294,6 +298,10 @@ class AnthropicClient:
             # Forward provider_kwargs (e.g. thinking, effort)
             if req.provider_kwargs:
                 params.update(req.provider_kwargs)
+
+            # Warn only when no temperature reaches the API at all (issue #109).
+            if "temperature" not in params:
+                self._warn_temperature_dropped(req.model, req.temperature)
 
             anthropic_requests.append(
                 {

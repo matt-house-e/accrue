@@ -1271,6 +1271,26 @@ class TestAnthropicTemperature:
         assert call_kwargs["temperature"] == 1.0
 
     @pytest.mark.asyncio
+    async def test_no_warning_when_provider_kwargs_supplies_a_temperature(self, caplog):
+        """Nothing is dropped when the escape hatch puts a temperature back."""
+        TestAnthropicClient._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        client = AnthropicClient(api_key="test")
+        client._client = self._mock_inner()
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="claude-sonnet-5",
+                temperature=0.2,
+                max_tokens=1000,
+                provider_kwargs={"temperature": 0.9},
+            )
+
+        assert client._client.messages.create.call_args.kwargs["temperature"] == 0.9
+        assert "does not accept an explicit temperature" not in caplog.text
+
+    @pytest.mark.asyncio
     async def test_warns_once_when_a_meaningful_value_is_dropped(self, caplog):
         TestAnthropicClient._install_mock_anthropic()
         from accrue.steps.providers.anthropic import AnthropicClient
