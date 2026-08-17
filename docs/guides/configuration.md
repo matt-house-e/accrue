@@ -137,6 +137,38 @@ config = EnrichmentConfig(
 
 When `auto_resume=True`, the pipeline detects an existing checkpoint on re-run and skips already-completed steps. Set `checkpoint_interval` to a positive integer to save partial progress within long-running steps.
 
+## Logging
+
+Accrue logs through the standard `logging` module and does not configure
+handlers on import, so by default you see whatever your application already set
+up. `setup_logging()` is a convenience for when you have not set anything up:
+
+```python
+from accrue import setup_logging
+
+setup_logging(level="DEBUG")                    # colored console output
+setup_logging(level="INFO", format_type="json")  # structured, one JSON object per line
+```
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `level` | `"INFO"` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` |
+| `format_type` | `"console"` | `"console"` for colored human-readable output, `"json"` for structured logs |
+| `include_timestamp` | `True` | Include timestamps in console format (ignored for `json`) |
+
+It configures the **root** logger and replaces any handlers already attached, so
+call it once at startup and don't call it from library code. If your application
+already configures logging, skip it entirely — accrue's loggers propagate
+normally.
+
+Most of accrue's own diagnostics are `WARNING` and above (retry exhaustion,
+rate-limit fallbacks, batch-cancel failures, dropped `temperature`, checkpoint
+mismatches), so `INFO` is a reasonable default. `DEBUG` currently adds only
+`LLMStep._apply_defaults` decisions — when a value matched a refusal pattern and
+was replaced with the field default, and when it was kept because it is a
+declared enum member. For run-level diagnosis reach for `result.report()` and
+`result.summary()` rather than the log stream.
+
 ## Validation
 
 `EnrichmentConfig` validates all fields on construction:
