@@ -72,6 +72,8 @@ Three consequences worth knowing:
 
 **Structured outputs:** Uses constrained decoding (the Anthropic equivalent of `json_schema`). Auto-detected when using dict fields.
 
+**Temperature:** The Claude 5 family (`claude-sonnet-5`, `claude-opus-5`, `claude-fable-5`, ...) and Claude Opus 4.7/4.8 removed the sampling parameters — sending an explicit `temperature` returns `400 - `temperature` is deprecated for this model.`. Accrue omits the parameter for those models automatically, on both the realtime and batch paths, and the model samples at its own default of `1.0`. If the dropped value was something other than `1.0`, a warning is logged once per pipeline run, since the run is no longer sampling at the temperature you configured. Nothing to configure — but if you need low-temperature determinism, use a model that still supports it (e.g. `claude-sonnet-4-5`). To send a temperature anyway, `provider_kwargs={"temperature": ...}` still overrides.
+
 ## Google
 
 ```python

@@ -91,6 +91,8 @@ LLMStep("creative",
 )
 ```
 
+**Some models ignore temperature.** The Claude 5 family and Claude Opus 4.7/4.8 removed the sampling parameters and reject an explicit `temperature` with a 400. The Anthropic adapter omits it for those models, so the resolved value above is silently unused and the model samples at its own default. See [Providers -> Anthropic](providers.md#anthropic).
+
 ## Concurrency tuning
 
 The `max_workers` setting controls how many rows are processed concurrently within each step (via `asyncio.Semaphore`). Set it based on your provider's rate limits.
