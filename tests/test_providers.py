@@ -1150,6 +1150,284 @@ class TestAnthropicClient:
         assert "structured output schema will not be enforced" in caplog.text
 
 
+# -- AnthropicClient temperature handling (issue #109) -----------------------
+
+
+# Models that removed the sampling parameters: any explicit temperature 400s.
+NO_TEMPERATURE_MODELS = [
+    "claude-sonnet-5",
+    "claude-opus-5",
+    "claude-fable-5",
+    "claude-mythos-5",
+    "claude-sonnet-5-20260101",  # hypothetical dated snapshot
+    "claude-opus-5-1",  # hypothetical point release
+    "anthropic.claude-sonnet-5",  # Bedrock-style vendor prefix
+    "us.anthropic.claude-sonnet-5-v1:0",
+    "Claude-Sonnet-5",  # case-insensitive
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+]
+
+# Models that still accept an explicit temperature.  Several of these contain a
+# "5" and are the regression cases the family-prefix match must not swallow.
+TEMPERATURE_MODELS = [
+    "claude-3-5-sonnet-20241022",
+    "claude-3-5-haiku-20241022",
+    "claude-sonnet-4-5",
+    "claude-sonnet-4-5-20250929",
+    "claude-haiku-4-5",
+    "claude-opus-4-5-20251101",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-3-opus-20240229",
+    "claude-opus-4-1-20250805",
+    "claude-sonnet-4-20250514",
+]
+
+
+class TestSupportsTemperature:
+    """The model-family predicate behind the temperature omission."""
+
+    @pytest.mark.parametrize("model", NO_TEMPERATURE_MODELS)
+    def test_rejects_models_without_temperature_support(self, model):
+        from accrue.steps.providers.anthropic import _supports_temperature
+
+        assert _supports_temperature(model) is False
+
+    @pytest.mark.parametrize("model", TEMPERATURE_MODELS)
+    def test_allows_models_with_temperature_support(self, model):
+        from accrue.steps.providers.anthropic import _supports_temperature
+
+        assert _supports_temperature(model) is True
+
+
+class TestAnthropicTemperature:
+    """Issue #109: Claude 5 (and Opus 4.7/4.8) 400 on an explicit temperature."""
+
+    @staticmethod
+    def _mock_inner():
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+        )
+        mock_inner = MagicMock()
+        mock_inner.messages.create = AsyncMock(return_value=mock_response)
+        return mock_inner
+
+    async def _complete(self, model, temperature, mock_inner=None):
+        TestAnthropicClient._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner or self._mock_inner()
+        await client.complete(
+            messages=[{"role": "user", "content": "hi"}],
+            model=model,
+            temperature=temperature,
+            max_tokens=1000,
+        )
+        return client, client._client.messages.create.call_args.kwargs
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("model", ["claude-sonnet-5", "claude-opus-5", "claude-fable-5"])
+    async def test_claude_5_receives_no_temperature(self, model):
+        """The reported failure: no temperature reaches the API for Claude 5."""
+        _, call_kwargs = await self._complete(model, 0.2)
+
+        assert "temperature" not in call_kwargs
+        assert call_kwargs["model"] == model
+        assert call_kwargs["max_tokens"] == 1000
+
+    @pytest.mark.asyncio
+    async def test_claude_4_still_receives_temperature(self):
+        _, call_kwargs = await self._complete("claude-sonnet-4-5-20250929", 0.2)
+
+        assert call_kwargs["temperature"] == 0.2
+
+    @pytest.mark.asyncio
+    async def test_none_temperature_is_never_sent(self):
+        """``None`` means "do not send" even on a model that supports it."""
+        _, call_kwargs = await self._complete("claude-sonnet-4-5-20250929", None)
+
+        assert "temperature" not in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_provider_kwargs_can_still_force_temperature(self):
+        """The documented escape hatch wins over the automatic omission."""
+        TestAnthropicClient._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        client = AnthropicClient(api_key="test")
+        client._client = self._mock_inner()
+        await client.complete(
+            messages=[{"role": "user", "content": "hi"}],
+            model="claude-sonnet-5",
+            temperature=0.2,
+            max_tokens=1000,
+            provider_kwargs={"temperature": 1.0},
+        )
+
+        call_kwargs = client._client.messages.create.call_args.kwargs
+        assert call_kwargs["temperature"] == 1.0
+
+    @pytest.mark.asyncio
+    async def test_no_warning_when_provider_kwargs_supplies_a_temperature(self, caplog):
+        """Nothing is dropped when the escape hatch puts a temperature back."""
+        TestAnthropicClient._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        client = AnthropicClient(api_key="test")
+        client._client = self._mock_inner()
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="claude-sonnet-5",
+                temperature=0.2,
+                max_tokens=1000,
+                provider_kwargs={"temperature": 0.9},
+            )
+
+        assert client._client.messages.create.call_args.kwargs["temperature"] == 0.9
+        assert "does not accept an explicit temperature" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_warns_once_when_a_meaningful_value_is_dropped(self, caplog):
+        TestAnthropicClient._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        mock_inner = self._mock_inner()
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            for _ in range(3):
+                await client.complete(
+                    messages=[{"role": "user", "content": "hi"}],
+                    model="claude-sonnet-5",
+                    temperature=0.2,
+                    max_tokens=1000,
+                )
+
+        warnings = [r for r in caplog.records if "does not accept an explicit" in r.message]
+        assert len(warnings) == 1
+        assert "claude-sonnet-5" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_warn_once_is_per_client_instance(self, caplog):
+        """Mirrors the grounding-schema warning's scope: once per pipeline run."""
+        TestAnthropicClient._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        for _ in range(2):
+            caplog.clear()
+            client = AnthropicClient(api_key="test")
+            client._client = self._mock_inner()
+            with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+                await client.complete(
+                    messages=[{"role": "user", "content": "hi"}],
+                    model="claude-sonnet-5",
+                    temperature=0.2,
+                    max_tokens=1000,
+                )
+            assert "does not accept an explicit temperature" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_no_warning_when_dropping_the_models_own_default(self, caplog):
+        """Dropping 1.0 changes nothing — the API accepts it because it is the default."""
+        TestAnthropicClient._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        client = AnthropicClient(api_key="test")
+        client._client = self._mock_inner()
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="claude-sonnet-5",
+                temperature=1.0,
+                max_tokens=1000,
+            )
+
+        assert "does not accept an explicit temperature" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_no_warning_for_a_supported_model(self, caplog):
+        TestAnthropicClient._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        client = AnthropicClient(api_key="test")
+        client._client = self._mock_inner()
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="claude-sonnet-4-5-20250929",
+                temperature=0.2,
+                max_tokens=1000,
+            )
+
+        assert "does not accept an explicit temperature" not in caplog.text
+
+    @staticmethod
+    async def _complete_raising(model, message):
+        """Run ``complete()`` against a client whose SDK call raises *message*.
+
+        Installs a dedicated mock ``anthropic`` module so the ``APIError`` class
+        the adapter imports is the one raised here — ``_install_mock_anthropic``
+        uses ``setdefault``, so whichever module landed in ``sys.modules`` first
+        wins and may not carry real exception classes.
+        """
+        import sys
+
+        mock_mod = MagicMock()
+        mock_mod.APIError = type("APIError", (Exception,), {})
+        mock_mod.APITimeoutError = type("APITimeoutError", (Exception,), {})
+        mock_mod.RateLimitError = type("RateLimitError", (Exception,), {})
+        mock_mod.AsyncAnthropic = MagicMock()
+
+        with patch.dict(sys.modules, {"anthropic": mock_mod}):
+            from accrue.steps.providers.anthropic import AnthropicClient
+
+            mock_inner = MagicMock()
+            mock_inner.messages.create = AsyncMock(side_effect=mock_mod.APIError(message))
+            client = AnthropicClient(api_key="test")
+            client._client = mock_inner
+
+            await client.complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model=model,
+                temperature=0.2,
+                max_tokens=1000,
+            )
+
+    @pytest.mark.asyncio
+    async def test_temperature_400_gets_an_actionable_hint(self):
+        """Models newer than the predicate knows about fail with accrue's guidance."""
+        with pytest.raises(LLMAPIError) as exc_info:
+            await self._complete_raising(
+                "claude-sonnet-9", "`temperature` is deprecated for this model."
+            )
+
+        assert "rejects an explicit temperature" in str(exc_info.value)
+        assert "claude-sonnet-9" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_unrelated_400_gets_no_temperature_hint(self):
+        with pytest.raises(LLMAPIError) as exc_info:
+            await self._complete_raising("claude-sonnet-4-5", "credit balance too low")
+
+        assert "rejects an explicit temperature" not in str(exc_info.value)
+        assert "credit balance too low" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_no_hint_when_no_temperature_was_sent(self):
+        """A temperature error we did not cause must not be blamed on our knob."""
+        with pytest.raises(LLMAPIError) as exc_info:
+            await self._complete_raising(
+                "claude-sonnet-5", "`temperature` is deprecated for this model."
+            )
+
+        assert "rejects an explicit temperature" not in str(exc_info.value)
+
+
 # -- GoogleClient -----------------------------------------------------------
 
 
