@@ -44,6 +44,8 @@ The provider is auto-detected from the `claude-` model prefix. No explicit `clie
 
 **Prompt caching:** Accrue automatically adds `cache_control: {"type": "ephemeral"}` to system messages. On repeated calls with the same system prompt, Anthropic caches the prompt tokens for roughly 90% savings on system prompt input costs. No configuration required.
 
+**Cache token accounting:** Anthropic reports cache-creation and cache-read tokens separately from `input_tokens`. Accrue carries them as `cache_write_tokens` and `cache_read_tokens` on `UsageInfo`, aggregates them into `StepUsage` and `CostSummary`, and counts them in `total_tokens`, so cost reports reflect the real bill. The three input classes are priced differently (1.0x base input, 1.25x cache write, 0.1x cache read), so the cache fields stay separate from `prompt_tokens`. Providers and models that do not report cache tokens simply yield zeros.
+
 **Structured outputs:** Uses constrained decoding (the Anthropic equivalent of `json_schema`). Auto-detected when using dict fields.
 
 ## Google

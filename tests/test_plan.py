@@ -52,19 +52,32 @@ def _fresh_config(tmp_path) -> EnrichmentConfig:
 
 class TestExtrapolateCost:
     def test_scales_by_executed_rows(self):
-        sample = CostSummary(total_prompt_tokens=300, total_completion_tokens=150, total_tokens=450)
+        sample = CostSummary(
+            total_prompt_tokens=300,
+            total_completion_tokens=150,
+            total_tokens=450,
+            total_cache_write_tokens=1000,
+            total_cache_read_tokens=200,
+        )
         sample.steps["s"] = StepUsage(
             prompt_tokens=300,
             completion_tokens=150,
             total_tokens=450,
             rows_processed=3,
             cache_misses=3,
+            cache_write_tokens=1000,
+            cache_read_tokens=200,
         )
         est = extrapolate_cost(sample, total_rows=30)
         # 3 executed rows → 100/50 per row → ×30
         assert est.total_prompt_tokens == 3000
         assert est.total_completion_tokens == 1500
         assert est.total_tokens == 4500
+        # Cache tokens scale with the same factor: 1000/3 → ×30
+        assert est.total_cache_write_tokens == 10000
+        assert est.total_cache_read_tokens == 2000
+        assert est.steps["s"].cache_write_tokens == 10000
+        assert est.steps["s"].cache_read_tokens == 2000
 
     def test_cached_rows_not_double_charged(self):
         # 3 rows processed but only 2 actually called the API (1 cache hit).

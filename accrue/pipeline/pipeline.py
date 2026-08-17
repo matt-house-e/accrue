@@ -194,9 +194,16 @@ class PipelineResult:
             for name, usage in self.cost.steps.items():
                 mode = f" {DIM}(batch){RESET}" if usage.execution_mode == "batch" else ""
                 cache_info = ""
-                if usage.cache_hits > 0:
+                has_cache_tokens = usage.cache_write_tokens > 0 or usage.cache_read_tokens > 0
+                if usage.cache_hits > 0 or has_cache_tokens:
                     pct = usage.cache_hit_rate * 100
-                    cache_info = f"  {DIM}cache: {pct:.0f}%{RESET}"
+                    cache_info = f"  {DIM}cache: {pct:.0f}%"
+                    if has_cache_tokens:
+                        cache_info += (
+                            f"  {usage.cache_write_tokens:,} write / "
+                            f"{usage.cache_read_tokens:,} read"
+                        )
+                    cache_info += RESET
                 skip_info = ""
                 if usage.rows_skipped > 0:
                     skip_info = f"  {DIM}skipped: {usage.rows_skipped}{RESET}"
@@ -219,7 +226,9 @@ class PipelineResult:
         lines.append(
             f"  {DIM}tokens:{RESET} {token_str} total  "
             f"{DIM}({self.cost.total_prompt_tokens:,} in / "
-            f"{self.cost.total_completion_tokens:,} out){RESET}"
+            f"{self.cost.total_completion_tokens:,} out / "
+            f"{self.cost.total_cache_write_tokens:,} cache write / "
+            f"{self.cost.total_cache_read_tokens:,} cache read){RESET}"
         )
 
         # Errors
@@ -932,6 +941,8 @@ class Pipeline:
         cost = CostSummary(
             total_prompt_tokens=sum(s.prompt_tokens for s in step_usage_map.values()),
             total_completion_tokens=sum(s.completion_tokens for s in step_usage_map.values()),
+            total_cache_write_tokens=sum(s.cache_write_tokens for s in step_usage_map.values()),
+            total_cache_read_tokens=sum(s.cache_read_tokens for s in step_usage_map.values()),
             total_tokens=sum(s.total_tokens for s in step_usage_map.values()),
             steps=step_usage_map,
         )
@@ -1251,6 +1262,8 @@ class Pipeline:
             step_usage = StepUsage(
                 prompt_tokens=sum(u.prompt_tokens for u in usage_list),
                 completion_tokens=sum(u.completion_tokens for u in usage_list),
+                cache_write_tokens=sum(u.cache_write_tokens for u in usage_list),
+                cache_read_tokens=sum(u.cache_read_tokens for u in usage_list),
                 total_tokens=sum(u.total_tokens for u in usage_list),
                 rows_processed=rows_processed,
                 rows_skipped=rows_skipped,
@@ -1631,6 +1644,8 @@ class Pipeline:
             step_usage = StepUsage(
                 prompt_tokens=sum(u.prompt_tokens for u in usage_list),
                 completion_tokens=sum(u.completion_tokens for u in usage_list),
+                cache_write_tokens=sum(u.cache_write_tokens for u in usage_list),
+                cache_read_tokens=sum(u.cache_read_tokens for u in usage_list),
                 total_tokens=sum(u.total_tokens for u in usage_list),
                 rows_processed=rows_processed,
                 rows_skipped=rows_skipped,

@@ -639,7 +639,12 @@ class TestAnthropicClient:
 
         mock_response = SimpleNamespace(
             content=[SimpleNamespace(text='{"f1": "val"}', type="text", citations=None)],
-            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+            usage=SimpleNamespace(
+                input_tokens=10,
+                output_tokens=5,
+                cache_creation_input_tokens=7,
+                cache_read_input_tokens=3,
+            ),
         )
         mock_inner = MagicMock()
         mock_inner.messages.create = AsyncMock(return_value=mock_response)
@@ -660,6 +665,70 @@ class TestAnthropicClient:
         assert call_kwargs["output_config"]["format"]["type"] == "json_schema"
         assert call_kwargs["output_config"]["format"]["schema"] == schema
         assert result.content == '{"f1": "val"}'
+        assert result.usage.total_tokens == 25
+        assert result.usage.cache_write_tokens == 7
+        assert result.usage.cache_read_tokens == 3
+
+    @pytest.mark.asyncio
+    async def test_cache_tokens_included_in_total_tokens(self):
+        """Issue #108: cache tokens are carried into UsageInfo and summed in total_tokens."""
+        self._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(text="ok", type="text", citations=None)],
+            usage=SimpleNamespace(
+                input_tokens=120,
+                output_tokens=1420,
+                cache_creation_input_tokens=95537,
+                cache_read_input_tokens=0,
+            ),
+        )
+        mock_inner = MagicMock()
+        mock_inner.messages.create = AsyncMock(return_value=mock_response)
+
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+
+        result = await client.complete(
+            messages=[{"role": "user", "content": "hi"}],
+            model="claude-sonnet-5",
+            temperature=0.2,
+            max_tokens=1000,
+        )
+
+        assert result.usage.prompt_tokens == 120
+        assert result.usage.completion_tokens == 1420
+        assert result.usage.cache_write_tokens == 95537
+        assert result.usage.cache_read_tokens == 0
+        assert result.usage.total_tokens == 97077
+
+    @pytest.mark.asyncio
+    async def test_missing_cache_fields_default_to_zero(self):
+        """Usage without cache fields still produces total_tokens = input + output."""
+        self._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        mock_response = SimpleNamespace(
+            content=[SimpleNamespace(text="ok", type="text", citations=None)],
+            usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+        )
+        mock_inner = MagicMock()
+        mock_inner.messages.create = AsyncMock(return_value=mock_response)
+
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+
+        result = await client.complete(
+            messages=[{"role": "user", "content": "hi"}],
+            model="claude-sonnet-4-5-20250929",
+            temperature=0.2,
+            max_tokens=1000,
+        )
+
+        assert result.usage.total_tokens == 15
+        assert result.usage.cache_write_tokens == 0
+        assert result.usage.cache_read_tokens == 0
 
     @pytest.mark.asyncio
     async def test_json_object_ignored(self):
