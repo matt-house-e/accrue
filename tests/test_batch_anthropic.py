@@ -241,6 +241,48 @@ class TestAnthropicBatchTemperature:
             await client.submit_batch([_make_batch_request(0, model="claude-sonnet-9")])
 
         assert "rejects an explicit temperature" in str(exc_info.value)
+        assert "claude-sonnet-9" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_hint_names_a_model_we_actually_sent_a_temperature_for(self):
+        """A mixed batch must not blame the first request when it was not the culprit."""
+        from accrue.steps.providers.anthropic import AnthropicClient
+        from accrue.steps.providers.base import LLMAPIError
+
+        mock_inner = MagicMock()
+        mock_inner.messages.batches.create = AsyncMock(
+            side_effect=RuntimeError("`temperature` is deprecated for this model.")
+        )
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+
+        with pytest.raises(LLMAPIError) as exc_info:
+            await client.submit_batch(
+                [
+                    _make_batch_request(0, model="claude-sonnet-5"),  # temperature omitted
+                    _make_batch_request(1, model="claude-sonnet-9"),  # temperature sent
+                ]
+            )
+
+        assert "claude-sonnet-9" in str(exc_info.value)
+        assert "the model 'claude-sonnet-5' rejects" not in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_no_hint_when_no_temperature_was_sent(self):
+        from accrue.steps.providers.anthropic import AnthropicClient
+        from accrue.steps.providers.base import LLMAPIError
+
+        mock_inner = MagicMock()
+        mock_inner.messages.batches.create = AsyncMock(
+            side_effect=RuntimeError("`temperature` is deprecated for this model.")
+        )
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+
+        with pytest.raises(LLMAPIError) as exc_info:
+            await client.submit_batch([_make_batch_request(0, model="claude-sonnet-5")])
+
+        assert "rejects an explicit temperature" not in str(exc_info.value)
 
 
 # -- poll_batch --------------------------------------------------------------

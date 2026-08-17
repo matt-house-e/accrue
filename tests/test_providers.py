@@ -1417,6 +1417,16 @@ class TestAnthropicTemperature:
         assert "rejects an explicit temperature" not in str(exc_info.value)
         assert "credit balance too low" in str(exc_info.value)
 
+    @pytest.mark.asyncio
+    async def test_no_hint_when_no_temperature_was_sent(self):
+        """A temperature error we did not cause must not be blamed on our knob."""
+        with pytest.raises(LLMAPIError) as exc_info:
+            await self._complete_raising(
+                "claude-sonnet-5", "`temperature` is deprecated for this model."
+            )
+
+        assert "rejects an explicit temperature" not in str(exc_info.value)
+
 
 # -- GoogleClient -----------------------------------------------------------
 

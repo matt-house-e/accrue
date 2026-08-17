@@ -200,10 +200,12 @@ class AnthropicClient:
             ) from exc
         except APIError as exc:
             exc_status = getattr(exc, "status_code", None)
+            # Only claim a temperature problem when we actually sent one.
+            hint = _temperature_hint(model, exc) if "temperature" in kwargs else ""
             # Promote generic 429 to is_rate_limit (covers cases where RateLimitError
             # is not raised but status_code is 429)
             raise LLMAPIError(
-                f"Anthropic API error for model '{model}': {exc}{_temperature_hint(model, exc)}",
+                f"Anthropic API error for model '{model}': {exc}{hint}",
                 status_code=exc_status,
                 is_rate_limit=(exc_status == 429),
             ) from exc
@@ -315,9 +317,16 @@ class AnthropicClient:
             logger.info("Anthropic batch submitted: %s (%d requests)", batch.id, len(requests))
             return batch.id
         except Exception as exc:
+            # Name a model we actually sent a temperature for.  accrue's own
+            # batches are single-model, but submit_batch() is public and a
+            # caller can mix them, so do not assume requests[0] is the culprit.
+            culprit = next(
+                (r["params"]["model"] for r in anthropic_requests if "temperature" in r["params"]),
+                None,
+            )
+            hint = _temperature_hint(culprit, exc) if culprit else ""
             raise LLMAPIError(
-                f"Anthropic batch submission failed: {exc}"
-                f"{_temperature_hint(requests[0].model, exc) if requests else ''}",
+                f"Anthropic batch submission failed: {exc}{hint}",
                 status_code=getattr(exc, "status_code", None),
             ) from exc
 
