@@ -16,8 +16,9 @@ print(plan.summary())
 `plan()` runs the pipeline over the first `sample_size` rows — real calls, but
 capped — and reports:
 
-- **Resolved prompts** — the system prompt each LLM step will send, rendered for
-  the first sample row.
+- **Resolved prompts** — the system prompt each LLM step will send. This is the
+  static half of the prompt (instructions plus field specifications); row data
+  travels in the user message and is shown separately under `sample_rows`.
 - **JSON schemas** — the structured-output schema each step generates from its
   field specs.
 - **Sample outputs** — the actual enriched rows from the capped run.

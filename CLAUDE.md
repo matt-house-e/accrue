@@ -19,6 +19,7 @@ pip install -e ".[google]"      # With Google provider
 - **Async-only steps.** Sync API is `Pipeline.run()` wrapping `asyncio.run()`. No sync/async duplication.
 - **Step data**: `dict[str, Any]` not `pd.Series`. Steps are pure, no pandas inside.
 - **Internal fields**: `__` prefix (e.g. `__web_context`) for inter-step data, filtered from output.
+- **Prompt split**: `build_prompt()` returns `PromptParts(system, user)`. Keep the `system` half row-independent — providers cache on an exact prefix match, so any per-row content in it turns caching into a 1.25x surcharge (#107).
 - **Minimal deps**: Base: `openai`, `pydantic`, `pandas`, `tqdm`, `python-dotenv`. Never add litellm/langfuse.
 - See `docs/guides/` for architecture, providers, caching, grounding details.
 

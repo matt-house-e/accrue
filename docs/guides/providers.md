@@ -42,7 +42,21 @@ The provider is auto-detected from the `claude-` model prefix. No explicit `clie
 
 **Custom client (optional):** For non-default Anthropic SDK options pass `client=AnthropicClient(...)` explicitly — overrides auto-detection.
 
-**Prompt caching:** Accrue automatically adds `cache_control: {"type": "ephemeral"}` to system messages. On repeated calls with the same system prompt, Anthropic caches the prompt tokens for roughly 90% savings on system prompt input costs. No configuration required.
+**Prompt caching:** Accrue automatically adds `cache_control: {"type": "ephemeral"}` to system messages. No configuration required.
+
+Anthropic reads a cached prefix only on an exact match, so Accrue splits every LLM prompt at the static/variable boundary and sends the two halves separately:
+
+| Half | Contents | Varies per row? |
+|---|---|---|
+| `system` (cached) | Role, your `system_prompt_header` (or `system_prompt`), field spec key descriptions, output rules, and the `<field_specifications>` block | No |
+| `user` | `<row_data>`, `<prior_results>`, the task instruction, and the closing reminder | Yes |
+
+The first row of a step writes the cache entry (billed at 1.25x input); every subsequent row reads it at 0.1x. Savings therefore scale with how much of your prompt is static: a step with a large `system_prompt_header` and rich field specs saves most, a step whose prompt is almost entirely row data saves little. Earlier versions built the row's own JSON into the cached block, so the prefix changed on every call and the cache never hit — see [#107](https://github.com/matt-house-e/accrue/issues/107).
+
+Two consequences worth knowing:
+
+- Cache entries are scoped to the exact prefix, so changing `system_prompt_header`, field specs, or the model starts a fresh entry.
+- With `max_workers > 1` on a cold cache, the workers in the first wave all start before any entry exists, so each writes its own. The cache settles from the second wave onward.
 
 **Cache token accounting:** Anthropic reports cache-creation and cache-read tokens separately from `input_tokens`. Accrue carries them as `cache_write_tokens` and `cache_read_tokens` on `UsageInfo`, aggregates them into `StepUsage` and `CostSummary`, and counts them in `total_tokens`, so cost reports reflect the real bill. The three input classes are priced differently (1.0x base input, 1.25x cache write, 0.1x cache read), so the cache fields stay separate from `prompt_tokens`. Providers and models that do not report cache tokens simply yield zeros.
 
