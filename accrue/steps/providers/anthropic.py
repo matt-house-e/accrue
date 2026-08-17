@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -42,6 +43,36 @@ class AnthropicClient:
         # fresh AnthropicClient on each Pipeline.run_async() call, so users see
         # this warning once per pipeline run rather than once per process lifetime.
         self._warned_grounding_schema: bool = False
+        self._warned_temperature_dropped: bool = False
+
+    def _warn_temperature_dropped(self, model: str, temperature: float | None) -> None:
+        """Warn once when a requested temperature is dropped for *model*.
+
+        The adapter cannot tell a user-set value from ``EnrichmentConfig``'s
+        default — both arrive as a plain float — so the trigger is whether the
+        drop actually changes anything.  These models sample at
+        :data:`_IMPLICIT_TEMPERATURE` when the parameter is omitted, so dropping
+        that exact value is a no-op and stays silent.
+
+        Args:
+            model: Model the request is being made against.
+            temperature: The resolved temperature, or ``None`` if none was set.
+        """
+        if temperature is None or temperature == _IMPLICIT_TEMPERATURE:
+            return
+        if self._warned_temperature_dropped:
+            return
+        logger.warning(
+            "Model '%s' does not accept an explicit temperature; the requested "
+            "value %s was dropped and the model's default of %s applies. Set "
+            "temperature=%s to silence this warning, or use a model that supports "
+            "temperature (e.g. claude-sonnet-4-5) if you need deterministic sampling.",
+            model,
+            temperature,
+            _IMPLICIT_TEMPERATURE,
+            _IMPLICIT_TEMPERATURE,
+        )
+        self._warned_temperature_dropped = True
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -69,7 +100,7 @@ class AnthropicClient:
         self,
         messages: list[dict[str, Any]],
         model: str,
-        temperature: float,
+        temperature: float | None,
         max_tokens: int,
         response_format: dict[str, Any] | None = None,
         tools: list[dict[str, Any]] | None = None,
@@ -89,9 +120,14 @@ class AnthropicClient:
         kwargs: dict[str, Any] = dict(
             model=model,
             messages=chat_messages,
-            temperature=temperature,
             max_tokens=max_tokens,
         )
+        # Omit temperature for models that reject an explicit value (issue #109).
+        if temperature is not None and _supports_temperature(model):
+            kwargs["temperature"] = temperature
+        else:
+            self._warn_temperature_dropped(model, temperature)
+
         if system_content:
             # Prompt caching: wrap system content in a content block with
             # cache_control so Anthropic caches the system prompt prefix.
@@ -162,7 +198,7 @@ class AnthropicClient:
             # Promote generic 429 to is_rate_limit (covers cases where RateLimitError
             # is not raised but status_code is 429)
             raise LLMAPIError(
-                f"Anthropic API error for model '{model}': {exc}",
+                f"Anthropic API error for model '{model}': {exc}{_temperature_hint(model, exc)}",
                 status_code=exc_status,
                 is_rate_limit=(exc_status == 429),
             ) from exc
@@ -230,9 +266,13 @@ class AnthropicClient:
             params: dict[str, Any] = {
                 "model": req.model,
                 "max_tokens": req.max_tokens,
-                "temperature": req.temperature,
                 "messages": chat_messages,
             }
+            # Same temperature rule as the realtime path (issue #109).
+            if req.temperature is not None and _supports_temperature(req.model):
+                params["temperature"] = req.temperature
+            else:
+                self._warn_temperature_dropped(req.model, req.temperature)
             if system_content:
                 # Prompt caching for batch requests — same static-prefix
                 # requirement as the realtime path above.
@@ -268,7 +308,8 @@ class AnthropicClient:
             return batch.id
         except Exception as exc:
             raise LLMAPIError(
-                f"Anthropic batch submission failed: {exc}",
+                f"Anthropic batch submission failed: {exc}"
+                f"{_temperature_hint(requests[0].model, exc) if requests else ''}",
                 status_code=getattr(exc, "status_code", None),
             ) from exc
 
@@ -394,6 +435,64 @@ class AnthropicClient:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+# Anthropic models that reject an explicit ``temperature`` (issue #109).
+#
+# The Claude 5 family and Claude Opus 4.7/4.8 removed the sampling parameters.
+# Any explicit value other than the model's own default returns
+# ``400 - `temperature` is deprecated for this model.``  Omitting the parameter
+# is always accepted, so the fix is to not send it at all.
+#
+# Matched on model-family prefix rather than an exhaustive list of dated model
+# ids, so unreleased Claude 5 variants and vendor-prefixed ids
+# (``anthropic.claude-sonnet-5``, ``us.anthropic.claude-sonnet-5-v1:0``) are
+# covered without a code change.  The first branch requires an alphabetic tier
+# segment between ``claude-`` and the major version, so Claude 3/4 ids that
+# merely contain a 5 do not match: ``claude-3-5-sonnet-20241022`` (digit after
+# ``claude-``), ``claude-sonnet-4-5`` and ``claude-haiku-4-5`` (major version 4).
+_NO_EXPLICIT_TEMPERATURE = re.compile(r"claude-(?:[a-z]+-5|opus-4-[78])(?!\d)")
+
+# The value these models use when ``temperature`` is omitted.  Dropping a
+# request for this exact value changes nothing, so it is not worth warning about.
+_IMPLICIT_TEMPERATURE = 1.0
+
+
+def _supports_temperature(model: str) -> bool:
+    """Whether *model* accepts an explicit ``temperature`` parameter.
+
+    Args:
+        model: Anthropic model identifier, optionally vendor-prefixed.
+
+    Returns:
+        ``False`` for models that reject an explicit value (Claude 5 family,
+        Claude Opus 4.7/4.8), ``True`` otherwise.
+    """
+    return _NO_EXPLICIT_TEMPERATURE.search(model.lower()) is None
+
+
+def _temperature_hint(model: str, exc: Exception) -> str:
+    """Actionable suffix for API errors caused by an unsupported ``temperature``.
+
+    Covers models newer than :func:`_supports_temperature` knows about: the raw
+    SDK message names a model capability, which reads like an API problem rather
+    than an accrue one.
+
+    Args:
+        model: Model the request was made against.
+        exc: The provider exception.
+
+    Returns:
+        A hint string, or ``""`` when the error is unrelated to temperature.
+    """
+    if "temperature" not in str(exc).lower():
+        return ""
+    return (
+        f" — the model '{model}' rejects an explicit temperature. accrue omits it "
+        "automatically for the model families known to have removed it (Claude 5, "
+        f"Claude Opus 4.7/4.8); please report '{model}' at "
+        "https://github.com/matt-house-e/accrue/issues so the check can cover it."
+    )
 
 
 def _translate_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

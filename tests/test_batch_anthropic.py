@@ -34,15 +34,19 @@ def patch_anthropic():
 # -- helpers -----------------------------------------------------------------
 
 
-def _make_batch_request(idx: int = 0) -> BatchRequest:
+def _make_batch_request(
+    idx: int = 0,
+    model: str = "claude-sonnet-4-20250514",
+    temperature: float | None = 0.2,
+) -> BatchRequest:
     return BatchRequest(
         custom_id=f"row-{idx}",
         messages=[
             {"role": "system", "content": "You are an assistant."},
             {"role": "user", "content": "Analyze the data."},
         ],
-        model="claude-sonnet-4-20250514",
-        temperature=0.2,
+        model=model,
+        temperature=temperature,
         max_tokens=4000,
         response_format={"type": "json_schema", "json_schema": {"schema": {"type": "object"}}},
     )
@@ -138,6 +142,91 @@ class TestAnthropicSubmitBatch:
         params = call_kwargs["requests"][0]["params"]
         assert "output_config" in params
         assert params["output_config"]["format"]["type"] == "json_schema"
+
+
+# -- submit_batch temperature handling (issue #109) ---------------------------
+
+
+class TestAnthropicBatchTemperature:
+    """The batch path must apply the same temperature rule as the realtime path."""
+
+    @staticmethod
+    def _mock_inner():
+        mock_inner = MagicMock()
+        mock_inner.messages.batches.create = AsyncMock(
+            return_value=SimpleNamespace(id="msgbatch_abc")
+        )
+        return mock_inner
+
+    async def _submit(self, requests):
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        client = AnthropicClient(api_key="test")
+        client._client = self._mock_inner()
+        await client.submit_batch(requests)
+        submitted = client._client.messages.batches.create.call_args.kwargs["requests"]
+        return client, [r["params"] for r in submitted]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("model", ["claude-sonnet-5", "claude-opus-5", "claude-opus-4-8"])
+    async def test_claude_5_batch_omits_temperature(self, model):
+        _, params = await self._submit([_make_batch_request(0, model=model)])
+
+        assert "temperature" not in params[0]
+        assert params[0]["model"] == model
+        assert params[0]["max_tokens"] == 4000
+
+    @pytest.mark.asyncio
+    async def test_claude_4_batch_keeps_temperature(self):
+        _, params = await self._submit([_make_batch_request(0)])
+
+        assert params[0]["temperature"] == 0.2
+
+    @pytest.mark.asyncio
+    async def test_none_temperature_is_never_sent(self):
+        _, params = await self._submit([_make_batch_request(0, temperature=None)])
+
+        assert "temperature" not in params[0]
+
+    @pytest.mark.asyncio
+    async def test_mixed_models_in_one_batch(self):
+        """The rule is per-request, not per-batch."""
+        _, params = await self._submit(
+            [
+                _make_batch_request(0, model="claude-sonnet-5"),
+                _make_batch_request(1, model="claude-sonnet-4-5"),
+            ]
+        )
+
+        assert "temperature" not in params[0]
+        assert params[1]["temperature"] == 0.2
+
+    @pytest.mark.asyncio
+    async def test_warns_once_per_batch(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="accrue.steps.providers.anthropic"):
+            await self._submit([_make_batch_request(i, model="claude-sonnet-5") for i in range(3)])
+
+        warnings = [r for r in caplog.records if "does not accept an explicit" in r.message]
+        assert len(warnings) == 1
+
+    @pytest.mark.asyncio
+    async def test_submit_failure_gains_temperature_hint(self):
+        from accrue.steps.providers.anthropic import AnthropicClient
+        from accrue.steps.providers.base import LLMAPIError
+
+        mock_inner = MagicMock()
+        mock_inner.messages.batches.create = AsyncMock(
+            side_effect=RuntimeError("`temperature` is deprecated for this model.")
+        )
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+
+        with pytest.raises(LLMAPIError) as exc_info:
+            await client.submit_batch([_make_batch_request(0, model="claude-sonnet-9")])
+
+        assert "rejects an explicit temperature" in str(exc_info.value)
 
 
 # -- poll_batch --------------------------------------------------------------
