@@ -75,6 +75,11 @@ include = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# Markdown is prose, not source. ruff >=0.16 formats Python code blocks embedded
+# in Markdown, which reflows illustrative doc snippets (e.g. compact multi-name
+# imports) into one-name-per-line source formatting. Docs are authored for
+# reading, so they are excluded from both check and format.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
