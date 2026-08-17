@@ -51,10 +51,11 @@ Anthropic reads a cached prefix only on an exact match, so Accrue splits every L
 | `system` (cached) | Role, your `system_prompt_header` (or `system_prompt`), field spec key descriptions, output rules, and the `<field_specifications>` block | No |
 | `user` | `<row_data>`, `<prior_results>`, the task instruction, and the closing reminder | Yes |
 
-The first row of a step writes the cache entry (billed at 1.25x input); every subsequent row reads it at 0.1x. Savings therefore scale with how much of your prompt is static: a step with a large `system_prompt_header` and rich field specs saves most, a step whose prompt is almost entirely row data saves little. Earlier versions built the row's own JSON into the cached block, so the prefix changed on every call and the cache never hit — see [#107](https://github.com/matt-house-e/accrue/issues/107).
+The first row of a step writes the cache entry (billed at 1.25x input); every subsequent row reads it at 0.1x. Savings therefore scale with how much of your prompt is static: a step with a large `system_prompt_header` and rich field specs saves most, a step whose prompt is almost entirely row data saves little or nothing (see the floor below). Earlier versions built the row's own JSON into the cached block, so the prefix changed on every call and the cache never hit — see [#107](https://github.com/matt-house-e/accrue/issues/107).
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
+- **A prefix below the model's minimum is not cached at all.** Anthropic only caches a prefix past a model-dependent floor — 1024 tokens on most current models, 512 on the newest Opus, up to 4096 on some smaller and older ones. Under the floor, `cache_control` is silently ignored: no error, just zero cache tokens. Accrue's auto-generated system half is only ~200-450 tokens for a typical step, so **caching does nothing until you add real static context** — a substantial `system_prompt_header` (or `system_prompt`), or unusually rich field specs. If `result.cost` reports zero cache write/read tokens on a small step, that is the floor, not a regression.
 - Cache entries are scoped to the exact prefix, so changing `system_prompt_header`, field specs, or the model starts a fresh entry.
 - With `max_workers > 1` on a cold cache, the workers in the first wave all start before any entry exists, so each writes its own. The cache settles from the second wave onward.
 
