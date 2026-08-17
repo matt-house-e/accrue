@@ -17,7 +17,7 @@ from ..schemas.grounding import GroundingConfig
 from ..utils.logger import get_logger
 from .base import StepContext, StepResult
 from .prompt_builder import PromptParts, build_prompt
-from .providers.base import BatchCapableLLMClient, LLMAPIError, LLMClient, LLMResponse
+from .providers.base import LLMAPIError, LLMClient, LLMResponse, is_batch_capable
 from .providers.openai import OpenAIClient
 from .schema_builder import build_json_schema, build_response_model
 
@@ -207,6 +207,9 @@ class LLMStep:
         self.run_if = run_if
         self.skip_if = skip_if
         self.provider_kwargs = provider_kwargs
+        # Warn-once guard: is_batch_eligible is a property and may be read more
+        # than once per run (pipeline dispatch, plan(), user code).
+        self._warned_batch_unavailable: bool = False
 
         # Normalize grounding config: True → GroundingConfig(), dict → validated
         self._grounding_config: GroundingConfig | None = _normalize_grounding(grounding)
@@ -434,13 +437,41 @@ class LLMStep:
     def is_batch_eligible(self) -> bool:
         """True when this step should use the batch execution path.
 
-        Requires ``batch=True`` and a client implementing
-        :class:`BatchCapableLLMClient`.
+        Requires ``batch=True`` and a client that is batch-capable *in its
+        current configuration* — see
+        :func:`~accrue.steps.providers.base.is_batch_capable`.  A client whose
+        class implements the batch methods is not enough: ``OpenAIClient``
+        pointed at a gateway via ``base_url`` has them but no endpoint behind
+        them.
+
+        When ``batch=True`` and the client cannot batch, the step degrades to
+        realtime execution and warns once.  Silently paying realtime prices for
+        a run the caller asked to batch is an expensive surprise.
         """
         if not self.batch:
             return False
         client = self._resolve_client()
-        return isinstance(client, BatchCapableLLMClient)
+        if is_batch_capable(client):
+            return True
+        self._warn_batch_unavailable(client)
+        return False
+
+    def _warn_batch_unavailable(self, client: LLMClient) -> None:
+        """Warn once that ``batch=True`` is being downgraded to realtime.
+
+        Args:
+            client: The resolved client that cannot run batch jobs.
+        """
+        if self._warned_batch_unavailable:
+            return
+        self._warned_batch_unavailable = True
+        logger.warning(
+            "Step '%s' requested batch=True but %s cannot run batch jobs in this "
+            "configuration; falling back to realtime execution at standard "
+            "(non-batch) pricing.",
+            self.name,
+            type(client).__name__,
+        )
 
     def build_messages(self, ctx: StepContext) -> tuple[list[dict[str, str]], dict[str, Any]]:
         """Build messages and call kwargs for a single row.

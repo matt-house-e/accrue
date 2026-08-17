@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
 
 from accrue.core.config import EnrichmentConfig
-from accrue.core.exceptions import PipelineError
+from accrue.core.exceptions import PipelineError, StepError
 from accrue.schemas.base import StepUsage, UsageInfo
 from accrue.steps.base import StepContext
 from accrue.steps.llm import LLMStep
@@ -19,7 +20,9 @@ from accrue.steps.providers.base import (
     BatchResult,
     LLMClient,
     LLMResponse,
+    is_batch_capable,
 )
+from accrue.steps.providers.openai import OpenAIClient
 
 # -- helpers -----------------------------------------------------------------
 
@@ -242,6 +245,94 @@ class TestIsBatchEligible:
         mock.complete = AsyncMock()
         step = LLMStep(name="s", fields=["f"], client=mock, batch=True)
         assert step.is_batch_eligible is False
+
+    def test_true_for_native_openai(self):
+        step = LLMStep(name="s", fields=["f"], model="gpt-4.1-mini", batch=True)
+        assert step.is_batch_eligible is True
+
+    def test_false_for_openai_compatible_gateway(self):
+        """base_url means no Batch API endpoint, even though OpenAIClient
+        structurally satisfies BatchCapableLLMClient."""
+        step = LLMStep(
+            name="s",
+            fields=["f"],
+            model="anthropic/claude-sonnet-4.5",
+            base_url="https://openrouter.ai/api/v1",
+            batch=True,
+        )
+        assert step.is_batch_eligible is False
+
+    def test_gateway_fallback_warns_once(self, caplog):
+        step = LLMStep(
+            name="gateway_step",
+            fields=["f"],
+            model="llama3",
+            base_url="http://localhost:11434/v1",
+            batch=True,
+        )
+        with caplog.at_level(logging.WARNING):
+            assert step.is_batch_eligible is False
+            assert step.is_batch_eligible is False
+
+        warnings = [r for r in caplog.records if "gateway_step" in r.getMessage()]
+        assert len(warnings) == 1
+        assert "realtime" in warnings[0].getMessage()
+
+    def test_custom_client_without_supports_batch_stays_eligible(self):
+        """Back-compat: custom adapters that never heard of supports_batch."""
+        mock = _make_batch_capable_client()
+        assert not hasattr(mock, "supports_batch")
+        step = LLMStep(name="s", fields=["f"], client=mock, batch=True)
+        assert step.is_batch_eligible is True
+
+    def test_respects_supports_batch_opt_out(self):
+        mock = _make_batch_capable_client()
+        mock.supports_batch = False
+        step = LLMStep(name="s", fields=["f"], client=mock, batch=True)
+        assert step.is_batch_eligible is False
+
+
+# -- is_batch_capable --------------------------------------------------------
+
+
+class TestIsBatchCapable:
+    def test_false_for_plain_llm_client(self):
+        mock = AsyncMock(spec=["complete"])
+        assert is_batch_capable(mock) is False
+
+    def test_true_for_native_openai_client(self):
+        assert is_batch_capable(OpenAIClient()) is True
+
+    def test_false_for_openai_client_with_base_url(self):
+        assert is_batch_capable(OpenAIClient(base_url="https://openrouter.ai/api/v1")) is False
+
+    def test_defaults_to_capable_without_the_attribute(self):
+        assert is_batch_capable(_make_batch_capable_client()) is True
+
+
+# -- OpenAIClient batch guards ----------------------------------------------
+
+
+class TestOpenAIBatchGuards:
+    """Direct calls must fail fast and explain, not 404 against a gateway."""
+
+    @pytest.mark.asyncio
+    async def test_submit_batch_rejects_base_url(self):
+        client = OpenAIClient(base_url="https://openrouter.ai/api/v1")
+        with pytest.raises(StepError, match="Batch API is not available"):
+            await client.submit_batch([])
+
+    @pytest.mark.asyncio
+    async def test_poll_batch_rejects_base_url(self):
+        client = OpenAIClient(base_url="https://openrouter.ai/api/v1")
+        with pytest.raises(StepError, match="Batch API is not available"):
+            await client.poll_batch("batch_123")
+
+    @pytest.mark.asyncio
+    async def test_error_names_the_escape_hatch(self):
+        client = OpenAIClient(base_url="https://api.groq.com/openai/v1")
+        with pytest.raises(StepError, match="batch=False"):
+            await client.submit_batch([])
 
 
 # -- LLMStep.build_messages -------------------------------------------------
