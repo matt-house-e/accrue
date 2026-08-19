@@ -5,9 +5,10 @@ Composable enrichment pipeline engine. The gap between Instructor (single LLM ca
 ## Commands
 
 ```bash
-pytest                          # Run all tests (806) — tests/integration excluded via norecursedirs
+pytest                          # Run all tests (808) — tests/integration excluded via norecursedirs
 pytest tests/integration/       # Integration tests (11), opt-in only
 pytest -x -q                    # Fast fail
+python -m tests.test_public_api --update   # Regenerate the public API snapshot
 python -m build                 # Build package
 pip install -e ".[dev]"         # Dev install
 pip install -e ".[anthropic]"   # With Anthropic provider
@@ -21,6 +22,7 @@ pip install -e ".[google]"      # With Google provider
 - **Internal fields**: `__` prefix (e.g. `__web_context`) for inter-step data, filtered from output.
 - **Prompt split**: `build_prompt()` returns `PromptParts(system, user)`. Keep the `system` half row-independent — providers cache on an exact prefix match, so any per-row content in it turns caching into a 1.25x surcharge (#107).
 - **Minimal deps**: Base: `openai`, `pydantic`, `pandas`, `tqdm`, `python-dotenv`. Never add litellm/langfuse.
+- **Public API is under contract.** `tests/public_api_snapshot.json` pins every name exported from `accrue`, `accrue.providers`, `accrue.data` and `accrue.core.exceptions`. Any change to that surface — including a purely additive one — fails `tests/test_public_api.py`. That is deliberate: it puts the change in the PR diff as readable JSON. To change the API on purpose, run `python -m tests.test_public_api --update`, commit the regenerated snapshot in the same PR, and add a `CHANGELOG.md` entry under `[Unreleased]`. Never hand-edit the snapshot (#121).
 - See `docs/guides/` for architecture, providers, caching, grounding details.
 
 ## Git Workflow
