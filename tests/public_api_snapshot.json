@@ -1,0 +1,705 @@
+{
+  "accrue": {
+    "exports": [
+      "BatchCapableLLMClient",
+      "BatchRequest",
+      "BatchResult",
+      "ComparisonResult",
+      "CostSummary",
+      "Enricher",
+      "EnrichmentConfig",
+      "EnrichmentError",
+      "EnrichmentHooks",
+      "FieldSpec",
+      "FieldValidationError",
+      "FunctionStep",
+      "GroundingConfig",
+      "JsonlRunLogger",
+      "LLMStep",
+      "Pipeline",
+      "PipelineEndEvent",
+      "PipelineError",
+      "PipelinePlan",
+      "PipelineResult",
+      "PipelineStartEvent",
+      "RowAttemptEvent",
+      "RowCompleteEvent",
+      "RowError",
+      "Step",
+      "StepContext",
+      "StepEndEvent",
+      "StepError",
+      "StepPlan",
+      "StepResult",
+      "StepStartEvent",
+      "compare",
+      "is_batch_capable",
+      "read_prompt_ref",
+      "setup_logging",
+      "web_search"
+    ],
+    "names": {
+      "BatchCapableLLMClient": {
+        "kind": "protocol",
+        "members": {
+          "cancel_batch": {
+            "kind": "method",
+            "signature": "(self, batch_id: str) -> None"
+          },
+          "complete": {
+            "kind": "method",
+            "signature": "(self, messages: list[dict[str, Any]], model: str, temperature: float, max_tokens: int, response_format: dict[str, Any] | None = None, tools: list[dict[str, Any]] | None = None, provider_kwargs: dict[str, Any] | None = None) -> LLMResponse"
+          },
+          "poll_batch": {
+            "kind": "method",
+            "signature": "(self, batch_id: str, poll_interval: float = 60.0, timeout: float = 86400.0) -> BatchResult"
+          },
+          "submit_batch": {
+            "kind": "method",
+            "signature": "(self, requests: list[BatchRequest], metadata: dict[str, str] | None = None) -> str"
+          }
+        }
+      },
+      "BatchRequest": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(custom_id: str, messages: list[dict[str, Any]], model: str, temperature: float, max_tokens: int, response_format: dict[str, Any] | None = None, tools: list[dict[str, Any]] | None = None, provider_kwargs: dict[str, Any] | None = None) -> None"
+      },
+      "BatchResult": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(responses: dict[str, LLMResponse] = <factory>, failed_ids: list[str] = <factory>, batch_id: str = '', errors: dict[str, str] = <factory>) -> None"
+      },
+      "ComparisonResult": {
+        "kind": "dataclass",
+        "members": {
+          "changed_rows": {
+            "kind": "method",
+            "signature": "(self, field: str | None = None) -> pd.DataFrame"
+          },
+          "cost_delta": {
+            "kind": "method",
+            "signature": "(self) -> CostDelta"
+          },
+          "distribution_shift": {
+            "kind": "method",
+            "signature": "(self) -> dict[str, FieldChurn]"
+          },
+          "report": {
+            "kind": "method",
+            "signature": "(self, output_format: str = 'markdown', path: str | None = None) -> str"
+          },
+          "summary": {
+            "kind": "method",
+            "signature": "(self) -> str"
+          }
+        },
+        "signature": "(result_a: PipelineResult, result_b: PipelineResult, label_a: str, label_b: str, fields: list[str], field_specs: dict[str, dict[str, Any]], aligned_a: pd.DataFrame, aligned_b: pd.DataFrame, align_mode: \"Literal['positional', 'label']\", pos_a: list[int], pos_b: list[int]) -> None"
+      },
+      "CostSummary": {
+        "fields": {
+          "steps": {
+            "annotation": "dict[str, StepUsage]",
+            "default": "{}",
+            "required": false
+          },
+          "total_cache_read_tokens": {
+            "annotation": "<class 'int'>",
+            "default": "0",
+            "required": false
+          },
+          "total_cache_write_tokens": {
+            "annotation": "<class 'int'>",
+            "default": "0",
+            "required": false
+          },
+          "total_completion_tokens": {
+            "annotation": "<class 'int'>",
+            "default": "0",
+            "required": false
+          },
+          "total_prompt_tokens": {
+            "annotation": "<class 'int'>",
+            "default": "0",
+            "required": false
+          },
+          "total_tokens": {
+            "annotation": "<class 'int'>",
+            "default": "0",
+            "required": false
+          }
+        },
+        "kind": "pydantic_model",
+        "members": {},
+        "signature": "(*, total_prompt_tokens: int = 0, total_completion_tokens: int = 0, total_tokens: int = 0, total_cache_write_tokens: int = 0, total_cache_read_tokens: int = 0, steps: dict[str, StepUsage] = {}) -> None"
+      },
+      "Enricher": {
+        "kind": "class",
+        "members": {
+          "run": {
+            "kind": "method",
+            "signature": "(self, df: pd.DataFrame, overwrite_fields: bool | None = None, data_identifier: str | None = None) -> pd.DataFrame"
+          },
+          "run_async": {
+            "kind": "method",
+            "signature": "(self, df: pd.DataFrame, overwrite_fields: bool | None = None, data_identifier: str | None = None) -> pd.DataFrame"
+          }
+        },
+        "signature": "(pipeline: Pipeline, config: EnrichmentConfig | None = None, hooks: Any = None) -> None"
+      },
+      "EnrichmentConfig": {
+        "kind": "dataclass",
+        "members": {
+          "for_batch": {
+            "kind": "classmethod",
+            "signature": "(cls) -> \"'EnrichmentConfig'\""
+          },
+          "for_development": {
+            "kind": "classmethod",
+            "signature": "(cls) -> \"'EnrichmentConfig'\""
+          },
+          "for_production": {
+            "kind": "classmethod",
+            "signature": "(cls) -> \"'EnrichmentConfig'\""
+          },
+          "for_server": {
+            "kind": "classmethod",
+            "signature": "(cls) -> \"'EnrichmentConfig'\""
+          }
+        },
+        "signature": "(max_tokens: int = 4000, temperature: float = 0.2, max_workers: int = 10, overwrite_fields: bool = False, max_retries: int = 3, retry_base_delay: float = 1.0, on_error: str = 'continue', log_level: str = 'INFO', enable_progress_bar: bool = True, enable_checkpointing: bool = False, checkpoint_dir: str = <factory>, auto_resume: bool = True, enable_caching: bool = True, cache_ttl: int = 3600, cache_dir: str = <factory>, checkpoint_interval: int = 0, batch_poll_interval: float = 60.0, batch_timeout: float = 86400.0, batch_max_requests: int = 50000) -> None"
+      },
+      "EnrichmentError": {
+        "bases": [
+          "Exception",
+          "BaseException"
+        ],
+        "kind": "exception",
+        "members": {},
+        "signature": "(message: str, row_index: int | None = None, field: str | None = None)"
+      },
+      "EnrichmentHooks": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(on_pipeline_start: Callable[[PipelineStartEvent], Any] | None = None, on_pipeline_end: Callable[[PipelineEndEvent], Any] | None = None, on_step_start: Callable[[StepStartEvent], Any] | None = None, on_step_end: Callable[[StepEndEvent], Any] | None = None, on_row_complete: Callable[[RowCompleteEvent], Any] | None = None, on_row_attempt: Callable[[RowAttemptEvent], Any] | None = None) -> None"
+      },
+      "FieldSpec": {
+        "fields": {
+          "bad_examples": {
+            "annotation": "list[str] | None",
+            "default": "None",
+            "required": false
+          },
+          "default": {
+            "annotation": "Any",
+            "default": "None",
+            "required": false
+          },
+          "enum": {
+            "annotation": "list[str] | None",
+            "default": "None",
+            "required": false
+          },
+          "examples": {
+            "annotation": "list[str] | None",
+            "default": "None",
+            "required": false
+          },
+          "format": {
+            "annotation": "str | None",
+            "default": "None",
+            "required": false
+          },
+          "prompt": {
+            "annotation": "<class 'str'>",
+            "default": null,
+            "required": true
+          },
+          "type": {
+            "annotation": "Literal['String', 'Number', 'Boolean', 'Date', 'List[String]', 'JSON']",
+            "default": "'String'",
+            "required": false
+          }
+        },
+        "kind": "pydantic_model",
+        "members": {},
+        "signature": "(*, prompt: str, type: Literal['String', 'Number', 'Boolean', 'Date', 'List[String]', 'JSON'] = 'String', format: str | None = None, enum: list[str] | None = None, examples: list[str] | None = None, bad_examples: list[str] | None = None, default: Any = None) -> None"
+      },
+      "FieldValidationError": {
+        "bases": [
+          "EnrichmentError",
+          "Exception",
+          "BaseException"
+        ],
+        "kind": "exception",
+        "members": {},
+        "signature": "(message: str, row_index: int | None = None, field: str | None = None)"
+      },
+      "FunctionStep": {
+        "kind": "class",
+        "members": {
+          "run": {
+            "kind": "method",
+            "signature": "(self, ctx: StepContext) -> StepResult"
+          }
+        },
+        "signature": "(name: str, fn: Callable[..., Any], fields: list[str], depends_on: list[str] | None = None, cache: bool = True, cache_version: str | None = None, run_if: Callable[..., Any] | None = None, skip_if: Callable[..., Any] | None = None)"
+      },
+      "GroundingConfig": {
+        "fields": {
+          "allowed_domains": {
+            "annotation": "list[str] | None",
+            "default": "None",
+            "required": false
+          },
+          "blocked_domains": {
+            "annotation": "list[str] | None",
+            "default": "None",
+            "required": false
+          },
+          "max_searches": {
+            "annotation": "int | None",
+            "default": "None",
+            "required": false
+          },
+          "provider_kwargs": {
+            "annotation": "dict[str, Any] | None",
+            "default": "None",
+            "required": false
+          },
+          "user_location": {
+            "annotation": "dict[str, str] | None",
+            "default": "None",
+            "required": false
+          }
+        },
+        "kind": "pydantic_model",
+        "members": {},
+        "signature": "(*, allowed_domains: list[str] | None = None, blocked_domains: list[str] | None = None, user_location: dict[str, str] | None = None, max_searches: int | None = None, provider_kwargs: dict[str, Any] | None = None) -> None"
+      },
+      "JsonlRunLogger": {
+        "kind": "class",
+        "members": {
+          "close": {
+            "kind": "method",
+            "signature": "(self) -> None"
+          }
+        },
+        "signature": "(path: str | Path, *, run_id: str | None = None, display_key: str | None = None, pipeline: Pipeline | None = None, data: pd.DataFrame | list[dict[str, Any]] | None = None, segment: str = 'run', t_offset: float = 0.0, retry_cells: dict[str, list[int]] | None = None, capture: str = 'metadata', config: EnrichmentConfig | None = None) -> None"
+      },
+      "LLMStep": {
+        "kind": "class",
+        "members": {
+          "build_messages": {
+            "kind": "method",
+            "signature": "(self, ctx: StepContext) -> tuple[list[dict[str, str]], dict[str, Any]]"
+          },
+          "is_batch_eligible": {
+            "kind": "property",
+            "signature": "(self) -> bool"
+          },
+          "parse_response": {
+            "kind": "method",
+            "signature": "(self, response: LLMResponse) -> StepResult"
+          },
+          "row_independent_system": {
+            "kind": "method",
+            "signature": "(self, row: dict[str, Any] | None = None, prior_results: dict[str, Any] | None = None) -> str"
+          },
+          "run": {
+            "kind": "method",
+            "signature": "(self, ctx: StepContext) -> StepResult"
+          }
+        },
+        "signature": "(name: str, fields: list[str] | dict[str, str | dict], depends_on: list[str] | None = None, model: str = 'gpt-4.1-mini', temperature: float | None = None, max_tokens: int | None = None, system_prompt: str | None = None, system_prompt_header: str | None = None, api_key: str | None = None, base_url: str | None = None, client: LLMClient | None = None, schema: Type[BaseModel] = <class 'EnrichmentResult'>, max_retries: int = 2, cache: bool = True, structured_outputs: bool | None = None, grounding: bool | dict | GroundingConfig | None = None, sources_field: str | None = 'sources', run_if: Callable[..., Any] | None = None, skip_if: Callable[..., Any] | None = None, batch: bool = False, provider_kwargs: dict[str, Any] | None = None)"
+      },
+      "Pipeline": {
+        "kind": "class",
+        "members": {
+          "clear_cache": {
+            "kind": "method",
+            "signature": "(self, step: str | None = None, cache_dir: str = '.accrue') -> int"
+          },
+          "execute": {
+            "kind": "method",
+            "signature": "(self, rows: list[dict[str, Any]], all_fields: dict[str, dict[str, Any]], config: EnrichmentConfig | None = None, prior_step_results: dict[str, list[dict[str, Any]]] | None = None, on_step_complete: Callable[[str, list[dict[str, Any]], list[RowError], set[int]], None] | None = None, cache_manager: Any = None, on_partial_checkpoint: Callable[[str, list[dict], int], None] | None = None, hooks: EnrichmentHooks | None = None, retry_cells: dict[str, list[int]] | None = None, capture: str = 'metadata') -> tuple[list[dict[str, Any]], list[RowError], CostSummary, dict[str, float]]"
+          },
+          "execution_levels": {
+            "kind": "property",
+            "signature": "(self) -> list[list[str]]"
+          },
+          "get_step": {
+            "kind": "method",
+            "signature": "(self, name: str) -> Step"
+          },
+          "plan": {
+            "kind": "method",
+            "signature": "(self, data: pd.DataFrame | list[dict[str, Any]], sample_size: int = 3, config: EnrichmentConfig | None = None) -> PipelinePlan"
+          },
+          "retry_failed": {
+            "kind": "method",
+            "signature": "(self, data: pd.DataFrame | list[dict[str, Any]], config: EnrichmentConfig | None = None, hooks: EnrichmentHooks | None = None, output_file: str | Path | None = None, *, rows: list[int] | None = None, steps: list[str] | None = None, run_log: bool | str | Path = False, display_key: str | None = None, data_identifier: str | None = None) -> PipelineResult"
+          },
+          "retry_failed_async": {
+            "kind": "method",
+            "signature": "(self, data: pd.DataFrame | list[dict[str, Any]], config: EnrichmentConfig | None = None, hooks: EnrichmentHooks | None = None, output_file: str | Path | None = None, *, rows: list[int] | None = None, steps: list[str] | None = None, run_log: bool | str | Path = False, display_key: str | None = None, data_identifier: str | None = None) -> PipelineResult"
+          },
+          "run": {
+            "kind": "method",
+            "signature": "(self, data: pd.DataFrame | list[dict[str, Any]], config: EnrichmentConfig | None = None, hooks: EnrichmentHooks | None = None, output_file: str | Path | None = None, confirm: bool = False, *, run_log: bool | str | Path = False, display_key: str | None = None, capture: str = 'metadata') -> PipelineResult"
+          },
+          "run_async": {
+            "kind": "method",
+            "signature": "(self, data: pd.DataFrame | list[dict[str, Any]], config: EnrichmentConfig | None = None, hooks: EnrichmentHooks | None = None, output_file: str | Path | None = None, *, run_log: bool | str | Path = False, display_key: str | None = None, capture: str = 'metadata') -> PipelineResult"
+          },
+          "runner": {
+            "kind": "method",
+            "signature": "(self, config: EnrichmentConfig | None = None) -> Any"
+          },
+          "step_names": {
+            "kind": "property",
+            "signature": "(self) -> list[str]"
+          }
+        },
+        "signature": "(steps: list[Step])"
+      },
+      "PipelineEndEvent": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(num_rows: int, total_errors: int, cost: Any, elapsed_seconds: float) -> None"
+      },
+      "PipelineError": {
+        "bases": [
+          "EnrichmentError",
+          "Exception",
+          "BaseException"
+        ],
+        "kind": "exception",
+        "members": {},
+        "signature": "(message: str, row_index: int | None = None, field: str | None = None)"
+      },
+      "PipelinePlan": {
+        "kind": "dataclass",
+        "members": {
+          "summary": {
+            "kind": "method",
+            "signature": "(self) -> str"
+          }
+        },
+        "signature": "(steps: list[StepPlan], sample_rows: list[dict[str, Any]], sample_outputs: list[dict[str, Any]], sample_errors: list[RowError], total_rows: int, sample_size: int, sample_cost: CostSummary, estimated_cost: CostSummary) -> None"
+      },
+      "PipelineResult": {
+        "kind": "dataclass",
+        "members": {
+          "has_errors": {
+            "kind": "property",
+            "signature": "(self) -> bool"
+          },
+          "report": {
+            "kind": "method",
+            "signature": "(self, output_format: str = 'markdown', path: str | None = None, disable: list[str] | None = None) -> str"
+          },
+          "save": {
+            "kind": "method",
+            "signature": "(self, path: str | Path) -> Path"
+          },
+          "success_rate": {
+            "kind": "property",
+            "signature": "(self) -> float"
+          },
+          "summary": {
+            "kind": "method",
+            "signature": "(self) -> str"
+          }
+        },
+        "signature": "(data: pd.DataFrame | list[dict[str, Any]], cost: CostSummary = <factory>, errors: list[RowError] = <factory>, pipeline_elapsed_seconds: float = 0.0, step_elapsed_seconds: dict[str, float] = <factory>, field_specs: dict[str, dict[str, Any]] = <factory>) -> None"
+      },
+      "PipelineStartEvent": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(step_names: list[str], num_rows: int, config: EnrichmentConfig) -> None"
+      },
+      "RowAttemptEvent": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(step_name: str, row_index: int, attempt: int, kind: str, status: str, latency_ms: float | None, backoff_s: float | None, error: BaseException | None = None, body: dict[str, Any] | None = None) -> None"
+      },
+      "RowCompleteEvent": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(step_name: str, row_index: int, values: dict[str, Any], error: BaseException | None, from_cache: bool, skipped: bool = False, usage: Any | None = None, elapsed_ms: float | None = None) -> None"
+      },
+      "RowError": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(row_index: int, step_name: str, error: BaseException, error_type: str = '') -> None"
+      },
+      "Step": {
+        "kind": "protocol",
+        "members": {
+          "run": {
+            "kind": "method",
+            "signature": "(self, ctx: StepContext) -> StepResult"
+          }
+        }
+      },
+      "StepContext": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(row: dict[str, Any], fields: dict[str, dict[str, Any]], prior_results: dict[str, Any], config: EnrichmentConfig | None = None, row_index: int | None = None, capture: str = 'metadata', on_attempt: Callable[[RowAttemptEvent], Awaitable[None]] | None = None) -> None"
+      },
+      "StepEndEvent": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(step_name: str, num_rows: int, num_errors: int, usage: Any, elapsed_seconds: float, execution_mode: str = 'realtime', batch_id: str | None = None) -> None"
+      },
+      "StepError": {
+        "bases": [
+          "EnrichmentError",
+          "Exception",
+          "BaseException"
+        ],
+        "kind": "exception",
+        "members": {},
+        "signature": "(message: str, step_name: str | None = None, **kwargs: Any)"
+      },
+      "StepPlan": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(name: str, kind: str, depends_on: list[str] = <factory>, model: str | None = None, system_prompt: str | None = None, response_format: dict[str, Any] | None = None) -> None"
+      },
+      "StepResult": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(values: dict[str, Any], usage: Optional[UsageInfo] = None, metadata: dict[str, Any] = <factory>) -> None"
+      },
+      "StepStartEvent": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(step_name: str, num_rows: int, level: int, execution_mode: str = 'realtime') -> None"
+      },
+      "compare": {
+        "kind": "function",
+        "signature": "(a: PipelineResult, b: PipelineResult, *, label_a: str = 'A', label_b: str = 'B') -> ComparisonResult"
+      },
+      "is_batch_capable": {
+        "kind": "function",
+        "signature": "(client: Any) -> bool"
+      },
+      "read_prompt_ref": {
+        "kind": "function",
+        "signature": "(sidecar_path: str | Path, off: int, len: int) -> dict[str, Any]"
+      },
+      "setup_logging": {
+        "kind": "function",
+        "signature": "(level: str = 'INFO', format_type: \"Literal['console', 'json']\" = 'console', include_timestamp: bool = True) -> None"
+      },
+      "web_search": {
+        "kind": "function",
+        "signature": "(query: str, *, model: str = 'gpt-4.1-mini', search_context_size: str = 'medium', api_key: str | None = None, include_sources: bool = True, user_location: dict[str, str] | None = None, allowed_domains: list[str] | None = None, tool_type: str = 'web_search') -> Callable[[StepContext], Awaitable[dict[str, Any]]]"
+      }
+    }
+  },
+  "accrue.core.exceptions": {
+    "exports": [
+      "ConfigurationError",
+      "EnrichmentError",
+      "FieldValidationError",
+      "PipelineError",
+      "RowError",
+      "StepError"
+    ],
+    "names": {
+      "ConfigurationError": {
+        "bases": [
+          "EnrichmentError",
+          "Exception",
+          "BaseException"
+        ],
+        "kind": "exception",
+        "members": {},
+        "signature": "(message: str, row_index: int | None = None, field: str | None = None)"
+      },
+      "EnrichmentError": {
+        "bases": [
+          "Exception",
+          "BaseException"
+        ],
+        "kind": "exception",
+        "members": {},
+        "signature": "(message: str, row_index: int | None = None, field: str | None = None)"
+      },
+      "FieldValidationError": {
+        "bases": [
+          "EnrichmentError",
+          "Exception",
+          "BaseException"
+        ],
+        "kind": "exception",
+        "members": {},
+        "signature": "(message: str, row_index: int | None = None, field: str | None = None)"
+      },
+      "PipelineError": {
+        "bases": [
+          "EnrichmentError",
+          "Exception",
+          "BaseException"
+        ],
+        "kind": "exception",
+        "members": {},
+        "signature": "(message: str, row_index: int | None = None, field: str | None = None)"
+      },
+      "RowError": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(row_index: int, step_name: str, error: BaseException, error_type: str = '') -> None"
+      },
+      "StepError": {
+        "bases": [
+          "EnrichmentError",
+          "Exception",
+          "BaseException"
+        ],
+        "kind": "exception",
+        "members": {},
+        "signature": "(message: str, step_name: str | None = None, **kwargs: Any)"
+      }
+    }
+  },
+  "accrue.data": {
+    "exports": [
+      "FieldManager",
+      "load_fields"
+    ],
+    "names": {
+      "FieldManager": {
+        "kind": "class",
+        "members": {
+          "from_csv": {
+            "kind": "classmethod",
+            "signature": "(cls, csv_path: str) -> FieldManager"
+          },
+          "get_categories": {
+            "kind": "method",
+            "signature": "(self) -> list[str]"
+          },
+          "get_category_fields": {
+            "kind": "method",
+            "signature": "(self, category: str) -> dict[str, dict[str, Any]]"
+          },
+          "get_field_count": {
+            "kind": "method",
+            "signature": "(self, category: str | None = None) -> int"
+          },
+          "validate_category": {
+            "kind": "method",
+            "signature": "(self, category: str) -> bool"
+          }
+        },
+        "signature": "(fields_categories_path: str) -> None"
+      },
+      "load_fields": {
+        "kind": "function",
+        "signature": "(csv_path: str, category: str | None = None) -> dict[str, dict[str, Any]]"
+      }
+    }
+  },
+  "accrue.providers": {
+    "exports": [
+      "AnthropicClient",
+      "GoogleClient",
+      "LLMAPIError",
+      "LLMClient",
+      "LLMResponse",
+      "OpenAIClient"
+    ],
+    "names": {
+      "AnthropicClient": {
+        "kind": "class",
+        "members": {
+          "cancel_batch": {
+            "kind": "method",
+            "signature": "(self, batch_id: str) -> None"
+          },
+          "complete": {
+            "kind": "method",
+            "signature": "(self, messages: list[dict[str, Any]], model: str, temperature: float | None, max_tokens: int, response_format: dict[str, Any] | None = None, tools: list[dict[str, Any]] | None = None, provider_kwargs: dict[str, Any] | None = None) -> LLMResponse"
+          },
+          "poll_batch": {
+            "kind": "method",
+            "signature": "(self, batch_id: str, poll_interval: float = 60.0, timeout: float = 86400.0) -> BatchResult"
+          },
+          "submit_batch": {
+            "kind": "method",
+            "signature": "(self, requests: list[BatchRequest], metadata: dict[str, str] | None = None) -> str"
+          }
+        },
+        "signature": "(api_key: str | None = None, http_client: Any | None = None)"
+      },
+      "GoogleClient": {
+        "kind": "class",
+        "members": {
+          "complete": {
+            "kind": "method",
+            "signature": "(self, messages: list[dict[str, Any]], model: str, temperature: float, max_tokens: int, response_format: dict[str, Any] | None = None, tools: list[dict[str, Any]] | None = None, provider_kwargs: dict[str, Any] | None = None) -> LLMResponse"
+          }
+        },
+        "signature": "(api_key: str | None = None, http_client: Any | None = None)"
+      },
+      "LLMAPIError": {
+        "bases": [
+          "Exception",
+          "BaseException"
+        ],
+        "kind": "exception",
+        "members": {
+          "retryable": {
+            "kind": "property",
+            "signature": "(self) -> bool"
+          }
+        },
+        "signature": "(message: str, *, status_code: int | None = None, retry_after: float | None = None, is_rate_limit: bool = False, retryable: bool | None = None)"
+      },
+      "LLMClient": {
+        "kind": "protocol",
+        "members": {
+          "complete": {
+            "kind": "method",
+            "signature": "(self, messages: list[dict[str, Any]], model: str, temperature: float, max_tokens: int, response_format: dict[str, Any] | None = None, tools: list[dict[str, Any]] | None = None, provider_kwargs: dict[str, Any] | None = None) -> LLMResponse"
+          }
+        }
+      },
+      "LLMResponse": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(content: str, usage: UsageInfo | None = None, citations: list[Citation] = <factory>) -> None"
+      },
+      "OpenAIClient": {
+        "kind": "class",
+        "members": {
+          "cancel_batch": {
+            "kind": "method",
+            "signature": "(self, batch_id: str) -> None"
+          },
+          "complete": {
+            "kind": "method",
+            "signature": "(self, messages: list[dict[str, Any]], model: str, temperature: float, max_tokens: int, response_format: dict[str, Any] | None = None, tools: list[dict[str, Any]] | None = None, provider_kwargs: dict[str, Any] | None = None) -> LLMResponse"
+          },
+          "poll_batch": {
+            "kind": "method",
+            "signature": "(self, batch_id: str, poll_interval: float = 60.0, timeout: float = 86400.0) -> BatchResult"
+          },
+          "submit_batch": {
+            "kind": "method",
+            "signature": "(self, requests: list[BatchRequest], metadata: dict[str, str] | None = None) -> str"
+          },
+          "supports_batch": {
+            "kind": "property",
+            "signature": "(self) -> bool"
+          }
+        },
+        "signature": "(api_key: str | None = None, base_url: str | None = None, http_client: Any | None = None)"
+      }
+    }
+  }
+}
