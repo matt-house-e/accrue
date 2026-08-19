@@ -44,6 +44,18 @@ Types: `feat`, `fix`, `docs`, `refactor`, `test`
 - Source code (`accrue/`), Tests (`tests/`), Examples (`examples/`), Docs (`.md`)
 - Never: `data/`, `.env`, `.vscode/`, `.idea/`, `.notes/`
 
+### Merging PRs
+
+- **A PR from a fork by a non-collaborator must get a review pass before merge.**
+  Nothing reviews PRs automatically — the auto-review workflow was dropped in #136,
+  so reviews run ad hoc. Either review the diff locally with Claude Code, or comment
+  `@claude review` on the PR: that path is `claude.yml`, which fires on
+  `issue_comment` in base-repo context and so has repository secrets even for fork
+  PRs (a `pull_request`-triggered job would not). Read the result, then merge.
+- Green CI is not a review. `main` requires `test (3.10-3.13)`, which proves the
+  tests pass — not that the diff does what it says.
+- Never merge with `--admin`. If branch protection blocks a merge, fix the cause.
+
 ## GitHub Issues
 
 **Always include labels.** Format: `[Type]: [Component] Description`
