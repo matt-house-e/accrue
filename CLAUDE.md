@@ -67,8 +67,6 @@ See `docs/guides/` for details.
 | 6A Ship: examples, README, PyPI | COMPLETE |
 | 6B Power user: conditional steps, grounding (done); batch API (#62, OpenAI+Anthropic); waterfall, chunked, CLI (remaining) | IN PROGRESS |
 
-Full design: `docs/instructions/PIPELINE_DESIGN.md`
-
 ## Keeping Docs in Sync
 
 **When making architectural decisions or design changes, update:**
