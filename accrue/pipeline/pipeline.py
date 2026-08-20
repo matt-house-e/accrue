@@ -489,6 +489,9 @@ class Pipeline:
         hooks: EnrichmentHooks | None = None,
         output_file: str | Path | None = None,
         confirm: bool = False,
+        *,
+        run_log: bool | str | Path = False,
+        display_key: str | None = None,
     ) -> PipelineResult:
         """Synchronous entry point — the ONE way to use Accrue.
 
@@ -502,6 +505,12 @@ class Pipeline:
         If ``confirm=True``, a :meth:`plan` preview is printed first and you're
         prompted ``y/n`` before the full run proceeds; answering no raises
         ``RuntimeError`` without running the rest of the dataset.
+
+        If ``run_log`` is set, an append-only JSONL event stream describing the
+        run is written — ``True`` for ``.accrue/runs/<run_id>.jsonl`` under the
+        CWD, or a ``str`` / ``Path`` for an explicit file.  ``display_key``
+        names the label column recorded in the log (defaults to the first
+        string column).  See ``docs/guides/run-log.md`` for the contract.
 
         Raises ``RuntimeError`` if called from inside a running event loop
         (use ``await pipeline.run_async(data)`` in that case).
@@ -520,7 +529,16 @@ class Pipeline:
         except RuntimeError as exc:
             if "run_async" in str(exc):
                 raise
-        return asyncio.run(self.run_async(data, config, hooks=hooks, output_file=output_file))
+        return asyncio.run(
+            self.run_async(
+                data,
+                config,
+                hooks=hooks,
+                output_file=output_file,
+                run_log=run_log,
+                display_key=display_key,
+            )
+        )
 
     async def run_async(
         self,
@@ -528,6 +546,9 @@ class Pipeline:
         config: EnrichmentConfig | None = None,
         hooks: EnrichmentHooks | None = None,
         output_file: str | Path | None = None,
+        *,
+        run_log: bool | str | Path = False,
+        display_key: str | None = None,
     ) -> PipelineResult:
         """Async entry point — ``await pipeline.run_async(data)``.
 
@@ -544,12 +565,37 @@ class Pipeline:
                 ``.parquet``) before this method returns, guarding a completed
                 run against errors in downstream user code.  See
                 :meth:`PipelineResult.save`.
+            run_log: If set, write an append-only JSONL event stream for this
+                run (schema v1, see ``docs/guides/run-log.md``).  ``True``
+                writes to ``.accrue/runs/<run_id>.jsonl`` relative to the CWD;
+                a ``str`` / ``Path`` names the file explicitly.  User ``hooks``
+                still fire — the log's hooks are merged, not substituted.
+            display_key: Label column recorded in the run log's
+                ``pipeline_start`` record (for UIs).  Defaults to the first
+                string/object column, else the first column, else null.
 
         Returns:
             A :class:`PipelineResult` containing the enriched data, aggregated
             cost/usage info, and any per-row errors.
         """
         config = config or EnrichmentConfig()
+        if run_log:
+            from ..core.runlog import (
+                JsonlRunLogger,
+                _merge_hooks,
+                default_display_key,
+                new_run_id,
+                resolve_run_log_path,
+            )
+
+            run_id = new_run_id()
+            run_logger = JsonlRunLogger(
+                resolve_run_log_path(run_log, run_id),
+                run_id=run_id,
+                display_key=display_key if display_key is not None else default_display_key(data),
+                pipeline=self,
+            )
+            hooks = _merge_hooks(run_logger.hooks, hooks)
         hooks = hooks or EnrichmentHooks()
 
         # Collect field specs from steps
@@ -856,12 +902,14 @@ class Pipeline:
 
                 # Fire on_step_start for each step in this level
                 for step_name in steps_to_run:
+                    is_batch = getattr(self._step_map[step_name], "is_batch_eligible", False)
                     await _fire_hook(
                         hooks.on_step_start,
                         StepStartEvent(
                             step_name=step_name,
                             num_rows=num_rows,
                             level=level_idx,
+                            execution_mode="batch" if is_batch else "realtime",
                         ),
                     )
 
@@ -918,6 +966,8 @@ class Pipeline:
                             num_errors=len(step_errors),
                             usage=usage,
                             elapsed_seconds=elapsed_s,
+                            execution_mode=usage.execution_mode if usage else "realtime",
+                            batch_id=usage.batch_id if usage else None,
                         ),
                     )
 
@@ -1021,9 +1071,10 @@ class Pipeline:
         rows_skipped = 0
         step_cache_enabled = cache_manager is not None and getattr(step, "cache", True)
 
-        # Track per-row from_cache and skipped status
+        # Track per-row from_cache, skipped status, and wall-clock time (#128)
         row_from_cache: list[bool] = [False] * num_rows
         row_was_skipped: list[bool] = [False] * num_rows
+        row_elapsed_ms: list[float | None] = [None] * num_rows
 
         row_bar = tqdm(
             total=num_rows,
@@ -1036,42 +1087,47 @@ class Pipeline:
         async def process_row(idx: int) -> StepResult | BaseException:
             nonlocal cache_hits, cache_misses, rows_skipped
             async with semaphore:
-                # Gather prior results from dependency steps
-                prior: dict[str, Any] = {}
-                for dep_name in step.depends_on:
-                    if dep_name in step_values:
-                        prior.update(step_values[dep_name][idx])
+                # Per-row wall clock, excluding queue/semaphore wait (#128)
+                row_t0 = _time.monotonic()
+                try:
+                    # Gather prior results from dependency steps
+                    prior: dict[str, Any] = {}
+                    for dep_name in step.depends_on:
+                        if dep_name in step_values:
+                            prior.update(step_values[dep_name][idx])
 
-                # Evaluate run_if/skip_if predicate
-                if await _should_skip_row(step, rows[idx], prior):
-                    rows_skipped += 1
-                    row_was_skipped[idx] = True
-                    return StepResult(values=_build_skip_values(step))
+                    # Evaluate run_if/skip_if predicate
+                    if await _should_skip_row(step, rows[idx], prior):
+                        rows_skipped += 1
+                        row_was_skipped[idx] = True
+                        return StepResult(values=_build_skip_values(step))
 
-                cache_key = None
-                if step_cache_enabled:
-                    cache_key = _compute_step_cache_key(step, rows[idx], prior, step_fields)
-                    cached = cache_manager.get(cache_key)
-                    if cached is not None:
-                        cache_hits += 1
-                        row_from_cache[idx] = True
-                        return StepResult(values=cached)
+                    cache_key = None
+                    if step_cache_enabled:
+                        cache_key = _compute_step_cache_key(step, rows[idx], prior, step_fields)
+                        cached = cache_manager.get(cache_key)
+                        if cached is not None:
+                            cache_hits += 1
+                            row_from_cache[idx] = True
+                            return StepResult(values=cached)
 
-                ctx = StepContext(
-                    row=rows[idx],
-                    fields=step_fields,
-                    prior_results=prior,
-                    config=config,
-                )
+                    ctx = StepContext(
+                        row=rows[idx],
+                        fields=step_fields,
+                        prior_results=prior,
+                        config=config,
+                    )
 
-                result = await step.run(ctx)
+                    result = await step.run(ctx)
 
-                if step_cache_enabled:
-                    cache_manager.set(cache_key, step.name, result.values)
+                    if step_cache_enabled:
+                        cache_manager.set(cache_key, step.name, result.values)
 
-                if step_cache_enabled:
-                    cache_misses += 1
-                return result
+                    if step_cache_enabled:
+                        cache_misses += 1
+                    return result
+                finally:
+                    row_elapsed_ms[idx] = (_time.monotonic() - row_t0) * 1000.0
 
         # ── Streaming worker pool ────────────────────────────────────────────
         # A fixed pool of `max_workers` worker tasks pulls row indices from a
@@ -1120,6 +1176,7 @@ class Pipeline:
                                     error=exc,
                                     from_cache=False,
                                     skipped=row_was_skipped[idx],
+                                    elapsed_ms=row_elapsed_ms[idx],
                                 ),
                             )
                         )
@@ -1146,6 +1203,8 @@ class Pipeline:
                                     error=None,
                                     from_cache=row_from_cache[idx],
                                     skipped=row_was_skipped[idx],
+                                    usage=result_or_none.usage,
+                                    elapsed_ms=row_elapsed_ms[idx],
                                 ),
                             )
                         )
@@ -1610,7 +1669,10 @@ class Pipeline:
         # ── Phase 7: Merge and finalize ────────────────────────────────
         step_values[step.name] = results
 
-        # Fire hooks for all rows as background tasks, then drain
+        # Fire hooks for all rows as background tasks, then drain.
+        # usage/elapsed_ms stay None in batch mode — the provider reports
+        # usage per batch, not per row completion; per-row plumbing is
+        # deferred (#128).
         hook_tasks_batch: list[asyncio.Task] = []
         for idx in range(num_rows):
             if hooks.on_row_complete:

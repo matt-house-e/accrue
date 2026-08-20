@@ -46,6 +46,7 @@ print(result.cost)  # Token usage breakdown
 - **Conditional steps** -- `run_if` / `skip_if` predicates for per-row branching
 - **Dry-run + cost preview** -- `pipeline.plan(df)` previews prompts, schemas, and sample outputs and estimates the full-run cost before you spend
 - **Hooks and observability** -- Progress callbacks, cost tracking, checkpoint recovery
+- **Run logs** -- `run(..., run_log=True)` streams the run as append-only JSONL (contract v1) for dashboards and `tail -f`
 
 ## Quick Links
 
