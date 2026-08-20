@@ -106,9 +106,46 @@ result = pipeline.run(data, config=config)
 
 ### How it works
 
-- After each step completes (across all rows), the full pipeline state is written to a JSON file.
+- After each step completes (across all rows), the full pipeline state is written to a JSON file -- per-row results *and* the row indices that errored.
 - If the pipeline crashes mid-execution and is re-run, completed steps are skipped. Their results are loaded from the checkpoint and fed to downstream steps.
-- Checkpoint files are cleaned up automatically after successful pipeline completion.
+- Rows that *errored* inside a completed step are the exception: they re-run. Checkpointed means done only for cells that actually succeeded.
+- Checkpoint files are cleaned up automatically once nothing is left to heal. A run that ends with row errors **keeps** its checkpoint, because that record is what a retry reads.
+
+`pipeline.run()` and `pipeline.runner(config).run()` both checkpoint; they share the same file for the same dataset, so you can start with one and resume with the other.
+
+### Retrying failed cells
+
+A run that left errors can be healed without paying for the rows that worked:
+
+```python
+config = EnrichmentConfig(enable_checkpointing=True)
+
+result = pipeline.run(data, config=config, run_log="logs/tonight.jsonl")
+if result.has_errors:
+    # Re-runs ONLY the (step, row) cells that errored. Everything that
+    # succeeded is served from the checkpoint -- not one extra API call.
+    result = pipeline.retry_failed(data, config=config, run_log="logs/tonight.jsonl")
+```
+
+`retry_failed_async()` is the `await` form. Both take the same arguments as `run()`, plus:
+
+| Argument | Effect |
+|----------|--------|
+| `rows` | Restrict the retry to these row indices. Failures left out stay recorded in the checkpoint for a later retry. |
+| `steps` | Restrict the retry to these step names. |
+| `run_log` | Path of the failed run's log to append to. The retry keeps that run's `run_id` and `display_key` and appends a `retry_start` ... `retry_end` segment, so recovered cells arrive as ordinary `row_complete` records a dashboard can apply directly. |
+| `data_identifier` | Explicit checkpoint identifier, if the original run passed one. |
+
+This is the API behind a dashboard's "retry failed rows" button, and the groundwork for CLI resume.
+
+Points worth knowing:
+
+- **Pass the config the run used.** `retry_failed()` needs `enable_checkpointing=True` and the same `checkpoint_dir` to find the file. It raises `PipelineError` rather than silently re-running the whole dataset.
+- **A clean run has nothing to retry.** Its checkpoint was removed on success, so `retry_failed()` raises.
+- **Steps the run never finished still run in full.** A killed run has no results for them at all.
+- **A cell that fails again surfaces normally.** It comes back in `result.errors` and stays recorded for the next attempt.
+- **Downstream steps are not cascaded.** Healing `score` for row 7 does not re-run the `flag` step that consumed the old `score`. That is what keeps the retry exactly N calls. When a downstream step *also* errored on that row, it is a failed cell in its own right and gets retried too -- in DAG order, so it sees the healed value. To rebuild a downstream step wholesale, clear its cache and re-run instead.
+- **Row indices are positional**, matching the `row` field in the run log.
 
 ### Configuration
 
@@ -127,9 +164,9 @@ config = EnrichmentConfig(
 
 | | Caching | Checkpointing |
 |---|---------|---------------|
-| **Purpose** | Skip redundant API calls | Crash recovery |
-| **Granularity** | Per row, per step | Per step (all rows) |
-| **Persistence** | Permanent (until TTL or manual clear) | Temporary (cleaned up on success) |
+| **Purpose** | Skip redundant API calls | Crash recovery and failed-cell retry |
+| **Granularity** | Per row, per step | Per step, plus the failed rows within it |
+| **Persistence** | Permanent (until TTL or manual clear) | Temporary (cleaned up once nothing is left to heal) |
 | **Storage** | SQLite (`.accrue/cache.db`) | JSON files |
 | **When it helps** | Re-running with same/similar data | Pipeline crashes mid-execution |
 | **Cost savings** | Yes (avoids duplicate API calls) | Yes (avoids re-running completed steps) |
