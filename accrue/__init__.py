@@ -22,11 +22,12 @@ from .core.hooks import (
     EnrichmentHooks,
     PipelineEndEvent,
     PipelineStartEvent,
+    RowAttemptEvent,
     RowCompleteEvent,
     StepEndEvent,
     StepStartEvent,
 )
-from .core.runlog import JsonlRunLogger
+from .core.runlog import JsonlRunLogger, read_prompt_ref
 from .pipeline import (
     ComparisonResult,
     Pipeline,
@@ -69,8 +70,10 @@ __all__ = [
     "StepStartEvent",
     "StepEndEvent",
     "RowCompleteEvent",
+    "RowAttemptEvent",
     # Run log (contract v1 — docs/guides/run-log.md)
     "JsonlRunLogger",
+    "read_prompt_ref",
     # Step protocol
     "Step",
     "StepContext",

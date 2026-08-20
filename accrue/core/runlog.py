@@ -35,6 +35,7 @@ from .hooks import (
     EnrichmentHooks,
     PipelineEndEvent,
     PipelineStartEvent,
+    RowAttemptEvent,
     RowCompleteEvent,
     StepEndEvent,
     StepStartEvent,
@@ -97,6 +98,47 @@ def resolve_run_log_path(run_log: bool | str | Path, run_id: str) -> Path:
     if run_log is True:
         return DEFAULT_RUN_DIR / f"{run_id}.jsonl"
     return Path(run_log)
+
+
+def prompt_sidecar_path(run_log_path: str | Path) -> Path:
+    """Path of the prompt sidecar beside a run log: ``<run>.prompts.jsonl``.
+
+    ``.accrue/runs/<id>.jsonl`` → ``.accrue/runs/<id>.prompts.jsonl``;
+    ``logs/tonight.jsonl`` → ``logs/tonight.prompts.jsonl``.  Same directory,
+    the run log's stem with ``.prompts.jsonl`` swapped in for ``.jsonl`` — see
+    the capture-tiers section of ``docs/guides/run-log.md``.
+    """
+    return Path(run_log_path).with_suffix(".prompts.jsonl")
+
+
+def read_prompt_ref(sidecar_path: str | Path, off: int, len: int) -> dict[str, Any]:
+    """Resolve a ``prompt_ref`` from a ``row_attempt`` record into its body.
+
+    ``off`` / ``len`` are the byte offset and byte length a ``row_attempt``
+    record's ``prompt_ref`` carries; this seeks to *off*, reads *len* bytes of
+    the sidecar, and parses the one JSON body stored there.  Consumers can splat
+    a record straight in: ``read_prompt_ref(sidecar, **rec["prompt_ref"])``.
+    """
+    with open(sidecar_path, "rb") as fh:
+        fh.seek(off)
+        raw = fh.read(len)
+    return json.loads(raw.decode("utf-8"))
+
+
+def _sanitize_body(value: Any) -> Any:
+    """Recursively redact secret patterns from a captured prompt/response body.
+
+    Captured prompts and responses are user/model text that can quote an API
+    key the same way an error message can; they go through the identical
+    :func:`_sanitize_secrets` redaction before touching disk (#134).
+    """
+    if isinstance(value, str):
+        return _sanitize_secrets(value)
+    if isinstance(value, dict):
+        return {k: _sanitize_body(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_body(v) for v in value]
+    return value
 
 
 def read_run_context(path: str | Path) -> tuple[str | None, str | None, float]:
@@ -240,6 +282,7 @@ def _merge_hooks(primary: EnrichmentHooks, extra: EnrichmentHooks | None) -> Enr
         on_step_start=_chain(primary.on_step_start, extra.on_step_start),
         on_step_end=_chain(primary.on_step_end, extra.on_step_end),
         on_row_complete=_chain(primary.on_row_complete, extra.on_row_complete),
+        on_row_attempt=_chain(primary.on_row_attempt, extra.on_row_attempt),
     )
 
 
@@ -286,6 +329,13 @@ class JsonlRunLogger:
             retry segment, keeping ``t`` non-decreasing across the file.
         retry_cells: ``{step: [row_index, ...]}`` this retry will re-execute,
             recorded in ``retry_start`` so a UI can mark the cells in flight.
+        capture: Capture tier gating the prompt sidecar — ``"metadata"``
+            (default) writes no bodies, ``"prompts"`` / ``"full"`` append each
+            captured LLM attempt body to ``<run>.prompts.jsonl`` and reference
+            it from ``row_attempt`` via ``prompt_ref``.  The logger only ever
+            writes a body when an attempt event carries one, so the source (the
+            LLM step) is what actually honours the tier; this is a
+            belt-and-braces gate on top.
     """
 
     def __init__(
@@ -299,11 +349,13 @@ class JsonlRunLogger:
         segment: str = "run",
         t_offset: float = 0.0,
         retry_cells: dict[str, list[int]] | None = None,
+        capture: str = "metadata",
     ) -> None:
         self.path = Path(path)
         self.run_id = run_id or new_run_id()
         self.display_key = display_key
         self.segment = segment
+        self.capture = capture
         self._row_keys = resolve_row_keys(data, display_key)
         self._pipeline = pipeline
         self._t_offset = t_offset
@@ -311,6 +363,12 @@ class JsonlRunLogger:
         self._t0: float | None = None
         self._fh: Any = None
         self._lock = threading.Lock()
+        # Prompt sidecar (#134): opened lazily on the first captured body, only
+        # when ``capture >= prompts``.  ``_sidecar_bytes`` tracks the running
+        # byte offset so each body's ``prompt_ref`` points at the right span.
+        self._sidecar_path = prompt_sidecar_path(self.path)
+        self._sidecar_fh: Any = None
+        self._sidecar_bytes = 0
         #: Pass to ``Pipeline.run(data, hooks=logger.hooks)``.
         self.hooks = EnrichmentHooks(
             on_pipeline_start=self._on_pipeline_start,
@@ -318,6 +376,7 @@ class JsonlRunLogger:
             on_step_start=self._on_step_start,
             on_step_end=self._on_step_end,
             on_row_complete=self._on_row_complete,
+            on_row_attempt=self._on_row_attempt,
         )
 
     # -- writing ---------------------------------------------------------
@@ -354,6 +413,38 @@ class JsonlRunLogger:
             self._fh.write(line + "\n")
             self._fh.flush()
 
+    def _write_sidecar(self, body: dict[str, Any]) -> dict[str, int]:
+        """Append one captured body to the prompt sidecar; return its ``prompt_ref``.
+
+        The body is redacted (:func:`_sanitize_body`), encoded as one JSON line,
+        and appended.  Returns ``{"off": <byte offset>, "len": <byte length>}``
+        pointing at the JSON (newline excluded) so :func:`read_prompt_ref`
+        resolves it.  The sidecar is append-only, flushed per line, and created
+        ``0600`` — the same hardening as the main log (#134).
+        """
+        sanitized = _sanitize_body(body)
+        encoded = json.dumps(sanitized, ensure_ascii=False, default=str, allow_nan=False)
+        data = encoded.encode("utf-8")
+        with self._lock:
+            if self._sidecar_fh is None or self._sidecar_fh.closed:
+                self._sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+                # Bodies are prompts/responses — often PII; owner-only, like the
+                # main log.  Seed the byte offset from any pre-existing file so a
+                # retry appended to the same run keeps refs pointing correctly.
+                if self._sidecar_path.exists():
+                    self._sidecar_bytes = self._sidecar_path.stat().st_size
+                fd = os.open(self._sidecar_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                self._sidecar_fh = os.fdopen(fd, "a", encoding="utf-8")
+                try:
+                    os.chmod(self._sidecar_path, 0o600)
+                except (OSError, NotImplementedError):  # pragma: no cover — platform-dependent
+                    pass
+            off = self._sidecar_bytes
+            self._sidecar_fh.write(encoded + "\n")
+            self._sidecar_fh.flush()
+            self._sidecar_bytes += len(data) + 1  # +1 for the newline
+        return {"off": off, "len": len(data)}
+
     @staticmethod
     def _encode(record: dict[str, Any]) -> str:
         """Serialize one record to a single JSON line that always parses."""
@@ -382,10 +473,12 @@ class JsonlRunLogger:
             return json.dumps(minimal, ensure_ascii=False, default=str, allow_nan=False)
 
     def close(self) -> None:
-        """Close the file handle (re-opened automatically if more events arrive)."""
+        """Close the file handles (re-opened automatically if more events arrive)."""
         with self._lock:
             if self._fh is not None and not self._fh.closed:
                 self._fh.close()
+            if self._sidecar_fh is not None and not self._sidecar_fh.closed:
+                self._sidecar_fh.close()
 
     # -- hook callables --------------------------------------------------
     # All async so the write happens synchronously on the event loop when
@@ -490,6 +583,40 @@ class JsonlRunLogger:
                 "error": error,
                 "usage": usage,
                 "elapsed_ms": None if event.elapsed_ms is None else round(event.elapsed_ms, 3),
+            },
+        )
+
+    async def _on_row_attempt(self, event: RowAttemptEvent) -> None:
+        # The main log never inlines bodies: at capture>=prompts a body rides on
+        # the event, gets appended to the sidecar, and the record points into it
+        # via prompt_ref; at metadata the event carries no body and prompt_ref is
+        # null.  The sidecar append + the record emit happen back-to-back with no
+        # await between them, so the byte offset a prompt_ref records is exact.
+        prompt_ref = None
+        if event.body is not None and self.capture != "metadata":
+            prompt_ref = self._write_sidecar(event.body)
+
+        # Error text goes through the same redaction as row_complete / the
+        # checkpoint path — a provider error can quote request headers.
+        error = None
+        if event.error is not None:
+            error = {
+                "type": type(event.error).__name__,
+                "msg": _sanitize_secrets(str(event.error)),
+            }
+
+        self._emit(
+            "row_attempt",
+            {
+                "step": event.step_name,
+                "row": event.row_index,
+                "attempt": event.attempt,
+                "kind": event.kind,
+                "status": event.status,
+                "latency_ms": (None if event.latency_ms is None else round(event.latency_ms, 3)),
+                "backoff_s": event.backoff_s,
+                "error": error,
+                "prompt_ref": prompt_ref,
             },
         )
 

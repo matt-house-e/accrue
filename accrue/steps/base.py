@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional, Protocol, runtime_checkable
 
 from ..schemas.base import UsageInfo
 
 if TYPE_CHECKING:
     from ..core.config import EnrichmentConfig
+    from ..core.hooks import RowAttemptEvent
 
 
 @dataclass(frozen=True)
@@ -24,12 +25,26 @@ class StepContext:
             current row.
         config: Optional :class:`EnrichmentConfig` for reading runtime
             settings (temperature, max_tokens, etc.).
+        row_index: 0-based index of this row in the input data, or ``None``
+            when a step is run outside the pipeline.  Carried so a step can
+            label the attempt events it fires (#134).
+        capture: Run-log capture tier — ``"metadata"`` (default),
+            ``"prompts"``, or ``"full"``.  At ``>= "prompts"`` an LLM step
+            captures the rendered prompt/response and attaches it to the
+            attempt event it fires (#134).
+        on_attempt: Async callback a step calls once per provider attempt
+            with a :class:`~accrue.core.hooks.RowAttemptEvent`.  ``None`` when
+            nothing is listening (no run log, no ``on_row_attempt`` hook), so
+            a metadata run pays nothing.
     """
 
     row: dict[str, Any]
     fields: dict[str, dict[str, Any]]
     prior_results: dict[str, Any]
     config: EnrichmentConfig | None = None
+    row_index: int | None = None
+    capture: str = "metadata"
+    on_attempt: Callable[[RowAttemptEvent], Awaitable[None]] | None = None
 
 
 @dataclass

@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import time
 from collections.abc import Callable
 from typing import Any, Type
 
 from pydantic import BaseModel, ValidationError
 
 from ..core.exceptions import PipelineError, StepError
+from ..core.hooks import RowAttemptEvent
 from ..schemas.enrichment import EnrichmentResult
 from ..schemas.field_spec import FieldSpec
 from ..schemas.grounding import GroundingConfig
@@ -581,6 +583,12 @@ class LLMStep:
             Uses config.max_retries and config.retry_base_delay.
         Inner loop: Parse/validation errors fed back to the LLM.
             Uses self.max_retries (step-level).
+
+        One :class:`~accrue.core.hooks.RowAttemptEvent` is fired per provider
+        call (#134): ``kind="api"`` when the call itself raised, ``kind="parse"``
+        when it returned and we tried to parse it (``status="ok"`` on success).
+        At ``ctx.capture >= "prompts"`` the event also carries the rendered
+        request/response so the run logger can persist it to the prompt sidecar.
         """
         client = self._resolve_client()
         messages, call_kwargs = self.build_messages(ctx)
@@ -595,8 +603,39 @@ class LLMStep:
             api_max_retries = ctx.config.max_retries
             retry_base_delay = ctx.config.retry_base_delay
 
+        # Attempt-event plumbing (#134).  When nothing is listening
+        # (``on_attempt is None``) every branch below short-circuits, so a
+        # metadata run over a non-logged pipeline pays nothing.
+        on_attempt = ctx.on_attempt
+        row_index = ctx.row_index if ctx.row_index is not None else -1
+        capture_bodies = on_attempt is not None and ctx.capture in ("prompts", "full")
+
         last_api_error: BaseException | None = None
         total_attempts = 0
+
+        async def _emit(
+            kind: str,
+            status: str,
+            latency_ms: float,
+            backoff_s: float | None,
+            error: BaseException | None,
+            body: dict[str, Any] | None,
+        ) -> None:
+            if on_attempt is None:
+                return
+            await on_attempt(
+                RowAttemptEvent(
+                    step_name=self.name,
+                    row_index=row_index,
+                    attempt=total_attempts,
+                    kind=kind,
+                    status=status,
+                    latency_ms=latency_ms,
+                    backoff_s=backoff_s,
+                    error=error,
+                    body=body,
+                )
+            )
 
         for api_attempt in range(api_max_retries + 1):
             # Reset messages for each API retry (parse retries accumulate within)
@@ -605,42 +644,55 @@ class LLMStep:
 
             last_parse_error: BaseException | None = None
             content: str = ""
+            call_t0 = time.monotonic()
 
             try:
+                # An LLMAPIError from complete() is not caught here; it falls
+                # through to the outer handler (the API-retry loop).
                 for parse_attempt in range(self.max_retries + 1):
                     total_attempts += 1
+                    call_t0 = time.monotonic()
                     try:
-                        try:
-                            response: LLMResponse = await client.complete(
-                                messages=messages,
-                                model=self.model,
-                                temperature=temperature,
-                                max_tokens=max_tokens,
-                                response_format=self._response_format,
-                                tools=tools,
-                                provider_kwargs=self.provider_kwargs,
+                        response: LLMResponse = await client.complete(
+                            messages=messages,
+                            model=self.model,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            response_format=self._response_format,
+                            tools=tools,
+                            provider_kwargs=self.provider_kwargs,
+                        )
+                    except TypeError:
+                        if tools is not None:
+                            raise StepError(
+                                f"LLMStep '{self.name}' uses grounding but the "
+                                f"configured LLM client does not support the 'tools' "
+                                f"parameter.  Use a built-in provider adapter "
+                                f"(OpenAIClient, AnthropicClient, GoogleClient) or "
+                                f"update your custom client's complete() signature.",
+                                step_name=self.name,
                             )
-                        except TypeError:
-                            if tools is not None:
-                                raise StepError(
-                                    f"LLMStep '{self.name}' uses grounding but the "
-                                    f"configured LLM client does not support the 'tools' "
-                                    f"parameter.  Use a built-in provider adapter "
-                                    f"(OpenAIClient, AnthropicClient, GoogleClient) or "
-                                    f"update your custom client's complete() signature.",
-                                    step_name=self.name,
-                                )
-                            raise
+                        raise
 
+                    try:
                         result = self.parse_response(response)
-                        # Enrich metadata with retry info
-                        result.metadata["attempts"] = total_attempts
-                        result.metadata["api_retries"] = api_attempt
-                        return result
-
                     except (json.JSONDecodeError, ValidationError) as exc:
+                        latency_ms = (time.monotonic() - call_t0) * 1000.0
                         last_parse_error = exc
-                        content = getattr(response, "content", "") if "response" in locals() else ""
+                        content = getattr(response, "content", "")
+                        status = (
+                            "parse_error"
+                            if isinstance(exc, json.JSONDecodeError)
+                            else "validation_error"
+                        )
+                        await _emit(
+                            "parse",
+                            status,
+                            latency_ms,
+                            None,
+                            exc,
+                            _capture_body(messages, response, None) if capture_bodies else None,
+                        )
                         logger.warning(
                             "LLMStep '%s' parse attempt %d failed: %s",
                             self.name,
@@ -658,6 +710,23 @@ class LLMStep:
                                 ),
                             },
                         )
+                        continue
+
+                    latency_ms = (time.monotonic() - call_t0) * 1000.0
+                    await _emit(
+                        "parse",
+                        "ok",
+                        latency_ms,
+                        None,
+                        None,
+                        _capture_body(messages, response, result.values)
+                        if capture_bodies
+                        else None,
+                    )
+                    # Enrich metadata with retry info
+                    result.metadata["attempts"] = total_attempts
+                    result.metadata["api_retries"] = api_attempt
+                    return result
 
                 # All parse retries exhausted
                 raise StepError(
@@ -669,24 +738,30 @@ class LLMStep:
                 )
 
             except LLMAPIError as exc:
+                latency_ms = (time.monotonic() - call_t0) * 1000.0
                 if not exc.retryable:
+                    await _emit("api", _api_status(exc), latency_ms, None, exc, None)
                     raise
                 last_api_error = exc
+                backoff: float | None = None
                 if api_attempt < api_max_retries:
                     # Full random jitter: uniform(0, base * 2^attempt)
                     delay = random.uniform(0, retry_base_delay * (2**api_attempt))
                     # Respect Retry-After header: use it as a floor
                     if exc.retry_after is not None:
                         delay = max(delay, float(exc.retry_after))
+                    backoff = delay
+                await _emit("api", _api_status(exc), latency_ms, backoff, exc, None)
+                if backoff is not None:
                     logger.warning(
                         "LLMStep '%s' API error (attempt %d/%d), retrying in %.1fs: %s",
                         self.name,
                         api_attempt + 1,
                         api_max_retries + 1,
-                        delay,
+                        backoff,
                         exc,
                     )
-                    await asyncio.sleep(delay)
+                    await asyncio.sleep(backoff)
 
         raise StepError(
             f"LLMStep '{self.name}' API error after {api_max_retries + 1} retries "
@@ -715,6 +790,37 @@ def _normalize_grounding(
         f"Invalid grounding value: {grounding!r}. "
         f"Expected True, False, None, dict, or GroundingConfig."
     )
+
+
+def _api_status(exc: LLMAPIError) -> str:
+    """Short status string for a provider API error, for the attempt event (#134)."""
+    if getattr(exc, "is_rate_limit", False) or exc.status_code == 429:
+        return "rate_limited"
+    if exc.status_code == 408:
+        return "timeout"
+    return "api_error"
+
+
+def _capture_body(
+    messages: list[dict[str, str]],
+    response: LLMResponse,
+    parsed: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Snapshot the rendered request/response for one attempt (capture>=prompts, #134).
+
+    ``messages`` is copied because the parse-retry loop appends to it after the
+    attempt event is emitted.  Secrets are redacted downstream by the run logger
+    before the body ever touches disk.
+
+    Raw provider request/response payloads (the ``full`` tier) are not cheaply
+    available from the provider adapters, which return a normalised
+    :class:`LLMResponse` — so ``full`` captures the same body as ``prompts``.
+    """
+    return {
+        "messages": [dict(m) for m in messages],
+        "response": getattr(response, "content", None),
+        "parsed": parsed,
+    }
 
 
 def _is_refusal(value: Any) -> bool:
