@@ -24,29 +24,43 @@ Build a pipeline from an ordered list of steps. Validates on construction:
 
 Raises `PipelineError` on validation failure.
 
-### `pipeline.run(data, config?, hooks?)`
+### `pipeline.run(data, config?, hooks?, output_file?, confirm?, *, run_log?, display_key?)`
 
 ```python
 pipeline.run(
     data: pd.DataFrame | list[dict[str, Any]],
     config: EnrichmentConfig | None = None,
     hooks: EnrichmentHooks | None = None,
+    output_file: str | Path | None = None,
+    confirm: bool = False,
+    *,
+    run_log: bool | str | Path = False,
+    display_key: str | None = None,
 ) -> PipelineResult
 ```
 
 Synchronous entry point. Wraps `asyncio.run()` internally. Raises `RuntimeError` if called from inside an existing event loop (use `run_async` in that case). Output type matches input type.
 
-### `pipeline.run_async(data, config?, hooks?)`
+- `output_file` -- save the enriched data before returning (`.csv` / `.json` / `.parquet` by extension).
+- `confirm` -- print a `plan()` preview and prompt y/n before the full run.
+- `run_log` -- write an append-only JSONL event stream for the run. `True` writes `.accrue/runs/<run_id>.jsonl` under the CWD; a `str` / `Path` names the file. User `hooks` still fire. See the [run log guide](../guides/run-log.md).
+- `display_key` -- label column recorded in the run log (defaults to the first string column).
+
+### `pipeline.run_async(data, config?, hooks?, output_file?, *, run_log?, display_key?)`
 
 ```python
 await pipeline.run_async(
     data: pd.DataFrame | list[dict[str, Any]],
     config: EnrichmentConfig | None = None,
     hooks: EnrichmentHooks | None = None,
+    output_file: str | Path | None = None,
+    *,
+    run_log: bool | str | Path = False,
+    display_key: str | None = None,
 ) -> PipelineResult
 ```
 
-Async variant. Use from FastAPI, Jupyter notebooks, or any async context.
+Async variant. Use from FastAPI, Jupyter notebooks, or any async context. Same keywords as `run()` except `confirm`.
 
 ### `pipeline.runner(config?)`
 
@@ -486,6 +500,38 @@ Fired after each row completes within a step.
 | `error` | `BaseException \| None` | |
 | `from_cache` | `bool` | |
 | `skipped` | `bool` | `False` |
+| `usage` | `Any \| None` | `None` |
+| `elapsed_ms` | `float \| None` | `None` |
+
+`usage` (a `UsageInfo`) and `elapsed_ms` are populated on the realtime path when available; `None` in batch mode, for cache hits, skipped rows, and steps that emit no usage (e.g. `FunctionStep`).
+
+---
+
+## JsonlRunLogger
+
+```python
+from accrue import JsonlRunLogger
+```
+
+Writes the [run-log contract v1](../guides/run-log.md) as append-only JSONL. A plain `EnrichmentHooks` consumer -- `run(..., run_log=True)` wires one up automatically, or drive it yourself:
+
+```python
+JsonlRunLogger(
+    path: str | Path,
+    *,
+    run_id: str | None = None,       # default: local timestamp YYYY-MM-DD-HHMMSS
+    display_key: str | None = None,  # label column recorded in pipeline_start
+    pipeline: Pipeline | None = None # enables per-step level/mode/model metadata
+)
+```
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `hooks` | `EnrichmentHooks` | Pass to `pipeline.run(data, hooks=logger.hooks)`. |
+| `run_id` | `str` | Identifier written into the `pipeline_start` record. |
+| `path` | `Path` | Destination `.jsonl` file (parents created on first write). |
+
+`close()` closes the file handle; it is called automatically when `pipeline_end` is written.
 
 ---
 

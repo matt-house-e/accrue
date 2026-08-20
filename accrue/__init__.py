@@ -26,6 +26,7 @@ from .core.hooks import (
     StepEndEvent,
     StepStartEvent,
 )
+from .core.runlog import JsonlRunLogger
 from .pipeline import (
     ComparisonResult,
     Pipeline,
@@ -68,6 +69,8 @@ __all__ = [
     "StepStartEvent",
     "StepEndEvent",
     "RowCompleteEvent",
+    # Run log (contract v1 — docs/guides/run-log.md)
+    "JsonlRunLogger",
     # Step protocol
     "Step",
     "StepContext",

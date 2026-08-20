@@ -90,6 +90,8 @@ Fired after each individual row completes within a step.
 | `error` | `BaseException \| None` | Error if the row failed |
 | `from_cache` | `bool` | Whether the result came from cache |
 | `skipped` | `bool` | Whether the row was skipped by `run_if`/`skip_if` |
+| `usage` | `UsageInfo \| None` | Per-row token usage when available (realtime LLM rows); `None` for function steps, cache hits, skipped rows, and batch mode |
+| `elapsed_ms` | `float \| None` | Wall-clock milliseconds for this row (excludes queue wait); `None` in batch mode |
 
 ## Async hooks
 

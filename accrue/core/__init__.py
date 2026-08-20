@@ -19,6 +19,8 @@ from .hooks import (
     StepEndEvent,
     StepStartEvent,
 )
+from .runlog import SCHEMA_VERSION as RUN_LOG_SCHEMA_VERSION
+from .runlog import JsonlRunLogger
 
 __all__ = [
     "CacheManager",
@@ -37,4 +39,6 @@ __all__ = [
     "StepStartEvent",
     "StepEndEvent",
     "RowCompleteEvent",
+    "JsonlRunLogger",
+    "RUN_LOG_SCHEMA_VERSION",
 ]

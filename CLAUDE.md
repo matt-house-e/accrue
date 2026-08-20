@@ -21,7 +21,8 @@ pip install -e ".[google]"      # With Google provider
 - **Internal fields**: `__` prefix (e.g. `__web_context`) for inter-step data, filtered from output.
 - **Prompt split**: `build_prompt()` returns `PromptParts(system, user)`. Keep the `system` half row-independent — providers cache on an exact prefix match, so any per-row content in it turns caching into a 1.25x surcharge (#107).
 - **Minimal deps**: Base: `openai`, `pydantic`, `pandas`, `tqdm`, `python-dotenv`. Never add litellm/langfuse.
-- See `docs/guides/` for architecture, providers, caching, grounding details.
+- See `docs/guides/` for architecture, providers, caching, grounding, run-log details.
+- **Run-log contract v1**: `run(..., run_log=True)` emits JSONL via `JsonlRunLogger` (a hooks consumer, `accrue/core/runlog.py`). Additive changes only within v1 — never rename/remove fields without bumping `SCHEMA_VERSION`; golden fixture `tests/fixtures/run_small.jsonl` is what accrue-ui tests against.
 
 ## Git Workflow
 

@@ -130,6 +130,8 @@ result = pipeline.run(companies_df)
 
 - **Hooks** -- Typed lifecycle events for observability. Sync and async callables, never crash the pipeline. [Hooks guide](docs/guides/hooks.md)
 
+- **Run logs** -- `run(..., run_log=True)` streams the run as append-only JSONL (schema v1): per-step and per-row events with status, errors, and token usage. Crash-safe, `tail -f`-able. [Run log guide](docs/guides/run-log.md)
+
 - **Run diffs** -- `accrue.compare(result_a, result_b)` diffs two runs (e.g. before/after a prompt tweak) -- changed rows, per-field churn, distribution shift, and cost delta -- no labels needed. [Compare guide](docs/guides/compare.md)
 
 - **`provider_kwargs`** -- Escape hatch for provider-specific features (extended thinking, effort control, etc.) without waiting for first-class support.
@@ -153,7 +155,7 @@ With `batch=True`, halve the API costs. Cached steps re-run in seconds.
 |---------|-------------|
 | [Getting Started](docs/getting-started/quickstart.md) | Installation, first pipeline, core concepts |
 | [Claude Code Skill](docs/getting-started/claude-code-skill.md) | Interactive pipeline builder via `/accrue` |
-| [Guides](docs/guides/) | Field specs, providers, caching, batch API, grounding, hooks, errors, configuration |
+| [Guides](docs/guides/) | Field specs, providers, caching, batch API, grounding, hooks, run logs, errors, configuration |
 | [Cookbook](docs/cookbook/) | End-to-end examples: [company enrichment](docs/cookbook/company-enrichment.md), [lead scoring](docs/cookbook/lead-scoring.md), [content analysis](docs/cookbook/content-analysis.md), [batch processing](docs/cookbook/batch-processing.md) |
 | [API Reference](docs/reference/api.md) | Complete reference for every public export |
 

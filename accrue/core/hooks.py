@@ -68,7 +68,12 @@ class StepEndEvent:
 
 @dataclass(frozen=True)
 class RowCompleteEvent:
-    """Fired after each row completes within a step."""
+    """Fired after each row completes within a step.
+
+    ``usage`` and ``elapsed_ms`` are additive (issue #128): populated on the
+    realtime path when available, ``None`` otherwise (batch mode, skipped
+    rows, cache hits, steps that emit no usage — e.g. FunctionStep).
+    """
 
     step_name: str
     row_index: int
@@ -76,6 +81,8 @@ class RowCompleteEvent:
     error: BaseException | None
     from_cache: bool
     skipped: bool = False
+    usage: Any | None = None  # UsageInfo for LLM rows, else None
+    elapsed_ms: float | None = None  # wall-clock ms for this row, else None
 
 
 # ---------------------------------------------------------------------------
