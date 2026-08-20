@@ -45,7 +45,7 @@ Every line is a JSON object carrying the same three envelope fields, followed by
 |-------|------|-------------|
 | `v` | `int` | Schema version. `1` for everything in this document. |
 | `t` | `float` | Seconds since `pipeline_start`, measured on a monotonic clock. Non-decreasing across the file. In an appended retry segment it continues from the file's last `t` -- it is a within-file ordering clock, not wall-clock elapsed. |
-| `type` | `string` | One of `pipeline_start`, `step_start`, `row_complete`, `step_end`, `pipeline_end`, `retry_start`, `retry_end`. |
+| `type` | `string` | One of `pipeline_start`, `step_start`, `row_attempt`, `row_complete`, `step_end`, `pipeline_end`, `retry_start`, `retry_end`. |
 
 ## Record types
 
@@ -68,6 +68,30 @@ Every line is a JSON object carrying the same three envelope fields, followed by
 | `level` | `int` | 0-based DAG level. |
 | `mode` | `string` | `"realtime"` or `"batch"`. |
 | `num_rows` | `int` | Rows this step will process. |
+
+### `row_attempt` — per LLM provider attempt (additive, v1)
+
+Emitted once per provider call an LLM step makes, **before** the row's single `row_complete`: a cell that retries yields several `row_attempt` records then one `row_complete`; a cell that succeeds first try yields one `row_attempt` then its `row_complete`. Only LLM steps emit it — function steps have no provider attempts. Additive within v1 (issue #134): a consumer that only knows `row_complete` ignores these lines and still applies the row.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `step` | `string` | Step name. |
+| `row` | `int` | 0-based row index. |
+| `attempt` | `int` | 1-based attempt number, counted across both of the step's retry loops (API-error and parse/validation). |
+| `kind` | `string` | `"api"` — the provider call raised (rate limit, timeout, 5xx); or `"parse"` — the call returned and was parsed/validated (whether or not that parse succeeded). |
+| `status` | `string` | Short outcome: `"ok"`, `"rate_limited"`, `"timeout"`, `"api_error"`, `"parse_error"`, `"validation_error"`. |
+| `latency_ms` | `float \| null` | Wall-clock milliseconds for this attempt's provider call. |
+| `backoff_s` | `float \| null` | Seconds slept before the *next* attempt (set on a retrying `api` attempt), else `null`. |
+| `error` | `object \| null` | `{type, msg}` — exception class and message, secret patterns redacted as `***REDACTED***`. `null` on a successful attempt. |
+| `prompt_ref` | `object \| null` | `{off, len}` byte offset + length into the [prompt sidecar](#prompt-sidecar) at `capture >= "prompts"`, else `null`. Bodies are never inlined into the main log. |
+
+A cell that is rate-limited once, then parses cleanly:
+
+```json
+{"v": 1, "t": 0.481, "type": "row_attempt", "step": "classify", "row": 1, "attempt": 1, "kind": "api", "status": "rate_limited", "latency_ms": 12.4, "backoff_s": 0.83, "error": {"type": "LLMAPIError", "msg": "rate limited"}, "prompt_ref": null}
+{"v": 1, "t": 1.402, "type": "row_attempt", "step": "classify", "row": 1, "attempt": 2, "kind": "parse", "status": "ok", "latency_ms": 640.2, "backoff_s": null, "error": null, "prompt_ref": {"off": 1276, "len": 1283}}
+{"v": 1, "t": 1.404, "type": "row_complete", "step": "classify", "row": 1, "key": "Globex", "status": "ok", "from_cache": false, "values": {"grade": "B"}, "error": null, "usage": {"in": 11, "out": 3, "cost": null}, "elapsed_ms": 652.8}
+```
 
 ### `row_complete` — per row, per step
 
@@ -134,6 +158,43 @@ See the [checkpointing guide](caching.md#retrying-failed-cells) for what `retry_
 ### Usage objects and `cost`
 
 Everywhere a `{in, out, cost}` object appears: `in` is prompt tokens, `out` is completion tokens, and `cost` is reserved for dollar cost. Accrue deliberately ships no model pricing data (see `compare.py`), so **current emitters always write `cost: null`** — consumers price the tokens themselves, and must tolerate a number appearing here from a future emitter.
+
+## Capture tiers
+
+`run(..., capture=...)` controls how much of each LLM attempt the log persists. It defaults to `"metadata"`, and both `run()` and `run_async()` accept it.
+
+```python
+result = pipeline.run(data, run_log=True)                     # capture="metadata" (default)
+result = pipeline.run(data, run_log=True, capture="prompts")  # + rendered prompt/response bodies
+```
+
+| Tier | What lands on disk |
+|------|--------------------|
+| `"metadata"` (default) | `row_attempt` records with attempt metadata only — no prompt or response bodies. `prompt_ref` is `null` everywhere and no sidecar file is created. |
+| `"prompts"` | Everything in `metadata`, **plus** each LLM attempt's rendered system/user messages and the raw response/parsed object, written to the [prompt sidecar](#prompt-sidecar) and pointed to by `prompt_ref`. |
+| `"full"` | Intended to also capture raw provider request/response payloads. The built-in provider adapters return a normalised response, so those payloads are not cheaply available — **`"full"` currently behaves exactly like `"prompts"`**. Recorded separately so a future emitter can add them without a version bump. |
+
+**Why the default is metadata.** Enriched rows are frequently PII — names, emails, firmographics — and the rendered prompt embeds the row verbatim, while the response is the model's output about that row. Persisting bodies by default would write that to a file that outlives the process, so it is strictly opt-in. `row_attempt` metadata (timings, statuses, retry shape) carries no row content and is always safe to keep, which is why it is emitted at every tier. When you do opt in, captured bodies pass through the same `_sanitize_secrets` redaction as error text — an `api_key=…` or `sk-…` in a prompt lands as `***REDACTED***` on disk.
+
+## Prompt sidecar
+
+At `capture >= "prompts"`, attempt bodies are appended to a sidecar beside the main log — `<run>.prompts.jsonl` (e.g. `.accrue/runs/<id>.jsonl` → `.accrue/runs/<id>.prompts.jsonl`; `logs/tonight.jsonl` → `logs/tonight.prompts.jsonl`). The main log never inlines a body: it stays scannable, and a 500 MB capture is seek-only.
+
+- **One JSON object per line**, each a body `{"messages": [{role, content}, …], "response": <raw text|null>, "parsed": <object|null>}`. `messages` is what was sent to the provider for that attempt (including the appended correction turns on a parse retry); `response` is the raw completion text; `parsed` is the validated object on a successful attempt, else `null`.
+- **Referenced by byte span.** Each `row_attempt.prompt_ref` is `{"off": <byte offset>, "len": <byte length>}` pointing at the body's JSON (newline excluded). Append-only, flushed per line, created mode `0600` — the same hardening as the main log (bodies are often PII).
+- **Resolving a ref.** `accrue.read_prompt_ref(sidecar_path, off, len)` seeks and parses one body; a record's ref splats straight in:
+
+```python
+from accrue import read_prompt_ref
+
+sidecar = "logs/tonight.prompts.jsonl"
+for rec in records:
+    if rec.get("type") == "row_attempt" and rec["prompt_ref"]:
+        body = read_prompt_ref(sidecar, **rec["prompt_ref"])
+        print(body["messages"], body["response"])
+```
+
+The golden captured fixture for consumers lives at `tests/fixtures/run_captured.jsonl` with its `tests/fixtures/run_captured.prompts.jsonl` sidecar.
 
 ## Example
 

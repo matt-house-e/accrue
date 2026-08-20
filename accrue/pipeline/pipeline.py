@@ -44,6 +44,28 @@ async def _evaluate_predicate(predicate: Callable, row: dict, prior_results: dic
     return bool(result)
 
 
+def _make_attempt_emitter(
+    hooks: EnrichmentHooks,
+) -> Callable[[Any], Any] | None:
+    """Build the per-attempt emitter a step calls once per provider attempt (#134).
+
+    Returns an async callable that dispatches a
+    :class:`~accrue.core.hooks.RowAttemptEvent` through ``on_row_attempt`` via
+    the same ``_fire_hook`` path used for every other lifecycle event — or
+    ``None`` when no ``on_row_attempt`` hook is registered, so the step's retry
+    loop skips attempt bookkeeping entirely.  Awaited inline inside the step's
+    ``run()`` (not a background task) so the attempt records for a row always
+    land before its ``row_complete``.
+    """
+    if hooks.on_row_attempt is None:
+        return None
+
+    async def _emit(event: Any) -> None:
+        await _fire_hook(hooks.on_row_attempt, event)
+
+    return _emit
+
+
 async def _should_skip_row(step: Any, row: dict, prior_results: dict) -> bool:
     """Evaluate run_if/skip_if on a step.  Returns True if row should be skipped."""
     run_if = getattr(step, "run_if", None)
@@ -508,6 +530,7 @@ class Pipeline:
         *,
         run_log: bool | str | Path = False,
         display_key: str | None = None,
+        capture: str = "metadata",
     ) -> PipelineResult:
         """Synchronous entry point — the ONE way to use Accrue.
 
@@ -527,6 +550,12 @@ class Pipeline:
         CWD, or a ``str`` / ``Path`` for an explicit file.  ``display_key``
         names the label column recorded in the log (defaults to the first
         string column).  See ``docs/guides/run-log.md`` for the contract.
+
+        ``capture`` sets how much of each LLM attempt the run log persists:
+        ``"metadata"`` (default) writes attempt metadata only; ``"prompts"``
+        also writes the rendered prompt/response to a ``<run>.prompts.jsonl``
+        sidecar (bodies are often PII, hence off by default); ``"full"``
+        behaves as ``"prompts"`` today.
 
         Raises ``RuntimeError`` if called from inside a running event loop
         (use ``await pipeline.run_async(data)`` in that case).
@@ -553,6 +582,7 @@ class Pipeline:
                 output_file=output_file,
                 run_log=run_log,
                 display_key=display_key,
+                capture=capture,
             )
         )
 
@@ -565,6 +595,7 @@ class Pipeline:
         *,
         run_log: bool | str | Path = False,
         display_key: str | None = None,
+        capture: str = "metadata",
     ) -> PipelineResult:
         """Async entry point — ``await pipeline.run_async(data)``.
 
@@ -589,6 +620,10 @@ class Pipeline:
             display_key: Label column recorded in the run log's
                 ``pipeline_start`` record (for UIs).  Defaults to the first
                 string/object column, else the first column, else null.
+            capture: Run-log capture tier — ``"metadata"`` (default),
+                ``"prompts"``, or ``"full"``.  Controls whether the rendered
+                LLM prompt/response bodies are persisted to the run's
+                ``<run>.prompts.jsonl`` sidecar.  See ``docs/guides/run-log.md``.
 
         Returns:
             A :class:`PipelineResult` containing the enriched data, aggregated
@@ -601,6 +636,7 @@ class Pipeline:
             output_file,
             run_log=run_log,
             display_key=display_key,
+            capture=capture,
         )
 
     def retry_failed(
@@ -730,6 +766,7 @@ class Pipeline:
         *,
         run_log: bool | str | Path,
         display_key: str | None,
+        capture: str = "metadata",
         retry: bool = False,
         rows: list[int] | None = None,
         steps: list[str] | None = None,
@@ -741,6 +778,8 @@ class Pipeline:
         an auto-resume checkpoint (when checkpointing is on), a retry starts
         from the failed cells recorded in that checkpoint.
         """
+        if capture not in ("metadata", "prompts", "full"):
+            raise ValueError(f"capture must be 'metadata', 'prompts', or 'full', got {capture!r}.")
         config = config or EnrichmentConfig()
 
         # Collect field specs from steps
@@ -826,6 +865,7 @@ class Pipeline:
                 segment="retry" if appending else "run",
                 t_offset=t_offset,
                 retry_cells=retry_cells,
+                capture=capture,
             )
             hooks = _merge_hooks(run_logger.hooks, hooks)
         hooks = hooks or EnrichmentHooks()
@@ -872,6 +912,7 @@ class Pipeline:
                 on_partial_checkpoint=on_partial_checkpoint,
                 hooks=hooks,
                 retry_cells=retry_cells,
+                capture=capture,
             )
         finally:
             if cache_manager is not None:
@@ -1209,6 +1250,7 @@ class Pipeline:
         on_partial_checkpoint: Callable[[str, list[dict], int], None] | None = None,
         hooks: EnrichmentHooks | None = None,
         retry_cells: dict[str, list[int]] | None = None,
+        capture: str = "metadata",
     ) -> tuple[list[dict[str, Any]], list[RowError], CostSummary, dict[str, float]]:
         """Execute the pipeline across all rows (column-oriented).
 
@@ -1329,6 +1371,7 @@ class Pipeline:
                             step_values.get(step_name) if step_name in retry_map else None
                         ),
                         skipped_rows=skipped_by_step[step_name],
+                        capture=capture,
                     )
                     for step_name in steps_to_run
                 ]
@@ -1440,6 +1483,7 @@ class Pipeline:
         only_rows: list[int] | None = None,
         seed_results: list[dict[str, Any]] | None = None,
         skipped_rows: set[int] | None = None,
+        capture: str = "metadata",
     ) -> tuple[list[RowError], StepUsage | None, float]:
         """Execute a single step across all rows concurrently.
 
@@ -1488,12 +1532,18 @@ class Pipeline:
                 only_rows=only_rows,
                 seed_results=seed_results,
                 skipped_rows=skipped_rows,
+                capture=capture,
             )
 
         from ..core.cache import _compute_step_cache_key
 
         hooks = hooks or EnrichmentHooks()
         step_start = _time.monotonic()
+
+        # Per-attempt lifecycle emitter (#134): a step fires RowAttemptEvents
+        # through this while it retries.  ``None`` when nothing listens, so the
+        # step's run() short-circuits and a metadata run pays nothing.
+        attempt_emitter = _make_attempt_emitter(hooks)
 
         # Slice fields for this step (internal __ fields won't be in all_fields — that's fine)
         step_fields = {f: all_fields[f] for f in step.fields if f in all_fields}
@@ -1558,6 +1608,9 @@ class Pipeline:
                         fields=step_fields,
                         prior_results=prior,
                         config=config,
+                        row_index=idx,
+                        capture=capture,
+                        on_attempt=attempt_emitter,
                     )
 
                     result = await step.run(ctx)
@@ -1805,6 +1858,7 @@ class Pipeline:
         only_rows: list[int] | None = None,
         seed_results: list[dict[str, Any]] | None = None,
         skipped_rows: set[int] | None = None,
+        capture: str = "metadata",
     ) -> tuple[list[RowError], StepUsage | None, float]:
         """Execute a batch-eligible LLMStep via the provider Batch API.
 
@@ -1827,6 +1881,10 @@ class Pipeline:
 
         hooks = hooks or EnrichmentHooks()
         step_start = _time.monotonic()
+
+        # Attempt emitter for the realtime fallback path (#134); the batch API
+        # itself has no per-attempt retry loop to instrument.
+        attempt_emitter = _make_attempt_emitter(hooks)
 
         step_fields = {f: all_fields[f] for f in step.fields if f in all_fields}
 
@@ -2105,6 +2163,9 @@ class Pipeline:
                 fields=step_fields,
                 prior_results=prior,
                 config=config,
+                row_index=idx,
+                capture=capture,
+                on_attempt=attempt_emitter,
             )
 
             try:

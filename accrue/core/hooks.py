@@ -85,6 +85,37 @@ class RowCompleteEvent:
     elapsed_ms: float | None = None  # wall-clock ms for this row, else None
 
 
+@dataclass(frozen=True)
+class RowAttemptEvent:
+    """Fired once per LLM attempt, inside ``LLMStep.run()``'s retry loops (#134).
+
+    An LLM cell that retries emits one of these per attempt — before its single
+    :class:`RowCompleteEvent`.  A cell that succeeds on the first try emits one
+    (``kind="parse"``, ``status="ok"``); a 3-try cell emits three.
+
+    ``kind`` names which retry loop the attempt belongs to: ``"api"`` for the
+    API-error loop (the provider call raised :class:`LLMAPIError`), ``"parse"``
+    for the parse/validation loop (the call returned and we tried to parse it,
+    whether that parse succeeded or not).
+
+    ``body`` carries the rendered request/response for the attempt when the run
+    is at ``capture>=prompts``; it is ``None`` at the default ``metadata`` tier.
+    The run logger writes it to the prompt sidecar and the projected
+    ``row_attempt`` record points into that file via ``prompt_ref`` — the body
+    is never inlined into the main log.
+    """
+
+    step_name: str
+    row_index: int
+    attempt: int  # 1-based, counted across both loops
+    kind: str  # "api" | "parse"
+    status: str  # "ok" | "rate_limited" | "timeout" | "validation_error" | ...
+    latency_ms: float | None  # this attempt's provider-call latency
+    backoff_s: float | None  # sleep before the NEXT attempt, else None
+    error: BaseException | None = None
+    body: dict[str, Any] | None = None  # rendered prompt/response, capture>=prompts
+
+
 # ---------------------------------------------------------------------------
 # EnrichmentHooks container
 # ---------------------------------------------------------------------------
@@ -103,6 +134,7 @@ class EnrichmentHooks:
     on_step_start: Callable[[StepStartEvent], Any] | None = None
     on_step_end: Callable[[StepEndEvent], Any] | None = None
     on_row_complete: Callable[[RowCompleteEvent], Any] | None = None
+    on_row_attempt: Callable[[RowAttemptEvent], Any] | None = None
 
 
 # ---------------------------------------------------------------------------
