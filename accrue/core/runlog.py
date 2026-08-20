@@ -94,6 +94,36 @@ def default_display_key(data: pd.DataFrame | list[dict[str, Any]]) -> str | None
     return keys[0]
 
 
+def resolve_row_keys(
+    data: pd.DataFrame | list[dict[str, Any]] | None,
+    display_key: str | None,
+) -> list[str | None]:
+    """Per-row display values: ``str()`` of each row's *display_key* column.
+
+    Returns one entry per input row — ``None`` where the value is missing
+    or null — or an empty list when there is no data / no display key to
+    resolve (``row_complete.key`` is then ``null`` for every row).
+    """
+    if data is None or display_key is None:
+        return []
+
+    def to_key(value: Any) -> str | None:
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass  # non-scalar (list/array) value — keep its str() form
+        return str(value)
+
+    if isinstance(data, pd.DataFrame):
+        if display_key not in data.columns:
+            return []
+        return [to_key(value) for value in data[display_key]]
+    return [to_key(row.get(display_key)) for row in data]
+
+
 def _merge_hooks(primary: EnrichmentHooks, extra: EnrichmentHooks | None) -> EnrichmentHooks:
     """Combine two hook containers so both sets of callables fire.
 
@@ -160,6 +190,10 @@ class JsonlRunLogger:
             it the ``pipeline_start`` ``steps`` entries carry ``null``
             level/mode/model (per-step ``step_start`` records still carry
             level and mode).
+        data: The input rows about to run.  Optional, but without it every
+            ``row_complete`` carries ``key: null`` — the log holds only step
+            *outputs*, so the display-key value can't be recovered from it
+            otherwise.
     """
 
     def __init__(
@@ -169,10 +203,12 @@ class JsonlRunLogger:
         run_id: str | None = None,
         display_key: str | None = None,
         pipeline: Pipeline | None = None,
+        data: pd.DataFrame | list[dict[str, Any]] | None = None,
     ) -> None:
         self.path = Path(path)
         self.run_id = run_id or new_run_id()
         self.display_key = display_key
+        self._row_keys = resolve_row_keys(data, display_key)
         self._pipeline = pipeline
         self._t0: float | None = None
         self._fh: Any = None
@@ -272,11 +308,19 @@ class JsonlRunLogger:
         if event.error is None and event.values:
             values = event.values
 
+        # The row's display value, resolved once from the input data at
+        # construction time (additive within v1 — the log otherwise carries
+        # only step outputs, so consumers could never label rows).
+        key = None
+        if 0 <= event.row_index < len(self._row_keys):
+            key = self._row_keys[event.row_index]
+
         self._emit(
             "row_complete",
             {
                 "step": event.step_name,
                 "row": event.row_index,
+                "key": key,
                 "status": status,
                 "from_cache": event.from_cache,
                 "values": values,

@@ -594,6 +594,7 @@ class Pipeline:
                 run_id=run_id,
                 display_key=display_key if display_key is not None else default_display_key(data),
                 pipeline=self,
+                data=data,
             )
             hooks = _merge_hooks(run_logger.hooks, hooks)
         hooks = hooks or EnrichmentHooks()

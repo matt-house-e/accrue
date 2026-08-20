@@ -27,11 +27,11 @@ Both `run()` and `run_async()` accept the same keywords.
 ```python
 from accrue import JsonlRunLogger
 
-logger = JsonlRunLogger("my_run.jsonl", pipeline=pipeline, display_key="company")
+logger = JsonlRunLogger("my_run.jsonl", pipeline=pipeline, display_key="company", data=data)
 result = pipeline.run(data, hooks=logger.hooks)
 ```
 
-Pass `pipeline=` so the `pipeline_start` record can carry per-step level/mode/model; without it those entries are `null`.
+Pass `pipeline=` so the `pipeline_start` record can carry per-step level/mode/model; without it those entries are `null`. Pass `data=` so each `row_complete` can carry the row's display value as `key`; without it `key` is `null` (the log holds only step outputs, so the value can't be recovered later).
 
 ## Envelope
 
@@ -75,6 +75,7 @@ Every line is a JSON object carrying the same three envelope fields, followed by
 |-------|------|-------------|
 | `step` | `string` | Step name. |
 | `row` | `int` | 0-based row index. |
+| `key` | `string \| null` | The row's display value: `str()` of the row's `display_key` column in the **input** data, resolved once per row. `null` when it can't be resolved — no display key, column absent, or a null value. Additive within v1: the log otherwise carries only step *outputs*, so without this field row labels degrade to "row *n*". |
 | `status` | `string` | `"ok"`, `"error"`, or `"skipped"` (`run_if`/`skip_if`). |
 | `from_cache` | `bool` | Result served from the SQLite cache. |
 | `values` | `object \| null` | The row's output values, internal `__`-prefixed keys included — consumers filter those; the log stays complete. Non-JSON values (datetimes, etc.) degrade to strings. `null` when the row errored or produced no values; skipped rows carry their skip-default values. |
@@ -112,23 +113,23 @@ Everywhere a `{in, out, cost}` object appears: `in` is prompt tokens, `out` is c
 A 12-row, 3-step run — one row errors in `score`, one is skipped in `flag` (abridged from `tests/fixtures/run_small.jsonl`):
 
 ```json
-{"v": 1, "t": 0.0, "type": "pipeline_start", "run_id": "2026-08-19-205858", "started_at": "2026-08-19T19:58:58.674860+00:00", "num_rows": 12, "display_key": "company", "steps": [{"name": "normalize", "level": 0, "mode": "realtime", "model": null}, {"name": "score", "level": 1, "mode": "realtime", "model": null}, {"name": "flag", "level": 2, "mode": "realtime", "model": null}], "plan": null}
-{"v": 1, "t": 0.002629, "type": "step_start", "step": "normalize", "level": 0, "mode": "realtime", "num_rows": 12}
-{"v": 1, "t": 0.003015, "type": "row_complete", "step": "normalize", "row": 0, "status": "ok", "from_cache": false, "values": {"name_upper": "COMPANY-00"}, "error": null, "usage": null, "elapsed_ms": 0.313}
-{"v": 1, "t": 0.006131, "type": "step_end", "step": "normalize", "num_errors": 0, "usage": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.003384, "batch_id": null}
-{"v": 1, "t": 0.006194, "type": "step_start", "step": "score", "level": 1, "mode": "realtime", "num_rows": 12}
-{"v": 1, "t": 0.008299, "type": "row_complete", "step": "score", "row": 7, "status": "error", "from_cache": false, "values": null, "error": {"type": "ValueError", "msg": "cannot score company-07"}, "usage": null, "elapsed_ms": 0.198}
-{"v": 1, "t": 0.009151, "type": "step_end", "step": "score", "num_errors": 1, "usage": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.002886, "batch_id": null}
-{"v": 1, "t": 0.009208, "type": "step_start", "step": "flag", "level": 2, "mode": "realtime", "num_rows": 12}
-{"v": 1, "t": 0.010232, "type": "row_complete", "step": "flag", "row": 3, "status": "skipped", "from_cache": false, "values": {"flagged": null}, "error": null, "usage": null, "elapsed_ms": 0.009}
-{"v": 1, "t": 0.012334, "type": "step_end", "step": "flag", "num_errors": 0, "usage": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.003052, "batch_id": null}
-{"v": 1, "t": 0.01241, "type": "pipeline_end", "num_rows": 12, "total_errors": 1, "cost": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.012233}
+{"v": 1, "t": 0.0, "type": "pipeline_start", "run_id": "2026-08-20-080226", "started_at": "2026-08-20T07:02:26.020167+00:00", "num_rows": 12, "display_key": "company", "steps": [{"name": "normalize", "level": 0, "mode": "realtime", "model": null}, {"name": "score", "level": 1, "mode": "realtime", "model": null}, {"name": "flag", "level": 2, "mode": "realtime", "model": null}], "plan": null}
+{"v": 1, "t": 0.00243, "type": "step_start", "step": "normalize", "level": 0, "mode": "realtime", "num_rows": 12}
+{"v": 1, "t": 0.003022, "type": "row_complete", "step": "normalize", "row": 0, "key": "company-00", "status": "ok", "from_cache": false, "values": {"name_upper": "COMPANY-00"}, "error": null, "usage": null, "elapsed_ms": 0.324}
+{"v": 1, "t": 0.005766, "type": "step_end", "step": "normalize", "num_errors": 0, "usage": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.003241, "batch_id": null}
+{"v": 1, "t": 0.005797, "type": "step_start", "step": "score", "level": 1, "mode": "realtime", "num_rows": 12}
+{"v": 1, "t": 0.007665, "type": "row_complete", "step": "score", "row": 7, "key": "company-07", "status": "error", "from_cache": false, "values": null, "error": {"type": "ValueError", "msg": "cannot score company-07"}, "usage": null, "elapsed_ms": 0.214}
+{"v": 1, "t": 0.008748, "type": "step_end", "step": "score", "num_errors": 1, "usage": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.002896, "batch_id": null}
+{"v": 1, "t": 0.008775, "type": "step_start", "step": "flag", "level": 2, "mode": "realtime", "num_rows": 12}
+{"v": 1, "t": 0.00968, "type": "row_complete", "step": "flag", "row": 3, "key": "company-03", "status": "skipped", "from_cache": false, "values": {"flagged": null}, "error": null, "usage": null, "elapsed_ms": 0.007}
+{"v": 1, "t": 0.011343, "type": "step_end", "step": "flag", "num_errors": 0, "usage": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.002512, "batch_id": null}
+{"v": 1, "t": 0.011385, "type": "pipeline_end", "num_rows": 12, "total_errors": 1, "cost": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.011243}
 ```
 
 An LLM row looks like:
 
 ```json
-{"v": 1, "t": 3.412, "type": "row_complete", "step": "analyze", "row": 4, "status": "ok", "from_cache": false, "values": {"market_size": 12.5, "risk_level": "Low"}, "error": null, "usage": {"in": 512, "out": 64, "cost": null}, "elapsed_ms": 1841.2}
+{"v": 1, "t": 3.412, "type": "row_complete", "step": "analyze", "row": 4, "key": "Initech", "status": "ok", "from_cache": false, "values": {"market_size": 12.5, "risk_level": "Low"}, "error": null, "usage": {"in": 512, "out": 64, "cost": null}, "elapsed_ms": 1841.2}
 ```
 
 ## Guarantees
