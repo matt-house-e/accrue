@@ -6,7 +6,7 @@ A run log is an append-only JSONL file describing one pipeline run, one JSON obj
 
 ```python
 result = pipeline.run(data, run_log=True)
-# -> .accrue/runs/2026-08-19-143512.jsonl  (relative to the CWD)
+# -> .accrue/runs/2026-08-19-143512-4f1c9a.jsonl  (relative to the CWD)
 
 result = pipeline.run(data, run_log="logs/tonight.jsonl")   # explicit path
 result = pipeline.run(data, run_log=True, display_key="company_name")
@@ -122,7 +122,7 @@ Fires even when the run errors.
 
 ```json
 {"v": 1, "t": 0.011385, "type": "pipeline_end", "num_rows": 12, "total_errors": 1, "cost": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.011243}
-{"v": 1, "t": 0.011385, "type": "retry_start", "run_id": "2026-08-20-080226", "started_at": "2026-08-20T07:14:02.881904+00:00", "num_rows": 12, "num_cells": 1, "cells": [{"step": "score", "row": 7}]}
+{"v": 1, "t": 0.011385, "type": "retry_start", "run_id": "2026-08-20-080226-4f1c9a", "started_at": "2026-08-20T07:14:02.881904+00:00", "num_rows": 12, "num_cells": 1, "cells": [{"step": "score", "row": 7}]}
 {"v": 1, "t": 0.011502, "type": "step_start", "step": "score", "level": 1, "mode": "realtime", "num_rows": 1}
 {"v": 1, "t": 0.012219, "type": "row_complete", "step": "score", "row": 7, "key": "company-07", "status": "ok", "from_cache": false, "values": {"score": 70}, "error": null, "usage": null, "elapsed_ms": 0.281}
 {"v": 1, "t": 0.012884, "type": "step_end", "step": "score", "num_errors": 0, "usage": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.001204, "batch_id": null}
@@ -140,7 +140,7 @@ Everywhere a `{in, out, cost}` object appears: `in` is prompt tokens, `out` is c
 A 12-row, 3-step run — one row errors in `score`, one is skipped in `flag` (abridged from `tests/fixtures/run_small.jsonl`):
 
 ```json
-{"v": 1, "t": 0.0, "type": "pipeline_start", "run_id": "2026-08-20-080226", "started_at": "2026-08-20T07:02:26.020167+00:00", "num_rows": 12, "display_key": "company", "steps": [{"name": "normalize", "level": 0, "mode": "realtime", "model": null}, {"name": "score", "level": 1, "mode": "realtime", "model": null}, {"name": "flag", "level": 2, "mode": "realtime", "model": null}], "plan": null}
+{"v": 1, "t": 0.0, "type": "pipeline_start", "run_id": "2026-08-20-080226-4f1c9a", "started_at": "2026-08-20T07:02:26.020167+00:00", "num_rows": 12, "display_key": "company", "steps": [{"name": "normalize", "level": 0, "mode": "realtime", "model": null}, {"name": "score", "level": 1, "mode": "realtime", "model": null}, {"name": "flag", "level": 2, "mode": "realtime", "model": null}], "plan": null}
 {"v": 1, "t": 0.00243, "type": "step_start", "step": "normalize", "level": 0, "mode": "realtime", "num_rows": 12}
 {"v": 1, "t": 0.003022, "type": "row_complete", "step": "normalize", "row": 0, "key": "company-00", "status": "ok", "from_cache": false, "values": {"name_upper": "COMPANY-00"}, "error": null, "usage": null, "elapsed_ms": 0.324}
 {"v": 1, "t": 0.005766, "type": "step_end", "step": "normalize", "num_errors": 0, "usage": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.003241, "batch_id": null}
