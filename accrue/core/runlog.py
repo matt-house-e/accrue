@@ -18,8 +18,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import math
+import os
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -27,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 
 from ..utils.logger import get_logger
+from .exceptions import _sanitize_secrets
 from .hooks import (
     EnrichmentHooks,
     PipelineEndEvent,
@@ -49,9 +53,39 @@ SCHEMA_VERSION = 1
 DEFAULT_RUN_DIR = Path(".accrue") / "runs"
 
 
+#: Nesting depth the NaN/inf scrub walks before giving up.  A self-referential
+#: structure hits this, falls through to ``json.dumps``, and is caught there.
+_MAX_SCRUB_DEPTH = 20
+
+
 def new_run_id() -> str:
-    """Local-timestamp run id: ``YYYY-MM-DD-HHMMSS``."""
-    return datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    """UTC-timestamp run id with a random suffix: ``YYYY-MM-DD-HHMMSS-xxxxxx``.
+
+    The timestamp is UTC so it agrees with the ``started_at`` field beside it
+    in ``pipeline_start``.  The suffix is what makes the id an id: whole-second
+    local timestamps collided for runs started in the same second, which under
+    ``run_log=True`` meant two runs interleaved into one file under one id.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+    return f"{stamp}-{uuid.uuid4().hex[:6]}"
+
+
+def _replace_non_finite(value: Any, depth: int = 0) -> Any:
+    """Recursively replace NaN / inf with ``None``.
+
+    ``json.dumps`` writes bare ``NaN`` / ``Infinity`` literals by default,
+    which are not JSON — a single such value makes the line unparseable for
+    every strict reader downstream.  A null is the honest encoding.
+    """
+    if depth > _MAX_SCRUB_DEPTH:
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _replace_non_finite(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_replace_non_finite(v, depth + 1) for v in value]
+    return value
 
 
 def resolve_run_log_path(run_log: bool | str | Path, run_id: str) -> Path:
@@ -289,7 +323,14 @@ class JsonlRunLogger:
     # -- writing ---------------------------------------------------------
 
     def _emit(self, record_type: str, payload: dict[str, Any]) -> None:
-        """Append one record, envelope first, and flush."""
+        """Append one record, envelope first, and flush.
+
+        A record that cannot be encoded is downgraded, never dropped: every
+        row of every executed step gets exactly one ``row_complete``, and that
+        guarantee has to survive user values JSON cannot represent (non-string
+        dict keys, reference cycles).  Hook exceptions are swallowed upstream,
+        so raising here would silently lose the line.
+        """
         if self._t0 is None:  # defensive: events before pipeline_start
             self._t0 = time.monotonic()
         record: dict[str, Any] = {
@@ -298,13 +339,47 @@ class JsonlRunLogger:
             "type": record_type,
         }
         record.update(payload)
-        line = json.dumps(record, ensure_ascii=False, default=str)
+        line = self._encode(record)
         with self._lock:
             if self._fh is None or self._fh.closed:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
-                self._fh = self.path.open("a", encoding="utf-8")
+                # Run logs carry row values and error text; keep them
+                # owner-only rather than inheriting the 0644 umask default.
+                fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                self._fh = os.fdopen(fd, "a", encoding="utf-8")
+                try:
+                    os.chmod(self.path, 0o600)
+                except (OSError, NotImplementedError):  # pragma: no cover — platform-dependent
+                    pass
             self._fh.write(line + "\n")
             self._fh.flush()
+
+    @staticmethod
+    def _encode(record: dict[str, Any]) -> str:
+        """Serialize one record to a single JSON line that always parses."""
+        try:
+            return json.dumps(record, ensure_ascii=False, default=str, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "Run-log %s record could not be serialized (%s: %s); emitting it with "
+                "its values replaced by a placeholder.",
+                record.get("type"),
+                type(exc).__name__,
+                exc,
+            )
+        degraded = dict(record)
+        degraded["values"] = {"__unserializable__": True}
+        try:
+            return json.dumps(degraded, ensure_ascii=False, default=str, allow_nan=False)
+        except (TypeError, ValueError):  # pragma: no cover — defensive
+            # Last resort: keep the envelope and whatever scalars identify the
+            # record, so a consumer still sees the row complete.
+            minimal = {
+                str(k): (v if isinstance(v, (str, bool, int)) or v is None else None)
+                for k, v in degraded.items()
+            }
+            minimal["values"] = {"__unserializable__": True}
+            return json.dumps(minimal, ensure_ascii=False, default=str, allow_nan=False)
 
     def close(self) -> None:
         """Close the file handle (re-opened automatically if more events arrive)."""
@@ -368,9 +443,15 @@ class JsonlRunLogger:
         else:
             status = "ok"
 
+        # Error text goes through the same redaction the checkpoint path uses:
+        # a provider error can quote the request headers, and the log outlives
+        # the process.
         error = None
         if event.error is not None:
-            error = {"type": type(event.error).__name__, "msg": str(event.error)}
+            error = {
+                "type": type(event.error).__name__,
+                "msg": _sanitize_secrets(str(event.error)),
+            }
 
         usage = None
         if event.usage is not None:
@@ -384,10 +465,11 @@ class JsonlRunLogger:
         # filter them; the log stays complete.  Null for errored rows (the
         # event carries an all-None placeholder, not real output) and for
         # rows with no values.  Non-JSON types degrade to strings via the
-        # ``default=str`` in _emit rather than crashing the logger.
+        # ``default=str`` in _emit rather than crashing the logger; NaN/inf
+        # become null, since a bare ``NaN`` literal is not JSON.
         values = None
         if event.error is None and event.values:
-            values = event.values
+            values = _replace_non_finite(event.values)
 
         # The row's display value, resolved once from the input data at
         # construction time (additive within v1 — the log otherwise carries

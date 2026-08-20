@@ -12,8 +12,8 @@ result = pipeline.run(data, run_log="logs/tonight.jsonl")   # explicit path
 result = pipeline.run(data, run_log=True, display_key="company_name")
 ```
 
-- `run_log=True` writes to `.accrue/runs/<run_id>.jsonl` under the current working directory. `run_id` is a local timestamp, `YYYY-MM-DD-HHMMSS`.
-- `run_log=<str | Path>` writes to exactly that file. Parent directories are created.
+- `run_log=True` writes to `.accrue/runs/<run_id>.jsonl` under the current working directory. `run_id` is a UTC timestamp plus a short random suffix, `YYYY-MM-DD-HHMMSS-xxxxxx` — treat it as opaque. (The suffix is what keeps two runs started in the same second from sharing one id, and one file.)
+- `run_log=<str | Path>` writes to exactly that file. Parent directories are created. Log files are created mode `0600`: they carry your row values and error text.
 - `display_key` names the column a UI should use to label rows. If omitted, it defaults to the first column with string/object dtype, else the first column, else `null`.
 - The returned `PipelineResult` is unchanged; the log is a side channel.
 - User `hooks=` still fire — the log's hooks are merged with yours, not substituted.
@@ -53,7 +53,7 @@ Every line is a JSON object carrying the same three envelope fields, followed by
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `run_id` | `string` | Local-timestamp id, `YYYY-MM-DD-HHMMSS`. Matches the default filename. |
+| `run_id` | `string` | Opaque run id, `YYYY-MM-DD-HHMMSS-xxxxxx` (UTC timestamp + random suffix). Matches the default filename. |
 | `started_at` | `string` | Wall-clock start, ISO-8601 UTC. |
 | `num_rows` | `int` | Rows in the input data. |
 | `display_key` | `string \| null` | Label column for UIs (see above). |
@@ -78,8 +78,8 @@ Every line is a JSON object carrying the same three envelope fields, followed by
 | `key` | `string \| null` | The row's display value: `str()` of the row's `display_key` column in the **input** data, resolved once per row. `null` when it can't be resolved — no display key, column absent, or a null value. Additive within v1: the log otherwise carries only step *outputs*, so without this field row labels degrade to "row *n*". |
 | `status` | `string` | `"ok"`, `"error"`, or `"skipped"` (`run_if`/`skip_if`). |
 | `from_cache` | `bool` | Result served from the SQLite cache. |
-| `values` | `object \| null` | The row's output values, internal `__`-prefixed keys included — consumers filter those; the log stays complete. Non-JSON values (datetimes, etc.) degrade to strings. `null` when the row errored or produced no values; skipped rows carry their skip-default values. |
-| `error` | `object \| null` | `{type, msg}` — exception class name and message. `null` unless `status` is `"error"`. |
+| `values` | `object \| null` | The row's output values, internal `__`-prefixed keys included — consumers filter those; the log stays complete. Non-JSON values (datetimes, etc.) degrade to strings; `NaN` / `±inf` become `null` (a bare `NaN` literal is not JSON). A value that cannot be encoded at all — non-string dict keys, a reference cycle — is replaced wholesale by `{"__unserializable__": true}` so the record is still emitted. `null` when the row errored or produced no values; skipped rows carry their skip-default values. |
+| `error` | `object \| null` | `{type, msg}` — exception class name and message, with known secret patterns redacted as `***REDACTED***`. `null` unless `status` is `"error"`. |
 | `usage` | `object \| null` | `{in, out, cost}` token usage for this row. `null` when unavailable: function steps, cache hits, skipped rows, and batch mode. |
 | `elapsed_ms` | `float \| null` | Wall-clock milliseconds for this row (excludes queue/semaphore wait). `null` in batch mode. |
 
@@ -161,12 +161,14 @@ An LLM row looks like:
 
 ## Guarantees
 
-- **Append-only.** The file is opened in append mode and never truncated; pointing `run_log` at an existing file adds to it.
+- **Append-only.** The file is opened in append mode and never truncated; pointing `run_log` at an existing file adds to it. A second run appended that way opens its own `pipeline_start` … `pipeline_end` frame with its own `run_id`, and its `t` continues from the file's last `t` rather than restarting at zero — `t` is a within-file ordering clock, not wall-clock elapsed. One file per run is still the recommended layout; readers that assume a single run per file should key on `run_id`.
 - **Flush per line.** Every record is flushed as soon as it is written. A crashed or killed run leaves a valid prefix of the stream — the tail is always complete lines, so `tail -f` and crash-recovery readers work.
 - **Ordering.** `pipeline_start` is first; `pipeline_end` closes the run and fires even on error. Each step's `step_start` precedes all of its `row_complete` records, which precede its `step_end`. Steps at the same DAG level run in parallel, so *their* records may interleave; `t` stays non-decreasing throughout.
 - **Segments.** A file holds one run, optionally followed by one `retry_start` … `retry_end` segment per `retry_failed()` call, each carrying the run's original `run_id`. Nothing follows a `pipeline_end` except retry segments.
-- **Completeness.** Every row of every executed step gets exactly one `row_complete` — including cached, skipped, and errored rows. In a retry segment, "executed" means the retried cells: a row served from the checkpoint produces no record, and its state is whatever the earlier segment last said.
-- **Never crashes the run.** The logger is an ordinary hooks consumer; hook errors are caught and logged, and non-JSON values degrade to strings rather than raise.
+- **Completeness.** Every row of every executed step gets exactly one `row_complete` — including cached, skipped, and errored rows, and including rows whose values cannot be encoded (those carry the `__unserializable__` placeholder). In a retry segment, "executed" means the retried cells: a row served from the checkpoint produces no record, and its state is whatever the earlier segment last said.
+  The same applies to a run that **auto-resumed from a checkpoint**: steps served from the checkpoint are never executed, so they emit no `step_start` / `row_complete` / `step_end` at all. Such a log covers only the steps (and failed cells) that actually ran — a consumer reading it alone sees partial coverage of the dataset, not a complete run.
+- **Never crashes the run.** The logger is an ordinary hooks consumer; hook errors are caught and logged, and values JSON cannot represent degrade (to strings, to `null`, or to the `__unserializable__` placeholder) rather than raise.
+- **Every line is strict JSON.** No `NaN` / `Infinity` literals, so strict parsers — `JSON.parse`, `serde_json`, `jq` — read the file without special-casing.
 
 ## Versioning policy
 

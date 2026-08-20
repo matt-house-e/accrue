@@ -13,6 +13,8 @@ from typing import Any
 
 _SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    # Google AI Studio / Gemini keys (GOOGLE_API_KEY, GEMINI_API_KEY).
+    re.compile(r"AIza[0-9A-Za-z_-]{35}"),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+"),
     re.compile(r"(?i)authorization\s*:\s*\S+"),
     re.compile(r"(?i)api[_-]?key\s*[:=]\s*\S+"),
