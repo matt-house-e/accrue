@@ -8,12 +8,28 @@ import json
 import pandas as pd
 import pytest
 
+from accrue.core.checkpoint import derive_data_identifier
 from accrue.core.config import EnrichmentConfig
 from accrue.core.enricher import Enricher
 from accrue.pipeline.pipeline import Pipeline
 from accrue.steps.function import FunctionStep
 
 # -- helpers -----------------------------------------------------------------
+
+
+def _checkpoint_path(tmp_path, df: pd.DataFrame, category: str = "_default"):
+    """The file the runner will look for when enriching *df*.
+
+    Mirrors ``Enricher.run_async`` (identifier) and
+    ``CheckpointManager._get_path`` (file name).  The identifier covers the
+    rows' *content*, so it has to be derived from the real DataFrame rather
+    than hand-built from a column list.
+    """
+    rows = df.astype(object).where(pd.notna(df), None).to_dict(orient="records")
+    data_id = derive_data_identifier(list(df.columns), len(df), rows)
+    safe_id = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in data_id)
+    safe_cat = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in category)
+    return tmp_path / f"{safe_id}_{safe_cat}_checkpoint.json"
 
 
 def _identity_step(name: str, fields: list[str], **kwargs) -> FunctionStep:
@@ -277,21 +293,11 @@ class TestCheckpointResume:
             },
         }
 
-        # Determine the checkpoint path (mirror the manager's logic — sha256-based)
-        import hashlib
-        import json as _json
-
-        identifier_source = _json.dumps(
-            {"columns": ["x"], "rows": 2}, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        data_id = f"df_{hashlib.sha256(identifier_source).hexdigest()[:16]}"
-        safe_id = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in data_id)
-        cp_path = tmp_path / f"{safe_id}__default_checkpoint.json"
-        with open(cp_path, "w") as f:
+        df = pd.DataFrame({"x": [1, 2]})
+        with open(_checkpoint_path(tmp_path, df), "w") as f:
             json.dump(checkpoint_data, f)
 
         enricher = Enricher(pipeline, config=config)
-        df = pd.DataFrame({"x": [1, 2]})
         result = enricher.run(df)
 
         # step1 should NOT have been called (it was checkpointed)
@@ -323,25 +329,21 @@ class TestCheckpointResume:
     @staticmethod
     def _write_checkpoint(
         tmp_path,
-        df_columns,
+        df,
         total_rows,
         fields_dict,
         completed_steps,
         step_results,
         category="_default",
     ):
-        """Write a checkpoint file using the same path logic as CheckpointManager._get_path."""
-        import hashlib
+        """Write a checkpoint file where the run over *df* will look for it.
+
+        ``total_rows`` describes the *payload* and may deliberately disagree
+        with ``len(df)`` — that is what the strict-validation tests exercise.
+        """
         import json as _json
 
-        identifier_source = _json.dumps(
-            {"columns": df_columns, "rows": total_rows}, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        data_id = f"df_{hashlib.sha256(identifier_source).hexdigest()[:16]}"
-        # Mirror CheckpointManager._get_path exactly
-        safe_id = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in data_id)
-        safe_cat = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in category)
-        cp_path = tmp_path / f"{safe_id}_{safe_cat}_checkpoint.json"
+        cp_path = _checkpoint_path(tmp_path, df, category)
         checkpoint_data = {
             "timestamp": 1000.0,
             "category": category,
@@ -368,9 +370,10 @@ class TestCheckpointResume:
         pipeline = Pipeline([FunctionStep("a_v2", fn=fn, fields=["field1"])])
 
         # Write checkpoint that has step 'a' completed (same fields, same rows)
+        df = pd.DataFrame({"x": [1, 2]})
         self._write_checkpoint(
             tmp_path,
-            df_columns=["x"],
+            df,
             total_rows=2,
             fields_dict={"field1": {}},
             completed_steps=["a"],
@@ -409,9 +412,10 @@ class TestCheckpointResume:
         pipeline = Pipeline([FunctionStep("s", fn=fn, fields=["out"])])
 
         # Write checkpoint with 3 rows, but we'll run with 2
+        df = pd.DataFrame({"x": [1, 2]})  # 2 rows
         self._write_checkpoint(
             tmp_path,
-            df_columns=["x"],
+            df,
             total_rows=3,  # mismatch
             fields_dict={"out": {}},
             completed_steps=["s"],
@@ -442,9 +446,10 @@ class TestCheckpointResume:
         pipeline = Pipeline([FunctionStep("s", fn=fn, fields=["new_field"])])
 
         # Write checkpoint with different fields
+        df = pd.DataFrame({"x": [1, 2]})
         self._write_checkpoint(
             tmp_path,
-            df_columns=["x"],
+            df,
             total_rows=2,
             fields_dict={"old_field": {}},  # mismatch
             completed_steps=["s"],
@@ -483,9 +488,10 @@ class TestCheckpointResume:
             ]
         )
 
+        df = pd.DataFrame({"x": [1, 2]})
         self._write_checkpoint(
             tmp_path,
-            df_columns=["x"],
+            df,
             total_rows=2,
             fields_dict={"f1": {}, "f2": {}},
             completed_steps=["step1"],
@@ -520,19 +526,11 @@ class TestStableDataIdentifier:
         (PYTHONHASHSEED), so checkpoints from one run couldn't be resumed in
         another. The sha256-based replacement is deterministic.
         """
-        import hashlib
-        import json as _json
-
         df = pd.DataFrame({"col_a": [1, 2, 3], "col_b": ["x", "y", "z"]})
 
-        # Compute the identifier the same way enricher.py does.
         def _compute_id(df_):
-            source = _json.dumps(
-                {"columns": list(df_.columns), "rows": len(df_)},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            return f"df_{hashlib.sha256(source).hexdigest()[:16]}"
+            rows = df_.astype(object).where(pd.notna(df_), None).to_dict(orient="records")
+            return derive_data_identifier(list(df_.columns), len(df_), rows)
 
         id1 = _compute_id(df)
         id2 = _compute_id(df.copy())

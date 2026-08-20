@@ -106,7 +106,12 @@ def _load_log(path: Path) -> list[dict]:
 
 class TestRetryReExecutesOnlyFailedCells:
     def test_retry_invokes_exactly_the_failed_cells(self, tmp_path):
-        """N of M rows fail on a middle step; the retry costs exactly N calls."""
+        """N of M rows fail on a middle step; the retry costs N calls per affected cell.
+
+        "Affected" includes the downstream cells that consumed the poisoned
+        value: healing ``score`` for a row re-runs ``flag`` for that row too.
+        Rows that never failed are still untouched.
+        """
         tracker = Tracker(failing={1, 3})
         pipeline = _pipeline(tracker)
         data = _rows(5)
@@ -128,20 +133,23 @@ class TestRetryReExecutesOnlyFailedCells:
 
         healed = pipeline.retry_failed(data, config=config)
 
-        # Exactly N step executions, and only for the failed rows.
+        # Exactly the failed cells, and only for the failed rows.
         assert tracker.count("score") == 2
         assert tracker.rows("score") == [1, 3]
-        # Rows that succeeded were served from the checkpoint, un-invoked.
+        # Upstream cells were served from the checkpoint, un-invoked.
         assert tracker.count("normalize") == 0
-        assert tracker.count("flag") == 0
+        # Downstream cells of the healed rows re-run — and only those rows.
+        assert tracker.rows("flag") == [1, 3]
 
         assert healed.errors == []
         assert [row["score"] for row in healed.data] == [0, 10, 20, 30, 40]
         # Untouched cells kept their first-run values.
         assert [row["name_upper"] for row in healed.data] == [f"COMPANY-{i:02d}" for i in range(5)]
-        # Only the failed cells are re-run: a downstream step is NOT cascaded,
-        # so row 3's `flagged` still reflects the score it saw last time.
-        assert healed.data[3]["flagged"] is False
+        # Row 3's `flagged` reflects the *healed* score (30 > 20), not the
+        # None the failed cell left behind.
+        assert healed.data[3]["flagged"] is True
+        assert healed.data[1]["flagged"] is False  # score 10, recomputed
+        assert [row["flagged"] for row in healed.data] == [False, False, False, True, True]
         # Nothing left to heal -> the checkpoint is cleaned up.
         assert _checkpoint_files(tmp_path) == []
 
@@ -203,7 +211,7 @@ class TestAutoResumeSemantics:
 
         assert tracker.rows("score") == [2], "only the errored cell re-runs"
         assert tracker.count("normalize") == 0, "succeeded cells are not re-invoked"
-        assert tracker.count("flag") == 0
+        assert tracker.rows("flag") == [2], "the downstream cell that read the failure re-runs"
         assert again.errors == []
         assert again.data[2]["score"] == 20
 
@@ -225,6 +233,161 @@ class TestAutoResumeSemantics:
         assert tracker.rows("score") == [1]
         assert tracker.count("normalize") == 0
         assert list(out["score"]) == [0, 10, 20, 30]
+        assert _checkpoint_files(tmp_path) == []
+
+
+class TestDownstreamCascade:
+    """Healing a cell re-runs what consumed the broken value.
+
+    Before this, a retry healed the upstream cell and left every downstream
+    cell holding the output it had computed from the poisoned default: wrong
+    data, no errors, and ``session.finish()`` deleted the checkpoint that was
+    the only record of it.
+    """
+
+    def test_cascade_is_transitive_through_the_dag(self, tmp_path):
+        """a -> b -> c: healing the root re-runs both levels below it."""
+        tracker = Tracker(failing={2})
+
+        async def a(ctx):
+            idx = ctx.row["idx"]
+            tracker.record("a", idx)
+            if idx in tracker.failing:
+                raise ValueError(f"cannot normalize row {idx}")
+            return {"a_out": idx + 1}
+
+        async def b(ctx):
+            tracker.record("b", ctx.row["idx"])
+            return {"b_out": (ctx.prior_results.get("a_out") or 0) * 10}
+
+        async def c(ctx):
+            tracker.record("c", ctx.row["idx"])
+            return {"c_out": (ctx.prior_results.get("b_out") or 0) + 1}
+
+        pipeline = Pipeline(
+            [
+                FunctionStep("a", a, fields=["a_out"]),
+                FunctionStep("b", b, fields=["b_out"], depends_on=["a"]),
+                FunctionStep("c", c, fields=["c_out"], depends_on=["b"]),
+            ]
+        )
+        data = _rows(4)
+        config = _config(tmp_path)
+
+        first = pipeline.run(data, config=config)
+        assert len(first.errors) == 1
+        assert first.data[2]["c_out"] == 1, "computed from the poisoned default"
+
+        tracker.reset()
+        tracker.failing.clear()
+        healed = pipeline.retry_failed(data, config=config)
+
+        assert tracker.rows("a") == [2]
+        assert tracker.rows("b") == [2], "the direct dependent re-runs"
+        assert tracker.rows("c") == [2], "and so does the dependent of the dependent"
+        assert healed.data[2]["a_out"] == 3
+        assert healed.data[2]["b_out"] == 30
+        assert healed.data[2]["c_out"] == 31, "the whole chain reflects the healed value"
+        # Untouched rows kept their first-run values without re-invocation.
+        assert [row["c_out"] for row in healed.data] == [11, 21, 31, 41]
+
+    def test_cascade_leaves_unrelated_rows_and_branches_alone(self, tmp_path):
+        """Only the healed rows cascade, and only along dependency edges."""
+        tracker = Tracker(failing={1})
+
+        async def normalize(ctx):
+            tracker.record("normalize", ctx.row["idx"])
+            return {"name_upper": str(ctx.row["company"]).upper()}
+
+        async def score(ctx):
+            idx = ctx.row["idx"]
+            tracker.record("score", idx)
+            if idx in tracker.failing:
+                raise ValueError(f"cannot score row {idx}")
+            return {"score": idx * 10}
+
+        async def flag(ctx):
+            tracker.record("flag", ctx.row["idx"])
+            return {"flagged": (ctx.prior_results.get("score") or 0) > 20}
+
+        async def sibling(ctx):
+            # Depends on normalize only — nothing to do with score's failure.
+            tracker.record("sibling", ctx.row["idx"])
+            return {"tag": "x"}
+
+        pipeline = Pipeline(
+            [
+                FunctionStep("normalize", normalize, fields=["name_upper"]),
+                FunctionStep("score", score, fields=["score"], depends_on=["normalize"]),
+                FunctionStep("flag", flag, fields=["flagged"], depends_on=["score"]),
+                FunctionStep("sibling", sibling, fields=["tag"], depends_on=["normalize"]),
+            ]
+        )
+        data = _rows(4)
+        config = _config(tmp_path)
+
+        pipeline.run(data, config=config)
+        tracker.reset()
+        tracker.failing.clear()
+
+        pipeline.retry_failed(data, config=config)
+
+        assert tracker.rows("score") == [1]
+        assert tracker.rows("flag") == [1]
+        assert tracker.count("sibling") == 0, "a sibling branch consumed nothing broken"
+        assert tracker.count("normalize") == 0
+
+
+class TestSkippedRetryCell:
+    def test_a_predicate_that_now_skips_the_cell_keeps_it_failed(self, tmp_path):
+        """A skip is not a heal: the recorded failure (and checkpoint) survive."""
+        tracker = Tracker(failing={1})
+        skip_now = {"on": False}
+
+        async def normalize(ctx):
+            tracker.record("normalize", ctx.row["idx"])
+            return {"name_upper": str(ctx.row["company"]).upper()}
+
+        async def score(ctx):
+            idx = ctx.row["idx"]
+            tracker.record("score", idx)
+            if idx in tracker.failing:
+                raise ValueError(f"cannot score row {idx}")
+            return {"score": idx * 10}
+
+        pipeline = Pipeline(
+            [
+                FunctionStep("normalize", normalize, fields=["name_upper"]),
+                FunctionStep(
+                    "score",
+                    score,
+                    fields=["score"],
+                    depends_on=["normalize"],
+                    run_if=lambda row, prior: not skip_now["on"],
+                ),
+            ]
+        )
+        data = _rows(3)
+        config = _config(tmp_path)
+
+        assert len(pipeline.run(data, config=config).errors) == 1
+
+        # The predicate now excludes the failed row.
+        skip_now["on"] = True
+        tracker.reset()
+        tracker.failing.clear()
+        skipped = pipeline.retry_failed(data, config=config)
+
+        assert tracker.count("score") == 0, "the cell was skipped, not executed"
+        assert skipped.data[1]["score"] is None
+        assert _checkpoint_files(tmp_path), "an unhealed cell keeps its checkpoint"
+
+        # And it is still retryable once the predicate lets it through again.
+        skip_now["on"] = False
+        tracker.reset()
+        healed = pipeline.retry_failed(data, config=config)
+        assert tracker.rows("score") == [1]
+        assert healed.data[1]["score"] == 10
         assert _checkpoint_files(tmp_path) == []
 
 
@@ -360,8 +523,13 @@ class TestRunLogContinuity:
 
         start = records[types.index("retry_start")]
         assert start["run_id"] == run_id, "the retry keeps the original run_id"
-        assert start["num_cells"] == 2
+        # The cells are the ones this retry really executes — the failed cells
+        # plus the downstream cells they invalidate — not just what was asked
+        # for, so a dashboard marks exactly the cells that will change.
+        assert start["num_cells"] == 4
         assert sorted((c["step"], c["row"]) for c in start["cells"]) == [
+            ("flag", 1),
+            ("flag", 3),
             ("score", 1),
             ("score", 3),
         ]
@@ -374,13 +542,44 @@ class TestRunLogContinuity:
         # Recovered cells arrive as ordinary row_complete records, keyed.
         segment = records[types.index("retry_start") :]
         recovered = [r for r in segment if r["type"] == "row_complete"]
-        assert len(recovered) == 2
-        assert sorted(r["row"] for r in recovered) == [1, 3]
+        assert len(recovered) == 4
+        assert sorted(r["row"] for r in recovered if r["step"] == "score") == [1, 3]
+        assert sorted(r["row"] for r in recovered if r["step"] == "flag") == [1, 3]
         assert all(r["status"] == "ok" for r in recovered)
         assert all(r["key"] == f"company-{r['row']:02d}" for r in recovered)
-        assert all(r["values"]["score"] == r["row"] * 10 for r in recovered)
-        # Only the retried step reports; the checkpointed ones stay silent.
-        assert {r["step"] for r in segment if r["type"] in {"step_start", "step_end"}} == {"score"}
+        assert all(r["values"]["score"] == r["row"] * 10 for r in recovered if r["step"] == "score")
+        # Only the retried steps report; the untouched ones stay silent.
+        assert {r["step"] for r in segment if r["type"] in {"step_start", "step_end"}} == {
+            "score",
+            "flag",
+        }
+
+    def test_retry_keeps_a_null_display_key_null(self, tmp_path):
+        """The run decided there is no label column; the retry must not invent one."""
+        from accrue import JsonlRunLogger
+
+        tracker = Tracker(failing={1})
+        pipeline = _pipeline(tracker)
+        data = _rows(3)
+        config = _config(tmp_path)
+        log = tmp_path / "run.jsonl"
+
+        # A standalone logger with no display_key records `display_key: null`.
+        pipeline.run(data, config=config, hooks=JsonlRunLogger(log, pipeline=pipeline).hooks)
+        records = _load_log(log)
+        assert records[0]["display_key"] is None
+        assert all(r["key"] is None for r in records if r["type"] == "row_complete")
+
+        tracker.reset()
+        tracker.failing.clear()
+        pipeline.retry_failed(data, config=config, run_log=log)
+
+        records = _load_log(log)
+        types = [r["type"] for r in records]
+        segment = records[types.index("retry_start") :]
+        recovered = [r for r in segment if r["type"] == "row_complete"]
+        assert recovered, "the retry logged its cells"
+        assert all(r["key"] is None for r in recovered), "keys stay as the run recorded them"
 
     def test_retry_without_an_existing_log_starts_a_normal_one(self, tmp_path):
         tracker = Tracker(failing={0})
@@ -408,7 +607,7 @@ class TestAbortedRun:
 
         manager = CheckpointManager(config)
         manager.save_step(
-            data_identifier=derive_data_identifier(["company", "idx"], 4),
+            data_identifier=derive_data_identifier(["company", "idx"], 4, data),
             category=DEFAULT_CATEGORY,
             step_name="normalize",
             step_row_results=[{"name_upper": f"COMPANY-{i:02d}"} for i in range(4)],
@@ -450,6 +649,22 @@ class TestRefusals:
         assert _checkpoint_files(tmp_path) == []
         with pytest.raises(PipelineError, match="nothing to retry"):
             pipeline.retry_failed(data, config=config)
+
+    def test_unknown_step_name_is_refused(self, tmp_path):
+        """A typo in steps= used to select nothing and report a clean run."""
+        tracker = Tracker(failing={1})
+        pipeline = _pipeline(tracker)
+        data = _rows(3)
+        config = _config(tmp_path)
+
+        pipeline.run(data, config=config)
+        tracker.reset()
+
+        with pytest.raises(PipelineError, match="scoer"):
+            pipeline.retry_failed(data, config=config, steps=["scoer"])
+        assert tracker.calls == {}
+        # The real failure is untouched and still retryable.
+        assert len(_checkpoint_files(tmp_path)) == 1
 
     def test_changed_dataset_shape_is_refused(self, tmp_path):
         tracker = Tracker(failing={1})
