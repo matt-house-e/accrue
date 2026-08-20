@@ -7,8 +7,6 @@ for repeated execution with checkpointing.
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 from typing import Any
 
 import pandas as pd
@@ -16,7 +14,12 @@ import pandas as pd
 from ..pipeline import Pipeline
 from ..pipeline.pipeline import _merge_results_into_df
 from ..utils.logger import get_logger
-from .checkpoint import CheckpointManager
+from .checkpoint import (
+    DEFAULT_CATEGORY,
+    CheckpointManager,
+    CheckpointSession,
+    derive_data_identifier,
+)
 from .config import EnrichmentConfig
 
 logger = get_logger(__name__)
@@ -97,23 +100,14 @@ class Enricher:
             overwrite_fields = self.config.overwrite_fields
 
         if data_identifier is None:
-            identifier_source = json.dumps(
-                {"columns": list(df.columns), "rows": len(df)},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            data_identifier = f"df_{hashlib.sha256(identifier_source).hexdigest()[:16]}"
+            data_identifier = derive_data_identifier(list(df.columns), len(df))
 
-        category = "_default"
+        category = DEFAULT_CATEGORY
 
         # Field specs from steps
         fields_dict = self.pipeline._collect_field_specs()
 
         # Checkpoint resume
-        prior_step_results: dict[str, list[dict[str, Any]]] | None = None
-        completed_steps: list[str] = []
-        checkpoint_results: dict[str, list[dict[str, Any]]] = {}
-
         cp = self._checkpoint.load(
             data_identifier,
             category,
@@ -121,36 +115,32 @@ class Enricher:
             expected_fields=fields_dict,
             expected_steps=self.pipeline.step_names,
         )
+        session = CheckpointSession(
+            self._checkpoint,
+            data_identifier=data_identifier,
+            category=category,
+            total_rows=len(df),
+            fields_dict=fields_dict,
+            checkpoint=cp,
+        )
+        prior_step_results = session.prior_step_results or None
+        # Cells that errored in a prior run re-run even though their step is
+        # checkpointed — checkpointed no longer means done for failed cells
+        # (#129).  Their successful neighbours are served from the checkpoint.
+        retry_cells = session.retry_cells or None
         if cp is not None:
-            completed_steps = list(cp.completed_steps)
-            prior_step_results = {
-                k: v for k, v in cp.step_results.items() if k in cp.completed_steps
-            }
-            checkpoint_results = dict(prior_step_results)
-            logger.info(f"Resuming from checkpoint: skipping {completed_steps}")
+            logger.info(f"Resuming from checkpoint: skipping {session.completed}")
+            if retry_cells:
+                logger.info(
+                    "Re-running %d failed cell(s) from checkpoint: %s",
+                    sum(len(v) for v in retry_cells.values()),
+                    {k: len(v) for k, v in retry_cells.items()},
+                )
 
         # Convert DataFrame to rows, replacing NaN/NaT/pd.NA with None.
         # astype(object) is required first; otherwise float columns keep nan
         # even after where(..., None) because pandas preserves dtype.
         rows = df.astype(object).where(pd.notna(df), None).to_dict(orient="records")
-
-        # Build on_step_complete callback for checkpointing
-        cb_completed = list(completed_steps)
-        cb_results = dict(checkpoint_results)
-
-        def on_step_complete(step_name: str, step_row_results: list[dict[str, Any]]) -> None:
-            cb_completed.append(step_name)
-            cb_results[step_name] = step_row_results
-            self._checkpoint.save_step(
-                data_identifier=data_identifier,
-                category=category,
-                step_name=step_name,
-                step_row_results=step_row_results,
-                total_rows=len(rows),
-                fields_dict=fields_dict,
-                existing_completed=cb_completed[:-1],
-                existing_results={k: v for k, v in cb_results.items() if k != step_name},
-            )
 
         # Set up cache manager
         cache_manager = None
@@ -166,19 +156,7 @@ class Enricher:
         checkpoint_interval = self.config.checkpoint_interval
         on_partial_checkpoint = None
         if checkpoint_interval > 0 and self._checkpoint._enabled:
-
-            def on_partial_checkpoint(step_name, partial_results, completed_count):
-                self._checkpoint.save_step(
-                    data_identifier=data_identifier,
-                    category=category,
-                    step_name=step_name,
-                    step_row_results=partial_results,
-                    total_rows=len(rows),
-                    fields_dict=fields_dict,
-                    existing_completed=list(cb_completed),
-                    existing_results=dict(cb_results),
-                    partial=True,
-                )
+            on_partial_checkpoint = session.on_partial_checkpoint
 
         # Execute pipeline
         try:
@@ -187,10 +165,11 @@ class Enricher:
                 all_fields=fields_dict,
                 config=self.config,
                 prior_step_results=prior_step_results,
-                on_step_complete=on_step_complete,
+                on_step_complete=session.on_step_complete,
                 cache_manager=cache_manager,
                 on_partial_checkpoint=on_partial_checkpoint,
                 hooks=self._hooks,
+                retry_cells=retry_cells,
             )
         finally:
             if cache_manager is not None:
@@ -203,11 +182,13 @@ class Enricher:
                 error_summary[err.step_name] = error_summary.get(err.step_name, 0) + 1
             logger.warning("Pipeline completed with %d row errors: %s", len(errors), error_summary)
 
+        # Clean the checkpoint up on full success; keep it while cells are
+        # still failing so a re-run — or Pipeline.retry_failed() — can
+        # re-execute exactly those cells.
+        session.finish()
+
         # Write results back to DataFrame (column-wise, O(n) not O(n²))
         df_out = _merge_results_into_df(df, accumulated, overwrite_fields=overwrite_fields)
-
-        # Cleanup checkpoint on success
-        self._checkpoint.cleanup(data_identifier, category)
 
         logger.info(f"Enrichment complete: {len(df_out)} rows")
         return df_out

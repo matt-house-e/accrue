@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time as _time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -66,6 +66,17 @@ def _build_skip_values(step: Any) -> dict[str, Any]:
         else:
             values[field_name] = None
     return values
+
+
+def _dataset_columns(data: pd.DataFrame | list[dict[str, Any]]) -> list[Any]:
+    """Column names of a DataFrame, or the first row's keys for ``list[dict]``.
+
+    Feeds :func:`~accrue.core.checkpoint.derive_data_identifier` so a run and
+    its later ``retry_failed()`` land on the same checkpoint file.
+    """
+    if isinstance(data, pd.DataFrame):
+        return list(data.columns)
+    return list(data[0].keys()) if data else []
 
 
 def _merge_results_into_df(
@@ -463,7 +474,12 @@ class Pipeline:
                 step_plans.append(StepPlan(name=name, kind=kind, depends_on=depends_on))
 
         # Run the capped sample (real calls) to get outputs + measured cost.
-        sample_result = self.run(sample_rows, config=config) if sample_rows else None
+        # Checkpointing is forced off: a dry run over a slice of the data must
+        # never write (or resume from) the real run's checkpoint.
+        sample_config = config
+        if sample_config is not None and sample_config.enable_checkpointing:
+            sample_config = replace(sample_config, enable_checkpointing=False)
+        sample_result = self.run(sample_rows, config=sample_config) if sample_rows else None
         if sample_result is not None:
             sample_outputs = list(sample_result.data)
             sample_cost = sample_result.cost
@@ -578,37 +594,219 @@ class Pipeline:
             A :class:`PipelineResult` containing the enriched data, aggregated
             cost/usage info, and any per-row errors.
         """
-        config = config or EnrichmentConfig()
-        if run_log:
-            from ..core.runlog import (
-                JsonlRunLogger,
-                _merge_hooks,
-                default_display_key,
-                new_run_id,
-                resolve_run_log_path,
-            )
+        return await self._run(
+            data,
+            config,
+            hooks,
+            output_file,
+            run_log=run_log,
+            display_key=display_key,
+        )
 
-            run_id = new_run_id()
-            run_logger = JsonlRunLogger(
-                resolve_run_log_path(run_log, run_id),
-                run_id=run_id,
-                display_key=display_key if display_key is not None else default_display_key(data),
-                pipeline=self,
-                data=data,
+    def retry_failed(
+        self,
+        data: pd.DataFrame | list[dict[str, Any]],
+        config: EnrichmentConfig | None = None,
+        hooks: EnrichmentHooks | None = None,
+        output_file: str | Path | None = None,
+        *,
+        rows: list[int] | None = None,
+        steps: list[str] | None = None,
+        run_log: bool | str | Path = False,
+        display_key: str | None = None,
+        data_identifier: str | None = None,
+    ) -> PipelineResult:
+        """Re-run only the cells that failed last time — synchronous entry point.
+
+        The "retry failed rows" button: everything that succeeded is served
+        from the checkpoint without re-invoking a single step, so you pay for
+        exactly the cells you are healing.
+
+        Raises ``RuntimeError`` if called from inside a running event loop
+        (use ``await pipeline.retry_failed_async(data)`` in that case).
+        See :meth:`retry_failed_async` for the full argument reference.
+        """
+        try:
+            asyncio.get_running_loop()
+            raise RuntimeError(
+                "Pipeline.retry_failed() cannot be called from inside an async context. "
+                "Use 'await pipeline.retry_failed_async(...)' instead."
             )
-            hooks = _merge_hooks(run_logger.hooks, hooks)
-        hooks = hooks or EnrichmentHooks()
+        except RuntimeError as exc:
+            if "retry_failed_async" in str(exc):
+                raise
+        return asyncio.run(
+            self.retry_failed_async(
+                data,
+                config,
+                hooks=hooks,
+                output_file=output_file,
+                rows=rows,
+                steps=steps,
+                run_log=run_log,
+                display_key=display_key,
+                data_identifier=data_identifier,
+            )
+        )
+
+    async def retry_failed_async(
+        self,
+        data: pd.DataFrame | list[dict[str, Any]],
+        config: EnrichmentConfig | None = None,
+        hooks: EnrichmentHooks | None = None,
+        output_file: str | Path | None = None,
+        *,
+        rows: list[int] | None = None,
+        steps: list[str] | None = None,
+        run_log: bool | str | Path = False,
+        display_key: str | None = None,
+        data_identifier: str | None = None,
+    ) -> PipelineResult:
+        """Re-run only the cells that failed last time — ``await`` entry point (#129).
+
+        Reads the checkpoint the previous run left behind, re-executes the
+        ``(step, row)`` cells it recorded as errored, and serves every cell
+        that succeeded straight from the checkpoint — those steps are never
+        re-invoked, so a 5-failure retry over 10,000 rows costs 5 calls.  Any
+        step the previous run never *finished* still runs in full: without it
+        there is no result to return.
+
+        Requires ``EnrichmentConfig(enable_checkpointing=True)`` — the same
+        config the original run used, so both resolve the same checkpoint file.
+
+        Args:
+            data: The same input rows the failed run used.  Its shape is
+                validated against the checkpoint; a mismatch is refused.
+            config: The run's :class:`EnrichmentConfig`.  Must have
+                ``enable_checkpointing=True``.
+            hooks: Optional :class:`EnrichmentHooks`, as for :meth:`run_async`.
+            output_file: Optional destination for the healed data.
+            rows: Restrict the retry to these row indices.  ``None`` (default)
+                retries every failed row.  Failures left out stay recorded in
+                the checkpoint for a later retry.
+            steps: Restrict the retry to these step names.  ``None`` (default)
+                retries failures in every step.
+            run_log: Path of the failed run's log to append to.  The retry
+                keeps that run's ``run_id`` and ``display_key`` and appends a
+                ``retry_start`` … ``retry_end`` segment, so recovered cells
+                arrive as ordinary ``row_complete`` records a dashboard can
+                apply directly.  ``True`` (or a path with no existing log)
+                starts a fresh log instead.
+            display_key: Override the label column; defaults to the one
+                recorded in the run log being appended to.
+            data_identifier: Explicit checkpoint identifier, matching the one
+                the original run used.  Defaults to the same shape-derived id
+                (columns + row count).
+
+        Returns:
+            A :class:`PipelineResult` over the whole dataset — healed cells
+            merged with the checkpointed ones.  ``errors`` holds the failures
+            of *this* pass (a cell that fails again surfaces normally); prior
+            failures excluded by ``rows`` / ``steps`` are not repeated there.
+
+        Raises:
+            PipelineError: If checkpointing is disabled, or no valid
+                checkpoint exists for this dataset.
+        """
+        return await self._run(
+            data,
+            config,
+            hooks,
+            output_file,
+            run_log=run_log,
+            display_key=display_key,
+            retry=True,
+            rows=rows,
+            steps=steps,
+            data_identifier=data_identifier,
+        )
+
+    async def _run(
+        self,
+        data: pd.DataFrame | list[dict[str, Any]],
+        config: EnrichmentConfig | None,
+        hooks: EnrichmentHooks | None,
+        output_file: str | Path | None,
+        *,
+        run_log: bool | str | Path,
+        display_key: str | None,
+        retry: bool = False,
+        rows: list[int] | None = None,
+        steps: list[str] | None = None,
+        data_identifier: str | None = None,
+    ) -> PipelineResult:
+        """Shared implementation of :meth:`run_async` and :meth:`retry_failed_async`.
+
+        The two differ only in how the run is seeded: a normal run starts from
+        an auto-resume checkpoint (when checkpointing is on), a retry starts
+        from the failed cells recorded in that checkpoint.
+        """
+        config = config or EnrichmentConfig()
 
         # Collect field specs from steps
         all_fields = self._collect_field_specs()
 
         # Convert input to rows
         if isinstance(data, list):
-            rows = data
+            rows_data = data
             input_is_list = True
         else:
-            rows = data.astype(object).where(pd.notna(data), None).to_dict(orient="records")
+            rows_data = data.astype(object).where(pd.notna(data), None).to_dict(orient="records")
             input_is_list = False
+
+        # Checkpoint session — seeds prior results and, for a retry, the set
+        # of failed cells to re-execute (#129).
+        session = None
+        if retry or config.enable_checkpointing:
+            session = self._open_checkpoint_session(
+                data,
+                len(rows_data),
+                all_fields,
+                config,
+                data_identifier,
+                retry=retry,
+                rows=rows,
+                steps=steps,
+            )
+        prior_step_results: dict[str, list[dict[str, Any]]] | None = None
+        retry_cells: dict[str, list[int]] | None = None
+        if session is not None:
+            prior_step_results = session.prior_step_results or None
+            retry_cells = session.retry_cells or None
+
+        if run_log:
+            from ..core.runlog import (
+                JsonlRunLogger,
+                _merge_hooks,
+                default_display_key,
+                new_run_id,
+                read_run_context,
+                resolve_run_log_path,
+            )
+
+            prev_run_id: str | None = None
+            prev_display_key: str | None = None
+            t_offset = 0.0
+            if retry and run_log is not True:
+                prev_run_id, prev_display_key, t_offset = read_run_context(Path(run_log))
+
+            run_id = prev_run_id or new_run_id()
+            resolved_key = display_key
+            if resolved_key is None:
+                resolved_key = prev_display_key or default_display_key(data)
+            appending = retry and prev_run_id is not None
+            run_logger = JsonlRunLogger(
+                resolve_run_log_path(run_log, run_id),
+                run_id=run_id,
+                display_key=resolved_key,
+                pipeline=self,
+                data=data,
+                segment="retry" if appending else "run",
+                t_offset=t_offset if appending else 0.0,
+                retry_cells=retry_cells,
+            )
+            hooks = _merge_hooks(run_logger.hooks, hooks)
+        hooks = hooks or EnrichmentHooks()
 
         # Set up cache manager
         cache_manager = None
@@ -620,12 +818,16 @@ class Pipeline:
                 ttl=config.cache_ttl,
             )
 
+        on_partial_checkpoint = None
+        if session is not None and config.checkpoint_interval > 0:
+            on_partial_checkpoint = session.on_partial_checkpoint
+
         # Fire on_pipeline_start
         await _fire_hook(
             hooks.on_pipeline_start,
             PipelineStartEvent(
                 step_names=self.step_names,
-                num_rows=len(rows),
+                num_rows=len(rows_data),
                 config=config,
             ),
         )
@@ -639,11 +841,15 @@ class Pipeline:
         try:
             # Execute
             accumulated, errors, cost, step_elapsed = await self.execute(
-                rows=rows,
+                rows=rows_data,
                 all_fields=all_fields,
                 config=config,
+                prior_step_results=prior_step_results,
+                on_step_complete=session.on_step_complete if session else None,
                 cache_manager=cache_manager,
+                on_partial_checkpoint=on_partial_checkpoint,
                 hooks=hooks,
+                retry_cells=retry_cells,
             )
         finally:
             if cache_manager is not None:
@@ -653,17 +859,22 @@ class Pipeline:
             await _fire_hook(
                 hooks.on_pipeline_end,
                 PipelineEndEvent(
-                    num_rows=len(rows),
+                    num_rows=len(rows_data),
                     total_errors=len(errors),
                     cost=cost,
                     elapsed_seconds=elapsed,
                 ),
             )
 
+        # Keep the checkpoint while any cell is still failing — that is what
+        # retry_failed() reads.  Clean it up once nothing is left to heal.
+        if session is not None:
+            session.finish()
+
         # Build output matching input type
         if input_is_list:
             result_rows: list[dict[str, Any]] = []
-            for idx, row in enumerate(rows):
+            for idx, row in enumerate(rows_data):
                 merged = dict(row)
                 for key, value in accumulated[idx].items():
                     if not key.startswith("__"):
@@ -693,6 +904,73 @@ class Pipeline:
         if output_file is not None:
             result.save(output_file)
         return result
+
+    def _open_checkpoint_session(
+        self,
+        data: pd.DataFrame | list[dict[str, Any]],
+        num_rows: int,
+        all_fields: dict[str, dict[str, Any]],
+        config: EnrichmentConfig,
+        data_identifier: str | None,
+        *,
+        retry: bool,
+        rows: list[int] | None,
+        steps: list[str] | None,
+    ) -> Any:
+        """Open the checkpoint for this run — resuming, or selecting failed cells.
+
+        Returns a :class:`~accrue.core.checkpoint.CheckpointSession`.  For a
+        retry it raises :class:`PipelineError` rather than silently running
+        the whole dataset when there is nothing to resume from.
+        """
+        from ..core.checkpoint import (
+            DEFAULT_CATEGORY,
+            CheckpointManager,
+            CheckpointSession,
+            derive_data_identifier,
+        )
+
+        if retry and not config.enable_checkpointing:
+            raise PipelineError(
+                "retry_failed() needs the checkpoint the failed run wrote. "
+                "Pass the run's EnrichmentConfig(enable_checkpointing=True)."
+            )
+
+        manager = CheckpointManager(config)
+        identifier = data_identifier or derive_data_identifier(_dataset_columns(data), num_rows)
+        validation = {
+            "expected_total_rows": num_rows,
+            "expected_fields": all_fields,
+            "expected_steps": self.step_names,
+        }
+
+        failed_cells: dict[str, list[int]] | None = None
+        if retry:
+            resumed = manager.resume_failed(
+                identifier, DEFAULT_CATEGORY, rows=rows, steps=steps, **validation
+            )
+            if resumed is None:
+                raise PipelineError(
+                    f"No usable checkpoint for '{identifier}' — nothing to retry. "
+                    "The run may have completed without errors (the checkpoint is "
+                    "removed once nothing is left to heal), or the data shape / "
+                    "pipeline steps no longer match the saved run."
+                )
+            checkpoint, failed_cells = resumed
+        else:
+            checkpoint = manager.load(identifier, DEFAULT_CATEGORY, **validation)
+            if checkpoint is not None:
+                logger.info("Resuming from checkpoint: skipping %s", checkpoint.completed_steps)
+
+        return CheckpointSession(
+            manager,
+            data_identifier=identifier,
+            category=DEFAULT_CATEGORY,
+            total_rows=num_rows,
+            fields_dict=all_fields,
+            checkpoint=checkpoint,
+            retry_cells=failed_cells,
+        )
 
     def runner(self, config: EnrichmentConfig | None = None) -> Any:
         """Create a reusable :class:`Enricher` runner for this pipeline.
@@ -840,10 +1118,11 @@ class Pipeline:
         all_fields: dict[str, dict[str, Any]],
         config: EnrichmentConfig | None = None,
         prior_step_results: dict[str, list[dict[str, Any]]] | None = None,
-        on_step_complete: Callable[[str, list[dict[str, Any]]], None] | None = None,
+        on_step_complete: Callable[[str, list[dict[str, Any]], list[RowError]], None] | None = None,
         cache_manager: Any = None,
         on_partial_checkpoint: Callable[[str, list[dict], int], None] | None = None,
         hooks: EnrichmentHooks | None = None,
+        retry_cells: dict[str, list[int]] | None = None,
     ) -> tuple[list[dict[str, Any]], list[RowError], CostSummary, dict[str, float]]:
         """Execute the pipeline across all rows (column-oriented).
 
@@ -852,11 +1131,17 @@ class Pipeline:
             all_fields: field_name -> field_spec dict.
             config: Optional EnrichmentConfig.
             prior_step_results: Pre-populated results for checkpoint resume.
-            on_step_complete: Sync callback fired after each step completes.
+            on_step_complete: Sync callback fired after each step completes,
+                with ``(step_name, step_row_results, step_row_errors)``.
             cache_manager: Optional CacheManager for input-hash caching.
             on_partial_checkpoint: Callback(step_name, results, completed_count)
                 fired every checkpoint_interval rows.
             hooks: Optional EnrichmentHooks for lifecycle events.
+            retry_cells: Failed cells to re-run within steps that are already
+                present in ``prior_step_results`` (``{step: [row_index, ...]}``,
+                #129).  Listed steps re-execute only those row indices; every
+                other row keeps its prior result without re-invocation.  Steps
+                absent from ``prior_step_results`` run in full as usual.
 
         Returns:
             Tuple of (accumulated results, row errors, cost summary,
@@ -881,6 +1166,17 @@ class Pipeline:
         all_errors: list[RowError] = []
         step_usage_map: dict[str, StepUsage] = {}
 
+        # Failed cells to re-run inside already-checkpointed steps (#129).
+        # Only meaningful for steps whose prior results we hold — everything
+        # else runs in full.
+        retry_map: dict[str, list[int]] = {}
+        for step_name, indices in (retry_cells or {}).items():
+            if step_name not in step_values:
+                continue
+            selected = sorted({i for i in indices if 0 <= i < num_rows})
+            if selected:
+                retry_map[step_name] = selected
+
         total_steps = sum(len(level) for level in self._execution_levels)
         step_bar = tqdm(
             total=total_steps,
@@ -890,9 +1186,10 @@ class Pipeline:
         )
 
         for level_idx, level in enumerate(self._execution_levels):
-            # Only execute steps not already in step_values (i.e. not resumed)
-            steps_to_run = [name for name in level if name not in step_values]
-            skipped = [name for name in level if name in step_values]
+            # Execute steps not already in step_values (i.e. not resumed), plus
+            # checkpointed steps holding failed cells this run is retrying.
+            steps_to_run = [name for name in level if name not in step_values or name in retry_map]
+            skipped = [name for name in level if name in step_values and name not in retry_map]
 
             # Advance bar for checkpointed/skipped steps
             if skipped:
@@ -901,6 +1198,13 @@ class Pipeline:
             if steps_to_run:
                 step_bar.set_postfix(step=", ".join(steps_to_run))
 
+                # Rows each step will actually process (all of them, unless
+                # this step is only re-running a set of failed cells).
+                step_row_counts = {
+                    name: len(retry_map[name]) if name in retry_map else num_rows
+                    for name in steps_to_run
+                }
+
                 # Fire on_step_start for each step in this level
                 for step_name in steps_to_run:
                     is_batch = getattr(self._step_map[step_name], "is_batch_eligible", False)
@@ -908,7 +1212,7 @@ class Pipeline:
                         hooks.on_step_start,
                         StepStartEvent(
                             step_name=step_name,
-                            num_rows=num_rows,
+                            num_rows=step_row_counts[step_name],
                             level=level_idx,
                             execution_mode="batch" if is_batch else "realtime",
                         ),
@@ -930,6 +1234,10 @@ class Pipeline:
                         hooks=hooks,
                         show_progress=show_progress,
                         max_workers=max_workers,
+                        only_rows=retry_map.get(step_name),
+                        seed_results=(
+                            step_values.get(step_name) if step_name in retry_map else None
+                        ),
                     )
                     for step_name in steps_to_run
                 ]
@@ -950,10 +1258,12 @@ class Pipeline:
 
                 step_results_list = gathered
 
+                errors_by_step: dict[str, list[RowError]] = {}
                 for step_name, (step_errors, usage, elapsed_s) in zip(
                     steps_to_run, step_results_list
                 ):
                     all_errors.extend(step_errors)
+                    errors_by_step[step_name] = step_errors
                     step_elapsed[step_name] = elapsed_s
                     if usage:
                         step_usage_map[step_name] = usage
@@ -963,7 +1273,7 @@ class Pipeline:
                         hooks.on_step_end,
                         StepEndEvent(
                             step_name=step_name,
-                            num_rows=num_rows,
+                            num_rows=step_row_counts[step_name],
                             num_errors=len(step_errors),
                             usage=usage,
                             elapsed_seconds=elapsed_s,
@@ -977,7 +1287,9 @@ class Pipeline:
                 # Fire callback for each newly-executed step
                 if on_step_complete is not None:
                     for step_name in steps_to_run:
-                        on_step_complete(step_name, step_values[step_name])
+                        on_step_complete(
+                            step_name, step_values[step_name], errors_by_step[step_name]
+                        )
 
         step_bar.close()
 
@@ -1016,6 +1328,8 @@ class Pipeline:
         hooks: EnrichmentHooks | None = None,
         show_progress: bool = False,
         max_workers: int = 3,
+        only_rows: list[int] | None = None,
+        seed_results: list[dict[str, Any]] | None = None,
     ) -> tuple[list[RowError], StepUsage | None, float]:
         """Execute a single step across all rows concurrently.
 
@@ -1033,6 +1347,11 @@ class Pipeline:
             checkpoint_interval: Save partial progress every N rows (0 = off).
             on_partial_checkpoint: Callback fired at each checkpoint interval.
             hooks: Optional EnrichmentHooks for row-level lifecycle events.
+            only_rows: Restrict execution to these row indices (#129).  Rows
+                outside the set are never invoked and keep their
+                ``seed_results`` value.  ``None`` runs every row.
+            seed_results: Prior per-row results to start from, used with
+                ``only_rows`` so untouched rows keep their checkpointed value.
 
         Returns:
             Tuple of (row errors, aggregated StepUsage or None, elapsed seconds).
@@ -1053,6 +1372,8 @@ class Pipeline:
                 cache_manager=cache_manager,
                 hooks=hooks,
                 show_progress=show_progress,
+                only_rows=only_rows,
+                seed_results=seed_results,
             )
 
         from ..core.cache import _compute_step_cache_key
@@ -1063,7 +1384,11 @@ class Pipeline:
         # Slice fields for this step (internal __ fields won't be in all_fields — that's fine)
         step_fields = {f: all_fields[f] for f in step.fields if f in all_fields}
 
-        results: list[dict[str, Any]] = [{} for _ in range(num_rows)]
+        target_rows = list(range(num_rows)) if only_rows is None else list(only_rows)
+        if seed_results is not None:
+            results: list[dict[str, Any]] = [dict(r) for r in seed_results]
+        else:
+            results = [{} for _ in range(num_rows)]
         errors: list[RowError] = []
         usage_list: list[UsageInfo] = []
 
@@ -1078,7 +1403,7 @@ class Pipeline:
         row_elapsed_ms: list[float | None] = [None] * num_rows
 
         row_bar = tqdm(
-            total=num_rows,
+            total=len(target_rows),
             desc=f"  {step.name}",
             unit="row",
             disable=not show_progress,
@@ -1249,7 +1574,7 @@ class Pipeline:
 
         async def _produce_rows() -> None:
             """Feed row indices into the queue; stop early if raise_exc is set."""
-            for i in range(num_rows):
+            for i in target_rows:
                 if raise_exc is not None:
                     break
                 await queue.put(i)
@@ -1347,8 +1672,13 @@ class Pipeline:
         cache_manager: Any = None,
         hooks: EnrichmentHooks | None = None,
         show_progress: bool = False,
+        only_rows: list[int] | None = None,
+        seed_results: list[dict[str, Any]] | None = None,
     ) -> tuple[list[RowError], StepUsage | None, float]:
         """Execute a batch-eligible LLMStep via the provider Batch API.
+
+        ``only_rows`` / ``seed_results`` restrict the batch to a set of failed
+        cells on a retry run (#129), exactly as in :meth:`_execute_step`.
 
         Flow:
           1. Classify rows: skipped / cached / uncached
@@ -1369,7 +1699,11 @@ class Pipeline:
 
         step_fields = {f: all_fields[f] for f in step.fields if f in all_fields}
 
-        results: list[dict[str, Any]] = [{} for _ in range(num_rows)]
+        target_rows = list(range(num_rows)) if only_rows is None else list(only_rows)
+        if seed_results is not None:
+            results: list[dict[str, Any]] = [dict(r) for r in seed_results]
+        else:
+            results = [{} for _ in range(num_rows)]
         errors: list[RowError] = []
         usage_list: list[UsageInfo] = []
 
@@ -1394,7 +1728,7 @@ class Pipeline:
         client = step._resolve_client()
 
         row_bar = tqdm(
-            total=num_rows,
+            total=len(target_rows),
             desc=f"  {step.name} (batch)",
             unit="row",
             disable=not show_progress,
@@ -1406,7 +1740,7 @@ class Pipeline:
         # Cache keys for uncached rows (indexed by row idx)
         cache_keys: dict[int, str | None] = {}
 
-        for idx in range(num_rows):
+        for idx in target_rows:
             # Gather prior results
             prior: dict[str, Any] = {}
             for dep_name in step.depends_on:
@@ -1453,7 +1787,7 @@ class Pipeline:
 
             # Fire hooks for cached/skipped rows as background tasks, then drain
             hook_tasks_cached: list[asyncio.Task] = []
-            for idx in range(num_rows):
+            for idx in target_rows:
                 if hooks.on_row_complete:
                     hook_tasks_cached.append(
                         asyncio.create_task(
@@ -1675,7 +2009,7 @@ class Pipeline:
         # usage per batch, not per row completion; per-row plumbing is
         # deferred (#128).
         hook_tasks_batch: list[asyncio.Task] = []
-        for idx in range(num_rows):
+        for idx in target_rows:
             if hooks.on_row_complete:
                 error_obj = next((e.error for e in errors if e.row_index == idx), None)
                 hook_tasks_batch.append(

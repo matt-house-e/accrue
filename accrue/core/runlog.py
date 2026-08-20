@@ -65,6 +65,53 @@ def resolve_run_log_path(run_log: bool | str | Path, run_id: str) -> Path:
     return Path(run_log)
 
 
+def read_run_context(path: str | Path) -> tuple[str | None, str | None, float]:
+    """Recover ``(run_id, display_key, last_t)`` from an existing run log.
+
+    Used by ``Pipeline.retry_failed()`` to append a retry segment to the log
+    of the run it is healing: the retry keeps the original ``run_id`` and
+    ``display_key`` (so recovered rows carry the same ``key``), and starts
+    its ``t`` clock at the file's last ``t`` so the envelope stays
+    non-decreasing across segments.
+
+    Returns ``(None, None, 0.0)`` when the file is missing, empty, or has no
+    readable ``pipeline_start``.  Malformed lines are skipped, not raised —
+    a partially written log must never block a retry.
+    """
+    file_path = Path(path)
+    if not file_path.exists():
+        return None, None, 0.0
+
+    run_id: str | None = None
+    display_key: str | None = None
+    last_t = 0.0
+    try:
+        with file_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                t = record.get("t")
+                if isinstance(t, (int, float)):
+                    last_t = max(last_t, float(t))
+                if record.get("type") == "pipeline_start" and run_id is None:
+                    raw_id = record.get("run_id")
+                    run_id = raw_id if isinstance(raw_id, str) else None
+                    raw_key = record.get("display_key")
+                    display_key = raw_key if isinstance(raw_key, str) else None
+    except OSError as exc:
+        logger.warning("Could not read run log %s for retry continuity: %s", file_path, exc)
+        return None, None, 0.0
+
+    return run_id, display_key, last_t
+
+
 def default_display_key(data: pd.DataFrame | list[dict[str, Any]]) -> str | None:
     """Heuristic label column for UI display.
 
@@ -194,6 +241,17 @@ class JsonlRunLogger:
             ``row_complete`` carries ``key: null`` — the log holds only step
             *outputs*, so the display-key value can't be recovered from it
             otherwise.
+        segment: ``"run"`` (default) frames the events as a whole run,
+            ``pipeline_start`` … ``pipeline_end``.  ``"retry"`` frames them as
+            a failed-only retry appended to an existing run (#129): the
+            wrapper records become ``retry_start`` / ``retry_end`` — additive
+            v1 record types — so a consumer reading the file never mistakes
+            the appended segment for a second run.
+        t_offset: Seconds added to every record's ``t``.  Set to the existing
+            file's last ``t`` (see :func:`read_run_context`) when appending a
+            retry segment, keeping ``t`` non-decreasing across the file.
+        retry_cells: ``{step: [row_index, ...]}`` this retry will re-execute,
+            recorded in ``retry_start`` so a UI can mark the cells in flight.
     """
 
     def __init__(
@@ -204,12 +262,18 @@ class JsonlRunLogger:
         display_key: str | None = None,
         pipeline: Pipeline | None = None,
         data: pd.DataFrame | list[dict[str, Any]] | None = None,
+        segment: str = "run",
+        t_offset: float = 0.0,
+        retry_cells: dict[str, list[int]] | None = None,
     ) -> None:
         self.path = Path(path)
         self.run_id = run_id or new_run_id()
         self.display_key = display_key
+        self.segment = segment
         self._row_keys = resolve_row_keys(data, display_key)
         self._pipeline = pipeline
+        self._t_offset = t_offset
+        self._retry_cells = retry_cells or {}
         self._t0: float | None = None
         self._fh: Any = None
         self._lock = threading.Lock()
@@ -230,7 +294,7 @@ class JsonlRunLogger:
             self._t0 = time.monotonic()
         record: dict[str, Any] = {
             "v": SCHEMA_VERSION,
-            "t": round(time.monotonic() - self._t0, 6),
+            "t": round(self._t_offset + time.monotonic() - self._t0, 6),
             "type": record_type,
         }
         record.update(payload)
@@ -255,6 +319,23 @@ class JsonlRunLogger:
 
     async def _on_pipeline_start(self, event: PipelineStartEvent) -> None:
         self._t0 = time.monotonic()
+        if self.segment == "retry":
+            cells = [
+                {"step": step, "row": row}
+                for step, indices in self._retry_cells.items()
+                for row in indices
+            ]
+            self._emit(
+                "retry_start",
+                {
+                    "run_id": self.run_id,
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "num_rows": event.num_rows,
+                    "num_cells": len(cells),
+                    "cells": cells,
+                },
+            )
+            return
         self._emit(
             "pipeline_start",
             {
@@ -349,19 +430,19 @@ class JsonlRunLogger:
 
     async def _on_pipeline_end(self, event: PipelineEndEvent) -> None:
         cost = event.cost
-        self._emit(
-            "pipeline_end",
-            {
-                "num_rows": event.num_rows,
-                "total_errors": event.total_errors,
-                "cost": {
-                    "in": getattr(cost, "total_prompt_tokens", 0),
-                    "out": getattr(cost, "total_completion_tokens", 0),
-                    "cost": None,
-                },
-                "elapsed_s": round(event.elapsed_seconds, 6),
+        payload: dict[str, Any] = {
+            "num_rows": event.num_rows,
+            "total_errors": event.total_errors,
+            "cost": {
+                "in": getattr(cost, "total_prompt_tokens", 0),
+                "out": getattr(cost, "total_completion_tokens", 0),
+                "cost": None,
             },
-        )
+            "elapsed_s": round(event.elapsed_seconds, 6),
+        }
+        if self.segment == "retry":
+            payload["num_cells"] = sum(len(v) for v in self._retry_cells.values())
+        self._emit("retry_end" if self.segment == "retry" else "pipeline_end", payload)
         self.close()
 
     # -- helpers ---------------------------------------------------------

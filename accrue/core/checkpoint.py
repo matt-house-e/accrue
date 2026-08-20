@@ -6,21 +6,28 @@ Single JSON file per data_identifier + category.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..utils.logger import get_logger
+from .exceptions import _sanitize_secrets
 
 if TYPE_CHECKING:
     from .config import EnrichmentConfig
+    from .exceptions import RowError
 
 logger = get_logger(__name__)
+
+#: Checkpoint category used by every built-in runner.  Kept as one constant so
+#: a run and its later ``Pipeline.retry_failed()`` resolve the same file.
+DEFAULT_CATEGORY = "_default"
 
 try:
     import numpy as _numpy
@@ -94,6 +101,22 @@ def _typed_decoder(d: dict) -> Any:
 # -- data model --------------------------------------------------------------
 
 
+def derive_data_identifier(columns: list[Any], num_rows: int) -> str:
+    """Deterministic checkpoint identifier for a dataset shape.
+
+    Derived from the column names and row count (sha256, not ``hash()``,
+    so it is stable across processes).  This is the identifier the
+    :class:`~accrue.core.enricher.Enricher` and ``Pipeline.retry_failed``
+    use when the caller does not pass an explicit ``data_identifier``.
+    """
+    source = json.dumps(
+        {"columns": list(columns), "rows": num_rows},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"df_{hashlib.sha256(source).hexdigest()[:16]}"
+
+
 @dataclass
 class CheckpointData:
     """Snapshot of pipeline progress loaded from a checkpoint file."""
@@ -104,6 +127,12 @@ class CheckpointData:
     fields_dict: dict[str, dict[str, Any]]
     completed_steps: list[str]
     step_results: dict[str, list[dict[str, Any]]]
+    row_errors: dict[str, dict[int, dict[str, str]]] = field(default_factory=dict)
+    """Failed cells recorded per completed step: ``{step: {row_index: {type, msg}}}``.
+
+    Empty for checkpoints written before row-error tracking (#129) — those
+    resume with the old all-or-nothing semantics.
+    """
 
 
 class CheckpointManager:
@@ -148,6 +177,8 @@ class CheckpointManager:
         existing_results: dict[str, list[dict[str, Any]]],
         *,
         partial: bool = False,
+        step_row_errors: dict[int, dict[str, str]] | None = None,
+        existing_row_errors: dict[str, dict[int, dict[str, str]]] | None = None,
     ) -> bool:
         """Write full pipeline state to disk after a step completes.
 
@@ -159,6 +190,13 @@ class CheckpointManager:
                 step as completed.  On resume the step will re-run from
                 scratch, ensuring unfinished rows are never silently treated
                 as completed.  Defaults to False (normal completion).
+            step_row_errors: Failed cells for *this* step, keyed by row index
+                (``{row_index: {"type": ..., "msg": ...}}``).  Recorded so a
+                later failed-only resume (#129) can re-run exactly these
+                cells.  Ignored for partial saves — a partial step re-runs
+                from scratch anyway.
+            existing_row_errors: Failed cells of previously completed steps,
+                carried forward unchanged (``{step: {row_index: {...}}}``).
 
         Returns True on success or when checkpointing is disabled (no-op).
         """
@@ -172,6 +210,14 @@ class CheckpointManager:
         results = dict(existing_results)
         results[step_name] = step_row_results
 
+        row_errors = {
+            step: dict(cells)
+            for step, cells in (existing_row_errors or {}).items()
+            if step != step_name and cells
+        }
+        if not partial and step_row_errors:
+            row_errors[step_name] = step_row_errors
+
         payload = {
             "timestamp": time.time(),
             "category": category,
@@ -179,6 +225,12 @@ class CheckpointManager:
             "fields_dict": fields_dict,
             "completed_steps": completed,
             "step_results": results,
+            # JSON object keys are strings; row indices are decoded back to
+            # int in load().
+            "row_errors": {
+                step: {str(idx): err for idx, err in cells.items()}
+                for step, cells in row_errors.items()
+            },
         }
 
         path = self._get_path(data_identifier, category)
@@ -226,7 +278,29 @@ class CheckpointManager:
         """
         if not self._enabled or not self._auto_resume:
             return None
+        return self._load_validated(
+            data_identifier,
+            category,
+            expected_total_rows=expected_total_rows,
+            expected_fields=expected_fields,
+            expected_steps=expected_steps,
+        )
 
+    def _load_validated(
+        self,
+        data_identifier: str,
+        category: str,
+        *,
+        expected_total_rows: int | None = None,
+        expected_fields: dict | None = None,
+        expected_steps: list[str] | None = None,
+    ) -> CheckpointData | None:
+        """Load + strictly validate a checkpoint file, ignoring the resume gates.
+
+        Shared by :meth:`load` (gated on ``auto_resume``) and
+        :meth:`resume_failed` (explicit call — gated on ``enable_checkpointing``
+        only).  Validation semantics are identical for both.
+        """
         path = self._get_path(data_identifier, category)
         if not path.exists():
             return None
@@ -279,6 +353,12 @@ class CheckpointManager:
                 fields_dict=raw["fields_dict"],
                 completed_steps=raw["completed_steps"],
                 step_results=raw["step_results"],
+                # Absent in pre-#129 checkpoints — default to no recorded
+                # failures.  JSON keys are strings; decode row indices to int.
+                row_errors={
+                    step: {int(idx): err for idx, err in cells.items()}
+                    for step, cells in raw.get("row_errors", {}).items()
+                },
             )
             logger.info(
                 f"Checkpoint loaded: {len(data.completed_steps)} steps completed "
@@ -293,6 +373,72 @@ class CheckpointManager:
         except Exception as e:
             logger.error(f"Failed to load checkpoint: {e}")
             return None
+
+    def resume_failed(
+        self,
+        data_identifier: str,
+        category: str,
+        *,
+        rows: list[int] | None = None,
+        steps: list[str] | None = None,
+        expected_total_rows: int | None = None,
+        expected_fields: dict | None = None,
+        expected_steps: list[str] | None = None,
+    ) -> tuple[CheckpointData, dict[str, list[int]]] | None:
+        """Failed-only resume entrypoint (#129).
+
+        Loads the checkpoint with the same strict validation as :meth:`load`
+        and selects the failed ``(step, row)`` cells recorded in it — the
+        cells a retry run must re-execute while everything that succeeded is
+        served from the checkpoint.
+
+        Unlike :meth:`load`, this is an *explicit* request, so it ignores
+        ``auto_resume`` and is gated only on ``enable_checkpointing``.
+
+        Args:
+            rows: Restrict selection to these row indices (None = all).
+            steps: Restrict selection to these step names (None = all).
+            expected_total_rows / expected_fields / expected_steps: Same
+                strict-validation kwargs as :meth:`load`.
+
+        Returns:
+            ``(checkpoint, failed_cells)`` where ``failed_cells`` maps step
+            name to a sorted list of failed row indices (only for steps
+            recorded as completed — an uncompleted step re-runs in full
+            anyway), or ``None`` when there is no usable checkpoint.
+        """
+        if not self._enabled:
+            return None
+
+        cp = self._load_validated(
+            data_identifier,
+            category,
+            expected_total_rows=expected_total_rows,
+            expected_fields=expected_fields,
+            expected_steps=expected_steps,
+        )
+        if cp is None:
+            return None
+
+        step_filter = set(steps) if steps is not None else None
+        row_filter = set(rows) if rows is not None else None
+
+        failed_cells: dict[str, list[int]] = {}
+        for step_name, cells in cp.row_errors.items():
+            if step_name not in cp.completed_steps:
+                continue
+            if step_filter is not None and step_name not in step_filter:
+                continue
+            indices = sorted(idx for idx in cells if row_filter is None or idx in row_filter)
+            if indices:
+                failed_cells[step_name] = indices
+
+        total = sum(len(v) for v in failed_cells.values())
+        logger.info(
+            f"Failed-only resume: {total} failed cell(s) selected across "
+            f"{len(failed_cells)} step(s)"
+        )
+        return cp, failed_cells
 
     def cleanup(self, data_identifier: str, category: str) -> bool:
         """Remove checkpoint file after successful pipeline completion."""
@@ -335,3 +481,173 @@ class CheckpointManager:
                 logger.warning(f"Failed to read checkpoint {path}: {e}")
 
         return checkpoints
+
+
+# -- per-run session ---------------------------------------------------------
+
+
+class CheckpointSession:
+    """Mutable checkpoint-writing state for one pipeline execution.
+
+    Wraps a :class:`CheckpointManager` with the bookkeeping every
+    checkpointed run needs — the completed-step list, per-step results, and
+    per-step row errors, seeded from a loaded checkpoint (or empty for a
+    fresh run) — and exposes the two callbacks ``Pipeline.execute`` fires.
+    Shared by :class:`~accrue.core.enricher.Enricher` and
+    ``Pipeline.retry_failed`` so both write identical checkpoint state.
+
+    Error messages are passed through the secret sanitizer before being
+    persisted, since checkpoint files outlive the process.
+
+    Args:
+        retry_cells: The failed cells this run will actually re-execute
+            (``{step: [row_index, ...]}``).  ``None`` means *every* failed
+            cell recorded in the checkpoint — the auto-resume default.  A
+            narrower selection (``Pipeline.retry_failed(rows=..., steps=...)``)
+            matters on write-back: unselected failures are preserved in the
+            checkpoint instead of being erased by the retried step's fresh
+            error list.
+    """
+
+    def __init__(
+        self,
+        manager: CheckpointManager,
+        *,
+        data_identifier: str,
+        category: str,
+        total_rows: int,
+        fields_dict: dict[str, dict[str, Any]],
+        checkpoint: CheckpointData | None = None,
+        retry_cells: dict[str, list[int]] | None = None,
+    ) -> None:
+        self._manager = manager
+        self._data_identifier = data_identifier
+        self._category = category
+        self._total_rows = total_rows
+        self._fields_dict = fields_dict
+
+        if checkpoint is not None:
+            self.completed: list[str] = list(checkpoint.completed_steps)
+            # Only completed steps' results are trustworthy; partial saves
+            # keep their step_results entry but the step re-runs from scratch.
+            self.results: dict[str, list[dict[str, Any]]] = {
+                k: v for k, v in checkpoint.step_results.items() if k in self.completed
+            }
+            self.row_errors: dict[str, dict[int, dict[str, str]]] = {
+                k: dict(v) for k, v in checkpoint.row_errors.items() if k in self.completed
+            }
+        else:
+            self.completed = []
+            self.results = {}
+            self.row_errors = {}
+
+        if retry_cells is None:
+            selection = {step: set(cells) for step, cells in self.row_errors.items() if cells}
+        else:
+            selection = {step: set(cells) for step, cells in retry_cells.items() if cells}
+        self._selection: dict[str, set[int]] = selection
+
+    @property
+    def prior_step_results(self) -> dict[str, list[dict[str, Any]]]:
+        """Completed steps' results, for ``Pipeline.execute(prior_step_results=...)``."""
+        return dict(self.results)
+
+    @property
+    def retry_cells(self) -> dict[str, list[int]]:
+        """Selected failed cells, for ``Pipeline.execute(retry_cells=...)``."""
+        return {step: sorted(cells) for step, cells in self._selection.items() if cells}
+
+    @property
+    def has_failed_cells(self) -> bool:
+        """True while any step still has a recorded failed cell."""
+        return any(cells for cells in self.row_errors.values())
+
+    def on_step_complete(
+        self,
+        step_name: str,
+        step_row_results: list[dict[str, Any]],
+        step_errors: list[RowError],
+    ) -> None:
+        """Record a completed step (fresh or retried) and persist the checkpoint."""
+        errors_by_row = {
+            e.row_index: {"type": e.error_type, "msg": _sanitize_secrets(str(e.error))}
+            for e in step_errors
+        }
+        # A retried step only re-executed its selected cells, so its fresh
+        # error list says nothing about the ones left out — carry those over
+        # rather than dropping them from the checkpoint.
+        retried = self._selection.get(step_name)
+        if retried is not None:
+            carried = {
+                idx: err
+                for idx, err in self.row_errors.get(step_name, {}).items()
+                if idx not in retried
+            }
+            errors_by_row = {**carried, **errors_by_row}
+
+        prior_completed = [s for s in self.completed if s != step_name]
+
+        self.results[step_name] = step_row_results
+        if errors_by_row:
+            self.row_errors[step_name] = errors_by_row
+        else:
+            self.row_errors.pop(step_name, None)
+        if step_name not in self.completed:
+            self.completed.append(step_name)
+
+        self._manager.save_step(
+            data_identifier=self._data_identifier,
+            category=self._category,
+            step_name=step_name,
+            step_row_results=step_row_results,
+            total_rows=self._total_rows,
+            fields_dict=self._fields_dict,
+            existing_completed=prior_completed,
+            existing_results={k: v for k, v in self.results.items() if k != step_name},
+            step_row_errors=errors_by_row or None,
+            existing_row_errors={k: v for k, v in self.row_errors.items() if k != step_name},
+        )
+
+    def finish(self) -> None:
+        """Settle the checkpoint at the end of a run.
+
+        Removed when nothing is left to heal (the historical
+        clean-up-on-success behaviour); **kept** while any cell is still
+        failing, because that record is exactly what
+        ``Pipeline.retry_failed()`` reads to re-run those cells.
+        """
+        if self.has_failed_cells:
+            total = sum(len(cells) for cells in self.row_errors.values())
+            logger.info(
+                "Checkpoint kept: %d failed cell(s) recorded — call "
+                "Pipeline.retry_failed() to re-run just those.",
+                total,
+            )
+            return
+        self._manager.cleanup(self._data_identifier, self._category)
+
+    def on_partial_checkpoint(
+        self,
+        step_name: str,
+        partial_results: list[dict[str, Any]],
+        completed_count: int,
+    ) -> None:
+        """Persist partial progress for an in-flight step (not marked completed).
+
+        The in-flight step is excluded from the completed list even when it
+        was previously completed (a retried step): if the retry crashes
+        mid-flight, the step must re-run from scratch rather than resume
+        from half-updated results.
+        """
+        self._manager.save_step(
+            data_identifier=self._data_identifier,
+            category=self._category,
+            step_name=step_name,
+            step_row_results=partial_results,
+            total_rows=self._total_rows,
+            fields_dict=self._fields_dict,
+            existing_completed=[s for s in self.completed if s != step_name],
+            existing_results={k: v for k, v in self.results.items() if k != step_name},
+            existing_row_errors={k: v for k, v in self.row_errors.items() if k != step_name},
+            partial=True,
+        )

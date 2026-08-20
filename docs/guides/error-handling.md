@@ -46,6 +46,8 @@ print(f"Success rate: {result.success_rate:.1%}")
 
 `result.success_rate` is a float between 0.0 and 1.0 representing the fraction of rows without errors.
 
+To re-run just those failed cells -- without paying again for the rows that worked -- see [`pipeline.retry_failed()`](caching.md#retrying-failed-cells). It needs `EnrichmentConfig(enable_checkpointing=True)` on the original run.
+
 ## Exception hierarchy
 
 ```

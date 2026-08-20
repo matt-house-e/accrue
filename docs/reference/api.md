@@ -62,6 +62,40 @@ await pipeline.run_async(
 
 Async variant. Use from FastAPI, Jupyter notebooks, or any async context. Same keywords as `run()` except `confirm`.
 
+### `pipeline.retry_failed(data, config?, hooks?, output_file?, *, rows?, steps?, run_log?, display_key?, data_identifier?)`
+
+```python
+pipeline.retry_failed(
+    data: pd.DataFrame | list[dict[str, Any]],
+    config: EnrichmentConfig | None = None,
+    hooks: EnrichmentHooks | None = None,
+    output_file: str | Path | None = None,
+    *,
+    rows: list[int] | None = None,
+    steps: list[str] | None = None,
+    run_log: bool | str | Path = False,
+    display_key: str | None = None,
+    data_identifier: str | None = None,
+) -> PipelineResult
+```
+
+Re-run only the `(step, row)` cells the previous run recorded as errored, reading them from that run's checkpoint. Cells that succeeded are served from the checkpoint and never re-invoked, so a 5-failure retry over 10,000 rows costs 5 calls. Requires `EnrichmentConfig(enable_checkpointing=True)` -- pass the same config the original run used. Returns a `PipelineResult` over the whole dataset. Raises `RuntimeError` if called from inside an event loop, and `PipelineError` if checkpointing is off or no valid checkpoint exists.
+
+- `rows` -- restrict the retry to these row indices. Failures left out stay recorded for a later retry.
+- `steps` -- restrict the retry to these step names.
+- `run_log` -- path of the failed run's log to append to. The retry keeps that run's `run_id` and `display_key` and appends a `retry_start` ... `retry_end` segment; recovered cells arrive as ordinary `row_complete` records. See the [run log guide](../guides/run-log.md).
+- `data_identifier` -- explicit checkpoint identifier. Defaults to the same shape-derived id the run used (columns + row count).
+
+Steps the previous run never *finished* run in full -- without them there is no result to return. Downstream steps of a healed cell are **not** re-run; see the [checkpointing guide](../guides/caching.md#retrying-failed-cells).
+
+### `pipeline.retry_failed_async(data, config?, hooks?, output_file?, *, rows?, steps?, run_log?, display_key?, data_identifier?)`
+
+```python
+await pipeline.retry_failed_async(...)  # same signature as retry_failed
+```
+
+Async variant of `retry_failed()`. Use from FastAPI, Jupyter notebooks, or any async context.
+
 ### `pipeline.runner(config?)`
 
 ```python
