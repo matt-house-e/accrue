@@ -43,10 +43,14 @@ accrue = "accrue.cli:main"
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40.0"]
 google = ["google-genai>=1.0.0"]
-# accrue-ui is not yet on PyPI — until then install it from
-# https://github.com/matt-house-e/accrue-ui (PyPI rejects direct git URLs
-# in dependency specs, so this stays a plain version spec).
-ui = ["accrue-ui>=0.1"]
+# There is deliberately no `ui` extra. accrue-ui is not on PyPI, and PyPI
+# rejects direct git URLs in dependency specs, so `pip install accrue[ui]`
+# could only ever resolve to a package that does not exist — it failed
+# outright while being the headline install line in the CLI hint and README.
+# Install it from the repo instead:
+#     pip install git+https://github.com/matt-house-e/accrue-ui
+# Restore this once accrue-ui is published:
+# ui = ["accrue-ui>=0.1"]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.25.0",
