@@ -24,7 +24,7 @@ Build a pipeline from an ordered list of steps. Validates on construction:
 
 Raises `PipelineError` on validation failure.
 
-### `pipeline.run(data, config?, hooks?, output_file?, confirm?, *, run_log?, display_key?)`
+### `pipeline.run(data, config?, hooks?, output_file?, confirm?, *, run_log?, display_key?, capture?)`
 
 ```python
 pipeline.run(
@@ -36,6 +36,7 @@ pipeline.run(
     *,
     run_log: bool | str | Path = False,
     display_key: str | None = None,
+    capture: str = "metadata",
 ) -> PipelineResult
 ```
 
@@ -45,8 +46,9 @@ Synchronous entry point. Wraps `asyncio.run()` internally. Raises `RuntimeError`
 - `confirm` -- print a `plan()` preview and prompt y/n before the full run.
 - `run_log` -- write an append-only JSONL event stream for the run. `True` writes `.accrue/runs/<run_id>.jsonl` under the CWD; a `str` / `Path` names the file. User `hooks` still fire. See the [run log guide](../guides/run-log.md).
 - `display_key` -- label column recorded in the run log (defaults to the first string column).
+- `capture` -- run-log capture tier: `"metadata"` (default; attempt metadata only), `"prompts"` (also persist rendered LLM prompt/response bodies to a `<run>.prompts.jsonl` sidecar), or `"full"` (currently behaves as `"prompts"`). Bodies are often PII, hence off by default. Raises `ValueError` on any other value. See [capture tiers](../guides/run-log.md#capture-tiers).
 
-### `pipeline.run_async(data, config?, hooks?, output_file?, *, run_log?, display_key?)`
+### `pipeline.run_async(data, config?, hooks?, output_file?, *, run_log?, display_key?, capture?)`
 
 ```python
 await pipeline.run_async(
@@ -57,6 +59,7 @@ await pipeline.run_async(
     *,
     run_log: bool | str | Path = False,
     display_key: str | None = None,
+    capture: str = "metadata",
 ) -> PipelineResult
 ```
 
@@ -460,6 +463,7 @@ class EnrichmentHooks:
     on_step_start: Callable[[StepStartEvent], Any] | None = None
     on_step_end: Callable[[StepEndEvent], Any] | None = None
     on_row_complete: Callable[[RowCompleteEvent], Any] | None = None
+    on_row_attempt: Callable[[RowAttemptEvent], Any] | None = None
 ```
 
 ---
@@ -473,6 +477,7 @@ from accrue import (
     StepStartEvent,
     StepEndEvent,
     RowCompleteEvent,
+    RowAttemptEvent,
 )
 ```
 
@@ -539,6 +544,34 @@ Fired after each row completes within a step.
 
 `usage` (a `UsageInfo`) and `elapsed_ms` are populated on the realtime path when available; `None` in batch mode, for cache hits, skipped rows, and steps that emit no usage (e.g. `FunctionStep`).
 
+### RowAttemptEvent
+
+Fired once per LLM provider attempt, inside `LLMStep.run()`'s retry loops — several precede a retrying cell's single `RowCompleteEvent`. Only LLM steps fire it. Additive (issue #134).
+
+| Field | Type | Default |
+|-------|------|---------|
+| `step_name` | `str` | |
+| `row_index` | `int` | |
+| `attempt` | `int` | 1-based, across both loops |
+| `kind` | `str` | `"api"` or `"parse"` |
+| `status` | `str` | `"ok"`, `"rate_limited"`, `"timeout"`, `"api_error"`, `"parse_error"`, `"validation_error"` |
+| `latency_ms` | `float \| None` | |
+| `backoff_s` | `float \| None` | sleep before the next attempt, else `None` |
+| `error` | `BaseException \| None` | `None` |
+| `body` | `dict \| None` | `None` — rendered `{messages, response, parsed}`, present only at `capture >= "prompts"` |
+
+---
+
+## read_prompt_ref
+
+```python
+from accrue import read_prompt_ref
+
+body = read_prompt_ref(sidecar_path: str | Path, off: int, len: int) -> dict
+```
+
+Resolves a `row_attempt` record's `prompt_ref` into the captured body stored in the [prompt sidecar](../guides/run-log.md#prompt-sidecar). Seeks to byte offset `off`, reads `len` bytes, and JSON-parses the one body there. A record's ref splats straight in: `read_prompt_ref(sidecar, **rec["prompt_ref"])`. Only meaningful for runs at `capture >= "prompts"` (at `metadata`, every `prompt_ref` is `null`).
+
 ---
 
 ## JsonlRunLogger
@@ -560,6 +593,7 @@ JsonlRunLogger(
     segment: str = "run",             # "run" or "retry"
     t_offset: float = 0.0,            # seconds added to every record's t
     retry_cells: dict[str, list[int]] | None = None,  # cells recorded in retry_start
+    capture: str = "metadata",        # "metadata" | "prompts" | "full"
 )
 ```
 
@@ -569,6 +603,7 @@ JsonlRunLogger(
 | `segment` | `str` | `"run"` (default) frames the events as a whole run, `pipeline_start` … `pipeline_end`. `"retry"` frames them as a failed-only retry appended to an existing run: the wrapper records become `retry_start` / `retry_end`, so a consumer never mistakes the appended segment for a second run. |
 | `t_offset` | `float` | Seconds added to every record's `t`. Set it to the existing file's last `t` (see `read_run_context`) when appending to a log, keeping `t` non-decreasing across the file. `run(..., run_log=<existing path>)` does this for you. |
 | `retry_cells` | `dict[str, list[int]] \| None` | `{step: [row_index, ...]}` this retry will re-execute, recorded in `retry_start` so a UI can mark the cells in flight. |
+| `capture` | `str` | Capture tier gating the prompt sidecar: `"metadata"` (default, no bodies), `"prompts"` / `"full"` append each captured LLM attempt body to `<run>.prompts.jsonl` and reference it from `row_attempt` via `prompt_ref`. See [capture tiers](../guides/run-log.md#capture-tiers). |
 
 | Attribute | Type | Description |
 |-----------|------|-------------|

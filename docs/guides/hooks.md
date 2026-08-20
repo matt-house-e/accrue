@@ -93,6 +93,28 @@ Fired after each individual row completes within a step.
 | `usage` | `UsageInfo \| None` | Per-row token usage when available (realtime LLM rows); `None` for function steps, cache hits, skipped rows, and batch mode |
 | `elapsed_ms` | `float \| None` | Wall-clock milliseconds for this row (excludes queue wait); `None` in batch mode |
 
+### RowAttemptEvent
+
+Fired once per LLM provider attempt, inside `LLMStep.run()`'s retry loops — so a cell that retries emits several before its single `RowCompleteEvent`, and a cell that succeeds first try emits one. Only LLM steps fire it; function steps do not. Additive (issue #134).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `step_name` | `str` | Name of the step |
+| `row_index` | `int` | Index of the row being attempted |
+| `attempt` | `int` | 1-based attempt number, counted across both retry loops |
+| `kind` | `str` | `"api"` (the provider call raised `LLMAPIError`) or `"parse"` (the call returned and was parsed/validated, whether or not that succeeded) |
+| `status` | `str` | Short outcome: `"ok"`, `"rate_limited"`, `"timeout"`, `"api_error"`, `"parse_error"`, `"validation_error"` |
+| `latency_ms` | `float \| None` | Wall-clock milliseconds for this attempt's provider call |
+| `backoff_s` | `float \| None` | Seconds slept before the *next* attempt (set on a retrying `api` attempt), else `None` |
+| `error` | `BaseException \| None` | The attempt's exception, or `None` on success |
+| `body` | `dict \| None` | Rendered `{messages, response, parsed}` for the attempt, present only when the run's [capture tier](run-log.md#capture-tiers) is `>= "prompts"`; `None` at the default `metadata` tier |
+
+```python
+hooks = EnrichmentHooks(
+    on_row_attempt=lambda e: print(f"{e.step_name} row {e.row_index}: {e.kind}/{e.status}"),
+)
+```
+
 ## Async hooks
 
 Both sync and async callables work. Async hooks are awaited automatically:
@@ -161,6 +183,7 @@ from accrue import (
     StepStartEvent,
     StepEndEvent,
     RowCompleteEvent,
+    RowAttemptEvent,
 )
 ```
 
