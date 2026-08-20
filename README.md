@@ -136,6 +136,20 @@ result = pipeline.run(companies_df)
 
 - **`provider_kwargs`** -- Escape hatch for provider-specific features (extended thinking, effort control, etc.) without waiting for first-class support.
 
+### Watching runs
+
+Pair `run_log=True` with `accrue watch` for a live view of a running pipeline:
+
+```python
+result = pipeline.run(companies_df, run_log=True)
+```
+
+```bash
+accrue watch
+```
+
+`accrue watch` delegates to the optional [accrue-ui](https://github.com/matt-house-e/accrue-ui) package (`pip install accrue[ui]`). accrue-ui is not yet on PyPI -- until then, install it from the repo: `pip install git+https://github.com/matt-house-e/accrue-ui`.
+
 ## Sweet Spot
 
 Accrue is built for **100 to 50,000 rows** -- too many for manual work or single-call tools, too few to justify big data infrastructure.

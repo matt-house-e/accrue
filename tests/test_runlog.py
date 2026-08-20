@@ -20,6 +20,7 @@ from accrue.core.runlog import (
     SCHEMA_VERSION,
     default_display_key,
     new_run_id,
+    resolve_row_keys,
     resolve_run_log_path,
 )
 from accrue.schemas.base import UsageInfo
@@ -41,6 +42,7 @@ REQUIRED_KEYS = {
     "row_complete": {
         "step",
         "row",
+        "key",
         "status",
         "from_cache",
         "values",
@@ -178,6 +180,14 @@ class TestGoldenFixture:
                 assert rec["error"] is None
                 assert isinstance(rec["elapsed_ms"], (int, float))
                 assert isinstance(rec["values"], dict) and rec["values"]
+
+    def test_row_key_present_and_correct_on_every_row(self):
+        """Every row_complete carries the row's display value."""
+        records = _load(FIXTURE)
+        rows = [r for r in records if r["type"] == "row_complete"]
+        assert rows  # fixture pipeline has display_key "company" -> never null
+        for rec in rows:
+            assert rec["key"] == f"company-{rec['row']:02d}"
 
     def test_ok_row_values_content(self):
         records = _load(FIXTURE)
@@ -385,6 +395,88 @@ class TestDisplayKey:
         pipeline = Pipeline([FunctionStep("noop", lambda ctx: {"x": 1}, fields=["x"])])
         pipeline.run([{"id": 1, "name": "acme"}], config=_quiet_config(), run_log=path)
         assert _load(path)[0]["display_key"] == "name"
+
+
+# ---------------------------------------------------------------------------
+# row_complete.key (additive within v1)
+# ---------------------------------------------------------------------------
+
+
+class TestRowKey:
+    def _keys(self, path: Path) -> dict[int, object]:
+        return {r["row"]: r["key"] for r in _load(path) if r["type"] == "row_complete"}
+
+    def test_key_resolved_from_list_input(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        _tiny_pipeline().run(
+            [{"name": "acme"}, {"name": "globex"}], config=_quiet_config(), run_log=path
+        )
+        assert self._keys(path) == {0: "acme", 1: "globex"}
+
+    def test_key_resolved_from_dataframe_input(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        df = pd.DataFrame({"name": ["acme", "globex"], "n": [1, 2]})
+        _tiny_pipeline().run(df, config=_quiet_config(), run_log=path)
+        assert self._keys(path) == {0: "acme", 1: "globex"}
+
+    def test_key_is_str_of_non_string_values(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        pipeline = Pipeline([FunctionStep("noop", lambda ctx: {"x": 1}, fields=["x"])])
+        pipeline.run(
+            [{"id": 7, "n": 1}, {"id": 8, "n": 2}],
+            config=_quiet_config(),
+            run_log=path,
+            display_key="id",
+        )
+        assert self._keys(path) == {0: "7", 1: "8"}
+
+    def test_key_null_when_display_key_column_absent(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        _tiny_pipeline().run(
+            [{"name": "acme"}], config=_quiet_config(), run_log=path, display_key="nope"
+        )
+        assert self._keys(path) == {0: None}
+
+    def test_key_null_for_rows_missing_or_null_value(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        pipeline = Pipeline([FunctionStep("noop", lambda ctx: {"x": 1}, fields=["x"])])
+        pipeline.run(
+            [{"name": "acme"}, {"name": None}, {"n": 1}],
+            config=_quiet_config(),
+            run_log=path,
+            display_key="name",
+        )
+        assert self._keys(path) == {0: "acme", 1: None, 2: None}
+
+    def test_key_null_for_nan_in_dataframe(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        df = pd.DataFrame({"name": ["acme", float("nan")]})
+        pipeline = Pipeline([FunctionStep("noop", lambda ctx: {"x": 1}, fields=["x"])])
+        pipeline.run(df, config=_quiet_config(), run_log=path, display_key="name")
+        assert self._keys(path) == {0: "acme", 1: None}
+
+    def test_standalone_logger_without_data_emits_null_keys(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        pipeline = _tiny_pipeline()
+        logger = JsonlRunLogger(path, pipeline=pipeline, display_key="name")
+        pipeline.run([{"name": "acme"}], config=_quiet_config(), hooks=logger.hooks)
+        assert self._keys(path) == {0: None}
+
+    def test_standalone_logger_with_data_resolves_keys(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        pipeline = _tiny_pipeline()
+        data = [{"name": "acme"}, {"name": "globex"}]
+        logger = JsonlRunLogger(path, pipeline=pipeline, display_key="name", data=data)
+        pipeline.run(data, config=_quiet_config(), hooks=logger.hooks)
+        assert self._keys(path) == {0: "acme", 1: "globex"}
+
+    def test_resolve_row_keys_helper(self):
+        assert resolve_row_keys(None, "name") == []
+        assert resolve_row_keys([{"name": "a"}], None) == []
+        assert resolve_row_keys([{"name": "a"}, {}], "name") == ["a", None]
+        df = pd.DataFrame({"n": [1, 2]})
+        assert resolve_row_keys(df, "absent") == []
+        assert resolve_row_keys(df, "n") == ["1", "2"]
 
 
 # ---------------------------------------------------------------------------
