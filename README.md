@@ -148,7 +148,13 @@ result = pipeline.run(companies_df, run_log=True)
 accrue watch
 ```
 
-`accrue watch` delegates to the optional [accrue-ui](https://github.com/matt-house-e/accrue-ui) package (`pip install accrue[ui]`). accrue-ui is not yet on PyPI -- until then, install it from the repo: `pip install git+https://github.com/matt-house-e/accrue-ui`.
+`accrue watch` delegates to the optional [accrue-ui](https://github.com/matt-house-e/accrue-ui) package. It is not on PyPI, so install it from the repo:
+
+```bash
+pip install git+https://github.com/matt-house-e/accrue-ui
+```
+
+There is no `accrue[ui]` extra: it could only resolve to a package that does not exist, so it failed outright. It returns when accrue-ui is published.
 
 ## Sweet Spot
 

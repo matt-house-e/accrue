@@ -760,7 +760,7 @@ class Pipeline:
         if retry or config.enable_checkpointing:
             session = self._open_checkpoint_session(
                 data,
-                len(rows_data),
+                rows_data,
                 all_fields,
                 config,
                 data_identifier,
@@ -772,7 +772,19 @@ class Pipeline:
         retry_cells: dict[str, list[int]] | None = None
         if session is not None:
             prior_step_results = session.prior_step_results or None
-            retry_cells = session.retry_cells or None
+            # Resolve the requested cells into the work this run will really
+            # do — dropping what has no prior result, adding the downstream
+            # cells a healed value invalidates — before anything reports on
+            # it.  The run log records these cells, and the checkpoint's
+            # write-back has to agree with them.
+            retry_cells = (
+                self._resolve_retry_map(
+                    session.retry_cells, prior_step_results or {}, len(rows_data)
+                )
+                or None
+            )
+            if retry_cells:
+                session.note_retried_cells(retry_cells)
 
         if run_log:
             from ..core.runlog import (
@@ -787,14 +799,24 @@ class Pipeline:
             prev_run_id: str | None = None
             prev_display_key: str | None = None
             t_offset = 0.0
-            if retry and run_log is not True:
+            if run_log is not True:
+                # Read the context whenever the target file already exists —
+                # not only on a retry.  ``t`` is a within-file ordering clock,
+                # so a second run appended to the same log has to continue it
+                # rather than restart at zero.
                 prev_run_id, prev_display_key, t_offset = read_run_context(Path(run_log))
 
-            run_id = prev_run_id or new_run_id()
-            resolved_key = display_key
-            if resolved_key is None:
-                resolved_key = prev_display_key or default_display_key(data)
             appending = retry and prev_run_id is not None
+            run_id = prev_run_id if appending else new_run_id()
+            if display_key is not None:
+                resolved_key = display_key
+            elif appending:
+                # The run being healed already decided this — including when
+                # it decided "no display key".  Re-deriving one would key the
+                # retry's rows differently from the rows above them.
+                resolved_key = prev_display_key
+            else:
+                resolved_key = default_display_key(data)
             run_logger = JsonlRunLogger(
                 resolve_run_log_path(run_log, run_id),
                 run_id=run_id,
@@ -802,7 +824,7 @@ class Pipeline:
                 pipeline=self,
                 data=data,
                 segment="retry" if appending else "run",
-                t_offset=t_offset if appending else 0.0,
+                t_offset=t_offset,
                 retry_cells=retry_cells,
             )
             hooks = _merge_hooks(run_logger.hooks, hooks)
@@ -908,7 +930,7 @@ class Pipeline:
     def _open_checkpoint_session(
         self,
         data: pd.DataFrame | list[dict[str, Any]],
-        num_rows: int,
+        rows_data: list[dict[str, Any]],
         all_fields: dict[str, dict[str, Any]],
         config: EnrichmentConfig,
         data_identifier: str | None,
@@ -936,8 +958,19 @@ class Pipeline:
                 "Pass the run's EnrichmentConfig(enable_checkpointing=True)."
             )
 
+        if retry and steps is not None:
+            unknown = [name for name in steps if name not in self._step_map]
+            if unknown:
+                raise PipelineError(
+                    f"retry_failed(steps={steps!r}) names steps this pipeline does not "
+                    f"have: {unknown}. Known steps: {self.step_names}."
+                )
+
+        num_rows = len(rows_data)
         manager = CheckpointManager(config)
-        identifier = data_identifier or derive_data_identifier(_dataset_columns(data), num_rows)
+        identifier = data_identifier or derive_data_identifier(
+            _dataset_columns(data), num_rows, rows_data
+        )
         validation = {
             "expected_total_rows": num_rows,
             "expected_fields": all_fields,
@@ -1112,13 +1145,66 @@ class Pipeline:
 
     # -- execution -------------------------------------------------------
 
+    def _resolve_retry_map(
+        self,
+        retry_cells: dict[str, list[int]] | None,
+        prior_step_results: dict[str, list[dict[str, Any]]],
+        num_rows: int,
+    ) -> dict[str, list[int]]:
+        """Turn requested failed cells into the cells a run will re-execute.
+
+        Two things happen here:
+
+        1. **Filtering.**  A cell is only meaningful for a step whose prior
+           results we hold; a step with none runs in full anyway.  Row indices
+           outside the dataset are dropped.
+        2. **Cascade.**  Re-running a cell changes the value its dependents
+           consumed.  Every downstream step of a retried step is re-run for
+           the same rows, walked transitively through the DAG, so a healed
+           upstream value is never left paired with the output a poisoned one
+           produced.  Dependents with no prior results are skipped — they run
+           in full regardless.
+
+        Idempotent: resolving an already-resolved map returns it unchanged.
+        """
+        retry_map: dict[str, list[int]] = {}
+        for step_name, indices in (retry_cells or {}).items():
+            if step_name not in prior_step_results:
+                continue
+            selected = sorted({i for i in indices if 0 <= i < num_rows})
+            if selected:
+                retry_map[step_name] = selected
+        if not retry_map:
+            return retry_map
+
+        dependents: dict[str, list[str]] = {step.name: [] for step in self._steps}
+        for step in self._steps:
+            for dep in step.depends_on:
+                if dep in dependents:
+                    dependents[dep].append(step.name)
+
+        pending = [(name, set(indices)) for name, indices in retry_map.items()]
+        while pending:
+            name, indices = pending.pop()
+            for dependent in dependents.get(name, []):
+                if dependent not in prior_step_results:
+                    continue  # not checkpointed — it re-runs in full
+                current = set(retry_map.get(dependent, ()))
+                widened = current | indices
+                if widened != current:
+                    retry_map[dependent] = sorted(widened)
+                    pending.append((dependent, widened - current))
+        return retry_map
+
     async def execute(
         self,
         rows: list[dict[str, Any]],
         all_fields: dict[str, dict[str, Any]],
         config: EnrichmentConfig | None = None,
         prior_step_results: dict[str, list[dict[str, Any]]] | None = None,
-        on_step_complete: Callable[[str, list[dict[str, Any]], list[RowError]], None] | None = None,
+        on_step_complete: (
+            Callable[[str, list[dict[str, Any]], list[RowError], set[int]], None] | None
+        ) = None,
         cache_manager: Any = None,
         on_partial_checkpoint: Callable[[str, list[dict], int], None] | None = None,
         hooks: EnrichmentHooks | None = None,
@@ -1132,16 +1218,22 @@ class Pipeline:
             config: Optional EnrichmentConfig.
             prior_step_results: Pre-populated results for checkpoint resume.
             on_step_complete: Sync callback fired after each step completes,
-                with ``(step_name, step_row_results, step_row_errors)``.
+                with ``(step_name, step_row_results, step_row_errors,
+                skipped_row_indices)``.  Exceptions it raises are logged and
+                the callback is dropped for the rest of the run — a failed
+                checkpoint write must not discard work already paid for.
             cache_manager: Optional CacheManager for input-hash caching.
             on_partial_checkpoint: Callback(step_name, results, completed_count)
                 fired every checkpoint_interval rows.
             hooks: Optional EnrichmentHooks for lifecycle events.
             retry_cells: Failed cells to re-run within steps that are already
                 present in ``prior_step_results`` (``{step: [row_index, ...]}``,
-                #129).  Listed steps re-execute only those row indices; every
-                other row keeps its prior result without re-invocation.  Steps
-                absent from ``prior_step_results`` run in full as usual.
+                #129).  Listed steps re-execute only those row indices, *plus*
+                the same rows of every downstream step that holds prior
+                results — a healed value invalidates whatever consumed the
+                broken one.  Every other row keeps its prior result without
+                re-invocation.  Steps absent from ``prior_step_results`` run
+                in full as usual.
 
         Returns:
             Tuple of (accumulated results, row errors, cost summary,
@@ -1166,16 +1258,9 @@ class Pipeline:
         all_errors: list[RowError] = []
         step_usage_map: dict[str, StepUsage] = {}
 
-        # Failed cells to re-run inside already-checkpointed steps (#129).
-        # Only meaningful for steps whose prior results we hold — everything
-        # else runs in full.
-        retry_map: dict[str, list[int]] = {}
-        for step_name, indices in (retry_cells or {}).items():
-            if step_name not in step_values:
-                continue
-            selected = sorted({i for i in indices if 0 <= i < num_rows})
-            if selected:
-                retry_map[step_name] = selected
+        # Failed cells to re-run inside already-checkpointed steps (#129),
+        # plus the downstream cells their healed values invalidate.
+        retry_map = self._resolve_retry_map(retry_cells, step_values, num_rows)
 
         total_steps = sum(len(level) for level in self._execution_levels)
         step_bar = tqdm(
@@ -1218,6 +1303,11 @@ class Pipeline:
                         ),
                     )
 
+                # Rows each step skipped via run_if/skip_if, filled in as the
+                # step runs.  The checkpoint needs them: a retried cell that
+                # got skipped produced no result, so it is not healed.
+                skipped_by_step: dict[str, set[int]] = {name: set() for name in steps_to_run}
+
                 level_coros = [
                     self._execute_step(
                         self._step_map[step_name],
@@ -1238,6 +1328,7 @@ class Pipeline:
                         seed_results=(
                             step_values.get(step_name) if step_name in retry_map else None
                         ),
+                        skipped_rows=skipped_by_step[step_name],
                     )
                     for step_name in steps_to_run
                 ]
@@ -1284,12 +1375,30 @@ class Pipeline:
 
                 step_bar.update(len(steps_to_run))
 
-                # Fire callback for each newly-executed step
+                # Fire callback for each newly-executed step.  A checkpoint
+                # write must never take the run down with it: the API spend
+                # has already happened, so a failure here degrades to running
+                # without checkpointing rather than raising.
                 if on_step_complete is not None:
                     for step_name in steps_to_run:
-                        on_step_complete(
-                            step_name, step_values[step_name], errors_by_step[step_name]
-                        )
+                        try:
+                            on_step_complete(
+                                step_name,
+                                step_values[step_name],
+                                errors_by_step[step_name],
+                                skipped_by_step[step_name],
+                            )
+                        except Exception as exc:
+                            logger.error(
+                                "Checkpoint save failed after step '%s' (%s: %s) — "
+                                "continuing without checkpointing; this run cannot be "
+                                "resumed or retried.",
+                                step_name,
+                                type(exc).__name__,
+                                exc,
+                            )
+                            on_step_complete = None
+                            break
 
         step_bar.close()
 
@@ -1330,6 +1439,7 @@ class Pipeline:
         max_workers: int = 3,
         only_rows: list[int] | None = None,
         seed_results: list[dict[str, Any]] | None = None,
+        skipped_rows: set[int] | None = None,
     ) -> tuple[list[RowError], StepUsage | None, float]:
         """Execute a single step across all rows concurrently.
 
@@ -1352,6 +1462,9 @@ class Pipeline:
                 ``seed_results`` value.  ``None`` runs every row.
             seed_results: Prior per-row results to start from, used with
                 ``only_rows`` so untouched rows keep their checkpointed value.
+            skipped_rows: Mutable set the step records ``run_if``/``skip_if``
+                skips into, so the caller can tell a skipped cell from an
+                executed one.
 
         Returns:
             Tuple of (row errors, aggregated StepUsage or None, elapsed seconds).
@@ -1374,6 +1487,7 @@ class Pipeline:
                 show_progress=show_progress,
                 only_rows=only_rows,
                 seed_results=seed_results,
+                skipped_rows=skipped_rows,
             )
 
         from ..core.cache import _compute_step_cache_key
@@ -1426,6 +1540,8 @@ class Pipeline:
                     if await _should_skip_row(step, rows[idx], prior):
                         rows_skipped += 1
                         row_was_skipped[idx] = True
+                        if skipped_rows is not None:
+                            skipped_rows.add(idx)
                         return StepResult(values=_build_skip_values(step))
 
                     cache_key = None
@@ -1465,6 +1581,24 @@ class Pipeline:
         hook_tasks: list[asyncio.Task] = []
         # None signals a worker to exit; one sentinel per worker.
         raise_exc: BaseException | None = None
+        partial_checkpoint_failed = False
+
+        def _save_partial(count: int) -> None:
+            """Persist partial progress, never letting a write failure kill the run."""
+            nonlocal partial_checkpoint_failed
+            if on_partial_checkpoint is None or partial_checkpoint_failed:
+                return
+            try:
+                on_partial_checkpoint(step.name, results, count)
+            except Exception as exc:
+                partial_checkpoint_failed = True
+                logger.error(
+                    "Partial checkpoint failed in step '%s' (%s: %s) — continuing "
+                    "without further partial saves for this step.",
+                    step.name,
+                    type(exc).__name__,
+                    exc,
+                )
 
         def _handle_row_result(
             idx: int,
@@ -1538,12 +1672,8 @@ class Pipeline:
 
             completed_count += 1
             row_bar.update(1)
-            if (
-                checkpoint_interval > 0
-                and on_partial_checkpoint is not None
-                and completed_count % checkpoint_interval == 0
-            ):
-                on_partial_checkpoint(step.name, results, completed_count)
+            if checkpoint_interval > 0 and completed_count % checkpoint_interval == 0:
+                _save_partial(completed_count)
 
         async def _worker() -> None:
             """Pull indices from the queue and process each row."""
@@ -1621,8 +1751,8 @@ class Pipeline:
             await _cancel_and_drain()
             # Persist whatever was accumulated so resume works
             step_values[step.name] = results
-            if on_partial_checkpoint is not None and completed_count > 0:
-                on_partial_checkpoint(step.name, results, completed_count)
+            if completed_count > 0:
+                _save_partial(completed_count)
             raise
 
         # Re-raise row error outside the try/except so it is not caught above
@@ -1674,6 +1804,7 @@ class Pipeline:
         show_progress: bool = False,
         only_rows: list[int] | None = None,
         seed_results: list[dict[str, Any]] | None = None,
+        skipped_rows: set[int] | None = None,
     ) -> tuple[list[RowError], StepUsage | None, float]:
         """Execute a batch-eligible LLMStep via the provider Batch API.
 
@@ -1751,6 +1882,8 @@ class Pipeline:
             if await _should_skip_row(step, rows[idx], prior):
                 rows_skipped += 1
                 row_was_skipped[idx] = True
+                if skipped_rows is not None:
+                    skipped_rows.add(idx)
                 results[idx] = _build_skip_values(step)
                 row_bar.update(1)
                 continue

@@ -10,6 +10,8 @@ import hashlib
 import json
 import os
 import time
+import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -28,6 +30,11 @@ logger = get_logger(__name__)
 #: Checkpoint category used by every built-in runner.  Kept as one constant so
 #: a run and its later ``Pipeline.retry_failed()`` resolve the same file.
 DEFAULT_CATEGORY = "_default"
+
+#: Maximum characters kept from a persisted row-error message.  A provider can
+#: return a multi-megabyte body; the checkpoint only needs enough to identify
+#: the failure, and the full exception is still in ``result.errors``.
+MAX_ERROR_MESSAGE_CHARS = 500
 
 try:
     import numpy as _numpy
@@ -101,18 +108,67 @@ def _typed_decoder(d: dict) -> Any:
 # -- data model --------------------------------------------------------------
 
 
-def derive_data_identifier(columns: list[Any], num_rows: int) -> str:
-    """Deterministic checkpoint identifier for a dataset shape.
+#: Rows sampled from each end of the dataset for the content digest.
+_DIGEST_SAMPLE_ROWS = 5
 
-    Derived from the column names and row count (sha256, not ``hash()``,
-    so it is stable across processes).  This is the identifier the
+
+def _content_digest(rows: Sequence[Mapping[str, Any]] | None) -> str | None:
+    """Stable sha256 over the first and last few rows' values.
+
+    Returns ``None`` when there is nothing to sample.  Each row is serialized
+    as its ``[key, value]`` pairs sorted by key, so a ``list[dict]`` whose rows
+    carry different keys still hashes deterministically; values JSON cannot
+    encode fall back to ``str()``.
+    """
+    if not rows:
+        return None
+    sample = list(rows[:_DIGEST_SAMPLE_ROWS]) + list(rows[-_DIGEST_SAMPLE_ROWS:])
+    payload = [
+        sorted(([str(k), v] for k, v in row.items()), key=lambda pair: pair[0])
+        if isinstance(row, Mapping)
+        else [["", row]]
+        for row in sample
+    ]
+    try:
+        blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):  # pragma: no cover — defensive
+        blob = repr(payload)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def derive_data_identifier(
+    columns: list[Any],
+    num_rows: int,
+    rows: Sequence[Mapping[str, Any]] | None = None,
+) -> str:
+    """Deterministic checkpoint identifier for a dataset.
+
+    Derived from the column names, the row count, and a digest of the first
+    and last ``5`` rows' values (sha256, not ``hash()``, so it is stable
+    across processes).  This is the identifier the
     :class:`~accrue.core.enricher.Enricher` and ``Pipeline.retry_failed``
     use when the caller does not pass an explicit ``data_identifier``.
+
+    The content digest is what keeps two *different* datasets that happen to
+    share a shape — same columns, same row count — off each other's
+    checkpoint.  Without it, and with ``checkpoint_dir`` defaulting to a
+    single global state directory, the second dataset silently resumed the
+    first one's results.
+
+    The flip side is deliberate: **editing a value in the first or last five
+    rows invalidates the checkpoint** and the next run starts fresh.  Pass an
+    explicit ``data_identifier`` to ``run()`` / ``retry_failed()`` when you
+    want a checkpoint to survive edits to the data.
     """
     source = json.dumps(
-        {"columns": list(columns), "rows": num_rows},
+        {
+            "columns": list(columns),
+            "rows": num_rows,
+            "digest": _content_digest(rows),
+        },
         sort_keys=True,
         separators=(",", ":"),
+        default=str,
     ).encode("utf-8")
     return f"df_{hashlib.sha256(source).hexdigest()[:16]}"
 
@@ -193,8 +249,8 @@ class CheckpointManager:
             step_row_errors: Failed cells for *this* step, keyed by row index
                 (``{row_index: {"type": ..., "msg": ...}}``).  Recorded so a
                 later failed-only resume (#129) can re-run exactly these
-                cells.  Ignored for partial saves — a partial step re-runs
-                from scratch anyway.
+                cells.  Written for partial saves too: a step that is
+                mid-retry must not lose the record of what is still failing.
             existing_row_errors: Failed cells of previously completed steps,
                 carried forward unchanged (``{step: {row_index: {...}}}``).
 
@@ -215,7 +271,7 @@ class CheckpointManager:
             for step, cells in (existing_row_errors or {}).items()
             if step != step_name and cells
         }
-        if not partial and step_row_errors:
+        if step_row_errors:
             row_errors[step_name] = step_row_errors
 
         payload = {
@@ -234,7 +290,10 @@ class CheckpointManager:
         }
 
         path = self._get_path(data_identifier, category)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        # The tmp name must be unique per writer: two processes checkpointing
+        # the same dataset would otherwise write the same tmp file and
+        # os.replace() a half-written mixture into place.
+        tmp_path = path.with_suffix(f"{path.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         try:
             try:
                 with open(tmp_path, "w", encoding="utf-8") as f:
@@ -562,26 +621,55 @@ class CheckpointSession:
         """True while any step still has a recorded failed cell."""
         return any(cells for cells in self.row_errors.values())
 
+    def note_retried_cells(self, cells: dict[str, list[int]]) -> None:
+        """Widen the selection to the cells the run will actually re-execute.
+
+        ``Pipeline.execute()`` resolves the requested cells into the real
+        work list — it drops cells whose step has no prior results and adds
+        the downstream cells a healed value invalidates.  Telling the session
+        about the additions keeps write-back honest: a cell that re-ran is
+        described by its fresh result, never by the stale error it carried in.
+        Widen-only, so failures deliberately left out of this run stay
+        recorded.
+        """
+        for step, indices in cells.items():
+            if indices:
+                self._selection.setdefault(step, set()).update(indices)
+
     def on_step_complete(
         self,
         step_name: str,
         step_row_results: list[dict[str, Any]],
         step_errors: list[RowError],
+        skipped_rows: set[int] | None = None,
     ) -> None:
-        """Record a completed step (fresh or retried) and persist the checkpoint."""
+        """Record a completed step (fresh or retried) and persist the checkpoint.
+
+        Args:
+            skipped_rows: Row indices ``run_if`` / ``skip_if`` skipped in this
+                step.  A skipped cell produced no result, so a *retried* cell
+                that got skipped is not healed — its recorded error is kept
+                rather than erased (which would delete the checkpoint and lose
+                the failure for good).
+        """
         errors_by_row = {
-            e.row_index: {"type": e.error_type, "msg": _sanitize_secrets(str(e.error))}
+            e.row_index: {
+                "type": e.error_type,
+                "msg": _sanitize_secrets(str(e.error))[:MAX_ERROR_MESSAGE_CHARS],
+            }
             for e in step_errors
         }
         # A retried step only re-executed its selected cells, so its fresh
         # error list says nothing about the ones left out — carry those over
-        # rather than dropping them from the checkpoint.
+        # rather than dropping them from the checkpoint.  A selected cell that
+        # was *skipped* counts as left out: nothing ran, nothing was healed.
         retried = self._selection.get(step_name)
         if retried is not None:
+            unresolved = retried & set(skipped_rows or ())
             carried = {
                 idx: err
                 for idx, err in self.row_errors.get(step_name, {}).items()
-                if idx not in retried
+                if idx not in retried or idx in unresolved
             }
             errors_by_row = {**carried, **errors_by_row}
 
@@ -632,13 +720,21 @@ class CheckpointSession:
         partial_results: list[dict[str, Any]],
         completed_count: int,
     ) -> None:
-        """Persist partial progress for an in-flight step (not marked completed).
+        """Persist partial progress for an in-flight step.
 
-        The in-flight step is excluded from the completed list even when it
-        was previously completed (a retried step): if the retry crashes
-        mid-flight, the step must re-run from scratch rather than resume
-        from half-updated results.
+        A step running for the *first* time is excluded from the completed
+        list: its results hold ``{}`` for every row that has not run yet, so
+        a resumed run must re-execute it from scratch rather than propagate
+        empty values downstream.
+
+        A step being *retried* is different — its results were seeded from the
+        checkpoint, so every row already holds a value.  It stays completed,
+        and its recorded row errors are written through unchanged.  Without
+        that, a crash mid-retry demoted a finished step back to "never ran"
+        and the next retry re-executed the whole step at full price instead of
+        the handful of cells still failing.
         """
+        seeded = step_name in self.completed
         self._manager.save_step(
             data_identifier=self._data_identifier,
             category=self._category,
@@ -648,6 +744,7 @@ class CheckpointSession:
             fields_dict=self._fields_dict,
             existing_completed=[s for s in self.completed if s != step_name],
             existing_results={k: v for k, v in self.results.items() if k != step_name},
+            step_row_errors=self.row_errors.get(step_name) if seeded else None,
             existing_row_errors={k: v for k, v in self.row_errors.items() if k != step_name},
-            partial=True,
+            partial=not seeded,
         )

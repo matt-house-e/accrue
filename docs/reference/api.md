@@ -82,11 +82,11 @@ pipeline.retry_failed(
 Re-run only the `(step, row)` cells the previous run recorded as errored, reading them from that run's checkpoint. Cells that succeeded are served from the checkpoint and never re-invoked, so a 5-failure retry over 10,000 rows costs 5 calls. Requires `EnrichmentConfig(enable_checkpointing=True)` -- pass the same config the original run used. Returns a `PipelineResult` over the whole dataset. Raises `RuntimeError` if called from inside an event loop, and `PipelineError` if checkpointing is off or no valid checkpoint exists.
 
 - `rows` -- restrict the retry to these row indices. Failures left out stay recorded for a later retry.
-- `steps` -- restrict the retry to these step names.
-- `run_log` -- path of the failed run's log to append to. The retry keeps that run's `run_id` and `display_key` and appends a `retry_start` ... `retry_end` segment; recovered cells arrive as ordinary `row_complete` records. See the [run log guide](../guides/run-log.md).
-- `data_identifier` -- explicit checkpoint identifier. Defaults to the same shape-derived id the run used (columns + row count).
+- `steps` -- restrict the retry to these step names. A name the pipeline does not have raises `PipelineError`.
+- `run_log` -- path of the failed run's log to append to. The retry keeps that run's `run_id` and `display_key` (including a `null` one) and appends a `retry_start` ... `retry_end` segment; recovered cells arrive as ordinary `row_complete` records. See the [run log guide](../guides/run-log.md).
+- `data_identifier` -- explicit checkpoint identifier. Defaults to the same id the run derived from the data (columns, row count, and a digest of the first and last five rows).
 
-Steps the previous run never *finished* run in full -- without them there is no result to return. Downstream steps of a healed cell are **not** re-run; see the [checkpointing guide](../guides/caching.md#retrying-failed-cells).
+Steps the previous run never *finished* run in full -- without them there is no result to return. Downstream cells of a healed row **are** re-run, transitively through the DAG and only for those rows, so nothing is left holding an answer computed from the failure; see the [checkpointing guide](../guides/caching.md#retrying-failed-cells).
 
 ### `pipeline.retry_failed_async(data, config?, hooks?, output_file?, *, rows?, steps?, run_log?, display_key?, data_identifier?)`
 
@@ -553,17 +553,28 @@ Writes the [run-log contract v1](../guides/run-log.md) as append-only JSONL. A p
 JsonlRunLogger(
     path: str | Path,
     *,
-    run_id: str | None = None,       # default: local timestamp YYYY-MM-DD-HHMMSS
-    display_key: str | None = None,  # label column recorded in pipeline_start
-    pipeline: Pipeline | None = None # enables per-step level/mode/model metadata
+    run_id: str | None = None,        # default: new_run_id() -- YYYY-MM-DD-HHMMSS-xxxxxx (UTC + random suffix)
+    display_key: str | None = None,   # label column recorded in pipeline_start
+    pipeline: Pipeline | None = None, # enables per-step level/mode/model metadata
+    data: pd.DataFrame | list[dict] | None = None,  # enables row_complete.key
+    segment: str = "run",             # "run" or "retry"
+    t_offset: float = 0.0,            # seconds added to every record's t
+    retry_cells: dict[str, list[int]] | None = None,  # cells recorded in retry_start
 )
 ```
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `data` | `DataFrame \| list[dict] \| None` | The input rows. Without it every `row_complete` carries `key: null` — the log holds only step *outputs*, so the display value cannot be recovered from it later. |
+| `segment` | `str` | `"run"` (default) frames the events as a whole run, `pipeline_start` … `pipeline_end`. `"retry"` frames them as a failed-only retry appended to an existing run: the wrapper records become `retry_start` / `retry_end`, so a consumer never mistakes the appended segment for a second run. |
+| `t_offset` | `float` | Seconds added to every record's `t`. Set it to the existing file's last `t` (see `read_run_context`) when appending to a log, keeping `t` non-decreasing across the file. `run(..., run_log=<existing path>)` does this for you. |
+| `retry_cells` | `dict[str, list[int]] \| None` | `{step: [row_index, ...]}` this retry will re-execute, recorded in `retry_start` so a UI can mark the cells in flight. |
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `hooks` | `EnrichmentHooks` | Pass to `pipeline.run(data, hooks=logger.hooks)`. |
 | `run_id` | `str` | Identifier written into the `pipeline_start` record. |
-| `path` | `Path` | Destination `.jsonl` file (parents created on first write). |
+| `path` | `Path` | Destination `.jsonl` file (parents created on first write, mode `0600`). |
 
 `close()` closes the file handle; it is called automatically when `pipeline_end` is written.
 

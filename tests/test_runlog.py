@@ -9,10 +9,13 @@ steps only — no LLM providers, no network, no API keys.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import re
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from accrue import EnrichmentConfig, EnrichmentHooks, FunctionStep, JsonlRunLogger, Pipeline
 from accrue.core.hooks import RowCompleteEvent
@@ -354,6 +357,114 @@ class TestRunLogParam:
 
 
 # ---------------------------------------------------------------------------
+# Hardening: secrets, permissions, unencodable values
+# ---------------------------------------------------------------------------
+
+
+class TestRunLogHardening:
+    def test_error_messages_are_sanitized(self, tmp_path):
+        """The checkpoint redacts secrets in error text; the run log must too."""
+        key = "sk-abc123def456ghi789jklmnop"
+
+        def boom(ctx):
+            raise RuntimeError(f"401 unauthorized: {key}")
+
+        path = tmp_path / "log.jsonl"
+        Pipeline([FunctionStep("boom", boom, fields=["x"])]).run(
+            [{"name": "acme"}], config=_quiet_config(), run_log=path
+        )
+        row = next(r for r in _load(path) if r["type"] == "row_complete")
+        assert row["error"]["type"] == "RuntimeError"
+        assert key not in path.read_text(encoding="utf-8")
+        assert "***REDACTED***" in row["error"]["msg"]
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only chmod")
+    def test_log_file_is_owner_only(self, tmp_path):
+        """Run logs carry row values and error text — not world-readable."""
+        path = tmp_path / "log.jsonl"
+        _tiny_pipeline().run([{"name": "acme"}], config=_quiet_config(), run_log=path)
+        assert path.stat().st_mode & 0o777 == 0o600
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only chmod")
+    def test_existing_world_readable_log_is_tightened(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        path.write_text("", encoding="utf-8")
+        path.chmod(0o644)
+        _tiny_pipeline().run([{"name": "acme"}], config=_quiet_config(), run_log=path)
+        assert path.stat().st_mode & 0o777 == 0o600
+
+    def test_nan_and_inf_become_null(self, tmp_path):
+        """A bare ``NaN`` literal is not JSON — it broke every strict reader."""
+        values = {
+            "score": float("nan"),
+            "ratio": float("inf"),
+            "nested": {"a": [1.0, float("-inf")]},
+            "ok": 1.5,
+        }
+        step = FunctionStep("nums", lambda ctx: dict(values), fields=list(values))
+        path = tmp_path / "log.jsonl"
+        Pipeline([step]).run([{"name": "acme"}], config=_quiet_config(), run_log=path)
+
+        raw = path.read_text(encoding="utf-8")
+        assert "NaN" not in raw and "Infinity" not in raw
+        # json.loads accepts NaN by default; a strict reader does not.
+        for line in raw.splitlines():
+            json.loads(line, parse_constant=_reject_constant)
+        row = next(r for r in _load(path) if r["type"] == "row_complete")
+        assert row["values"] == {
+            "score": None,
+            "ratio": None,
+            "nested": {"a": [1.0, None]},
+            "ok": 1.5,
+        }
+
+    def test_non_string_dict_keys_still_emit_the_row(self, tmp_path):
+        """The row_complete guarantee holds even when the value cannot be encoded."""
+        step = FunctionStep("weird", lambda ctx: {"v": {(1, 2): "tuple key"}}, fields=["v"])
+        path = tmp_path / "log.jsonl"
+        Pipeline([step]).run([{"name": "acme"}], config=_quiet_config(), run_log=path)
+
+        records = _load(path)
+        _assert_coherent(records)
+        row = next(r for r in records if r["type"] == "row_complete")
+        assert row["status"] == "ok"
+        assert row["values"] == {"__unserializable__": True}
+
+    def test_cyclic_value_still_emits_the_row(self, tmp_path):
+        cycle: dict = {"name": "loop"}
+        cycle["self"] = cycle
+        step = FunctionStep("cyclic", lambda ctx: {"v": cycle}, fields=["v"])
+        path = tmp_path / "log.jsonl"
+        Pipeline([step]).run([{"name": "acme"}], config=_quiet_config(), run_log=path)
+
+        records = _load(path)
+        _assert_coherent(records)
+        row = next(r for r in records if r["type"] == "row_complete")
+        assert row["values"] == {"__unserializable__": True}
+
+    def test_reusing_a_log_path_keeps_t_non_decreasing(self, tmp_path):
+        """``t`` is a within-file ordering clock; a second run continues it."""
+        path = tmp_path / "log.jsonl"
+        pipeline = _tiny_pipeline()
+        pipeline.run([{"name": "acme"}], config=_quiet_config(), run_log=path)
+        first = _load(path)
+        pipeline.run([{"name": "globex"}], config=_quiet_config(), run_log=path)
+
+        records = _load(path)
+        assert records[: len(first)] == first, "appended to, not rewritten"
+        times = [r["t"] for r in records]
+        assert times == sorted(times)
+        assert records[len(first)]["t"] >= first[-1]["t"]
+        # Each run keeps its own identity.
+        run_ids = [r["run_id"] for r in records if r["type"] == "pipeline_start"]
+        assert len(run_ids) == 2 and run_ids[0] != run_ids[1]
+
+
+def _reject_constant(name: str):
+    raise AssertionError(f"non-JSON constant in run log: {name}")
+
+
+# ---------------------------------------------------------------------------
 # display_key
 # ---------------------------------------------------------------------------
 
@@ -504,8 +615,22 @@ class TestJsonlRunLoggerStandalone:
         assert start["steps"] == [{"name": "upper", "level": None, "mode": None, "model": None}]
 
     def test_new_run_id_format(self):
+        """UTC timestamp + random suffix: ``YYYY-MM-DD-HHMMSS-xxxxxx``."""
         run_id = new_run_id()
-        datetime.strptime(run_id, "%Y-%m-%d-%H%M%S")
+        stamp, _, suffix = run_id.rpartition("-")
+        datetime.strptime(stamp, "%Y-%m-%d-%H%M%S")
+        assert re.fullmatch(r"[0-9a-f]{6}", suffix)
+
+    def test_new_run_id_is_unique_within_a_second(self):
+        """Two runs started in the same second used to share one id — and one file."""
+        ids = {new_run_id() for _ in range(50)}
+        assert len(ids) == 50
+
+    def test_new_run_id_timestamp_is_utc(self):
+        """run_id must agree with the UTC ``started_at`` recorded beside it."""
+        stamp = new_run_id().rpartition("-")[0]
+        parsed = datetime.strptime(stamp, "%Y-%m-%d-%H%M%S").replace(tzinfo=timezone.utc)
+        assert abs((datetime.now(timezone.utc) - parsed).total_seconds()) < 60
 
     def test_resolve_run_log_path(self):
         assert resolve_run_log_path(True, "rid") == Path(".accrue/runs/rid.jsonl")

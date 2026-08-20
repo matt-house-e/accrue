@@ -179,6 +179,14 @@ class TestRowError:
         assert "***REDACTED***" in s
         assert "sk-xyz" not in s
 
+    def test_google_api_key_redacted(self):
+        """Google AI Studio / Gemini keys (AIza...) are redacted like sk-... ones."""
+        key = "AIza" + "aB3" * 11 + "xy"  # AIza + 35 chars
+        err = RowError(row_index=4, step_name="s", error=ValueError(f"403 from {key}"))
+        s = str(err)
+        assert "***REDACTED***" in s
+        assert key not in s
+
     def test_plain_error_unchanged(self):
         """Plain English error messages pass through unsanitized."""
         msg = "missing required field 'company'"

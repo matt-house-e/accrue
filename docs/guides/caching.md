@@ -144,8 +144,10 @@ Points worth knowing:
 - **A clean run has nothing to retry.** Its checkpoint was removed on success, so `retry_failed()` raises.
 - **Steps the run never finished still run in full.** A killed run has no results for them at all.
 - **A cell that fails again surfaces normally.** It comes back in `result.errors` and stays recorded for the next attempt.
-- **Downstream steps are not cascaded.** Healing `score` for row 7 does not re-run the `flag` step that consumed the old `score`. That is what keeps the retry exactly N calls. When a downstream step *also* errored on that row, it is a failed cell in its own right and gets retried too -- in DAG order, so it sees the healed value. To rebuild a downstream step wholesale, clear its cache and re-run instead.
+- **Downstream cells of a healed row re-run too.** Healing `score` for row 7 re-runs `flag` for row 7, and anything downstream of `flag`, walked transitively through the DAG -- but only for row 7. `flag` had computed its answer from the `None` placeholder the failure left behind; leaving that in place would hand you wrong data with no errors attached to it. A retry therefore costs the failed cells *plus* their dependents for those rows, still nothing for the rows that worked. Steps on a sibling branch, which consumed nothing broken, are untouched.
 - **Row indices are positional**, matching the `row` field in the run log.
+- **A cell that gets *skipped* on the retry stays failed.** If a `run_if` / `skip_if` predicate now excludes a cell you asked to heal, nothing ran, so its recorded failure is kept and the checkpoint stays for a later attempt.
+- **`steps=` names are validated.** A step name the pipeline does not have raises `PipelineError` instead of silently selecting nothing and reporting success.
 
 ### Configuration
 
@@ -205,5 +207,7 @@ EnrichmentConfig.for_batch()        # Batch API settings with caching and checkp
 - `cache_version` is a FunctionStep feature. LLMStep cache keys are derived from prompts, model, temperature, and field specs, so they auto-invalidate when those change. There is no `cache_version` on LLMStep.
 - Cache TTL is checked lazily on read. Expired entries are not proactively deleted. Call `CacheManager.cleanup_expired()` if you need to reclaim disk space.
 - The cache directory (`.accrue/`) should be gitignored. Add `.accrue/` to your `.gitignore`.
-- Checkpoint files are identified by a combination of data identifier and category. If you change the input data shape significantly between runs, the checkpoint may not match and will be skipped (with a warning).
+- Checkpoint files are identified by a combination of data identifier and category. The default data identifier covers the input's **columns, row count, and a digest of the first and last five rows' values** -- so changing the data invalidates the checkpoint and the next run starts fresh. That is deliberate: `checkpoint_dir` defaults to one global state directory, and a shape-only identifier meant two unrelated datasets with the same columns and row count resolved to the *same* file, silently serving one dataset's enrichments to the other. Pass an explicit `data_identifier=` to `run()` / `retry_failed()` if you need a checkpoint to survive edits to the data.
+- Editing a row in the *middle* of a large dataset does not invalidate the checkpoint -- only the first and last five rows are sampled. Row count and column names still have to match, and every other mismatch is caught by the strict validation on load (with a warning).
+- A checkpoint write that fails -- most often a step value JSON cannot encode, such as a `UUID`, `Path`, or `Enum` -- logs an error and the run continues **without** checkpointing rather than throwing away work you have already paid for. The run is then not resumable; convert such values to a JSON-friendly type (`str(uuid)`) if you need checkpointing.
 - `checkpoint_interval=0` (default) means no intra-step saves. Progress is only saved after each step completes in full. Set it to a positive number for long-running steps.

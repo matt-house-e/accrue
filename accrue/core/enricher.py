@@ -99,8 +99,15 @@ class Enricher:
         if overwrite_fields is None:
             overwrite_fields = self.config.overwrite_fields
 
+        # Convert DataFrame to rows, replacing NaN/NaT/pd.NA with None.
+        # astype(object) is required first; otherwise float columns keep nan
+        # even after where(..., None) because pandas preserves dtype.
+        # Done before the identifier is derived so the checkpoint id covers
+        # the same normalized values Pipeline.run() would hash.
+        rows = df.astype(object).where(pd.notna(df), None).to_dict(orient="records")
+
         if data_identifier is None:
-            data_identifier = derive_data_identifier(list(df.columns), len(df))
+            data_identifier = derive_data_identifier(list(df.columns), len(df), rows)
 
         category = DEFAULT_CATEGORY
 
@@ -127,7 +134,16 @@ class Enricher:
         # Cells that errored in a prior run re-run even though their step is
         # checkpointed — checkpointed no longer means done for failed cells
         # (#129).  Their successful neighbours are served from the checkpoint.
-        retry_cells = session.retry_cells or None
+        # Resolving up front adds the downstream cells a healed value
+        # invalidates, and tells the session which cells the run really owns.
+        retry_cells = (
+            self.pipeline._resolve_retry_map(
+                session.retry_cells, prior_step_results or {}, len(rows)
+            )
+            or None
+        )
+        if retry_cells:
+            session.note_retried_cells(retry_cells)
         if cp is not None:
             logger.info(f"Resuming from checkpoint: skipping {session.completed}")
             if retry_cells:
@@ -136,11 +152,6 @@ class Enricher:
                     sum(len(v) for v in retry_cells.values()),
                     {k: len(v) for k, v in retry_cells.items()},
                 )
-
-        # Convert DataFrame to rows, replacing NaN/NaT/pd.NA with None.
-        # astype(object) is required first; otherwise float columns keep nan
-        # even after where(..., None) because pandas preserves dtype.
-        rows = df.astype(object).where(pd.notna(df), None).to_dict(orient="records")
 
         # Set up cache manager
         cache_manager = None
