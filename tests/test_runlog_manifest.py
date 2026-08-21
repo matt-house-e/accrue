@@ -13,6 +13,7 @@ LLM steps are never executed, only introspected.
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Literal
 
@@ -174,6 +175,94 @@ class TestManifestSteps:
         p = Pipeline([LLMStep("s", fields=["a"], model=model, base_url=base_url)])
         steps = _steps_by_name(build_manifest(p, EnrichmentConfig(), "metadata"))
         assert steps["s"]["model"]["provider"] == expected
+
+
+# ---------------------------------------------------------------------------
+# System prompt — the row-independent cached prefix per LLM step (#140)
+# ---------------------------------------------------------------------------
+
+
+class _LeakySystemStep(LLMStep):
+    """An LLMStep that (wrongly) folds row data into its ``system`` half.
+
+    This is the exact #107 caching bug the manifest guard exists to surface:
+    the cached prefix is supposed to be byte-identical for every row.
+    """
+
+    def _build_prompt(self, ctx):
+        base = super()._build_prompt(ctx)
+        return base._replace(system=base.system + f"\n<leak>{ctx.row!r}</leak>")
+
+
+class TestManifestSystemPrompt:
+    def test_llmstep_carries_the_row_independent_system_half(self):
+        steps = _steps_by_name(build_manifest(_mixed_pipeline(), EnrichmentConfig(), "metadata"))
+        sp = steps["classify"]["system_prompt"]
+        assert isinstance(sp, str)
+        # Instruction + field-spec content live in the system (cacheable) half...
+        assert "structured data enrichment engine" in sp
+        assert "category" in sp
+        assert "strong" in sp  # the icp_fit enum option
+        # ...and the row-specific user half does not.
+        assert "<row_data>" not in sp
+
+    def test_system_prompt_matches_the_step_accessor(self):
+        p = _mixed_pipeline()
+        classify = p.get_step("classify")
+        steps = _steps_by_name(build_manifest(p, EnrichmentConfig(), "metadata"))
+        # The manifest value is exactly the step's row-independent system half.
+        assert steps["classify"]["system_prompt"] == classify.row_independent_system()
+
+    def test_functionstep_has_no_system_prompt(self):
+        steps = _steps_by_name(build_manifest(_mixed_pipeline(), EnrichmentConfig(), "metadata"))
+        assert steps["finalize"]["system_prompt"] is None
+
+    def test_custom_system_prompt_is_used(self):
+        p = Pipeline(
+            [LLMStep("s", fields=["a"], model="gpt-4.1-mini", system_prompt="BESPOKE-INSTRUCTION")]
+        )
+        steps = _steps_by_name(build_manifest(p, EnrichmentConfig(), "metadata"))
+        assert "BESPOKE-INSTRUCTION" in steps["s"]["system_prompt"]
+
+    def test_row_leaking_step_nulls_and_warns(self):
+        # A step whose system half depends on the row leaks its cached prefix
+        # (#107). The manifest must NOT embed per-row content: it nulls + warns.
+        p = Pipeline([_LeakySystemStep("leaky", fields={"x": "do x"}, model="gpt-4.1-mini")])
+        with pytest.warns(UserWarning, match="row-independent"):
+            steps = _steps_by_name(build_manifest(p, EnrichmentConfig(), "metadata"))
+        assert steps["leaky"]["system_prompt"] is None
+
+    def test_row_independent_step_does_not_warn(self):
+        # The happy path must stay silent — no spurious caching warnings.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            steps = _steps_by_name(
+                build_manifest(_mixed_pipeline(), EnrichmentConfig(), "metadata")
+            )
+        assert steps["classify"]["system_prompt"] is not None
+
+    def test_secret_in_system_prompt_is_redacted(self):
+        secret = "sk-" + "A" * 40
+        p = Pipeline(
+            [
+                LLMStep(
+                    "s",
+                    fields=["a"],
+                    model="gpt-4.1-mini",
+                    system_prompt=f"Authenticate with {secret} before answering.",
+                )
+            ]
+        )
+        steps = _steps_by_name(build_manifest(p, EnrichmentConfig(), "metadata"))
+        sp = steps["s"]["system_prompt"]
+        assert secret not in sp
+        assert "***REDACTED***" in sp
+
+    def test_building_the_system_half_makes_no_provider_call(self):
+        # No API key set, no network — pure prompt assembly at run start.
+        p = Pipeline([LLMStep("s", fields={"a": "describe a"}, model="gpt-4.1-mini")])
+        steps = _steps_by_name(build_manifest(p, EnrichmentConfig(), "metadata"))
+        assert isinstance(steps["s"]["system_prompt"], str)
 
 
 # ---------------------------------------------------------------------------

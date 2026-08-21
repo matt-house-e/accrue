@@ -24,8 +24,11 @@ from __future__ import annotations
 import enum as _enum
 import types as _types
 import typing
+import warnings
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
+
+from .exceptions import _sanitize_secrets
 
 if TYPE_CHECKING:
     from ..core.config import EnrichmentConfig
@@ -117,9 +120,61 @@ def _step_entries(
                 "produces": list(getattr(step, "fields", []) or []),
                 "depends_on": list(getattr(step, "depends_on", []) or []),
                 "condition": condition,
+                "system_prompt": _system_prompt(step),
             }
         )
     return entries
+
+
+# Two deliberately different dummy contexts, used to *prove* a step's system
+# half is row-independent (#107). If the two builds differ, row data is
+# leaking into what should be the cached prefix.
+_PROBE_A: tuple[dict[str, Any], dict[str, Any]] = (
+    {"__probe": "alpha", "n": "1"},
+    {"__prior": "one"},
+)
+_PROBE_B: tuple[dict[str, Any], dict[str, Any]] = (
+    {"__probe": "beta", "m": "2", "extra": "z"},
+    {"__prior": "two", "k": "v"},
+)
+
+
+def _system_prompt(step: Any) -> str | None:
+    """The step's row-independent ``system`` prompt half, or ``None``.
+
+    Source is the ``system`` half of the step's prompt — the cacheable prefix
+    that is byte-identical for every row by contract (#107). It is built here
+    once at run start via the step's
+    :meth:`~accrue.steps.llm.LLMStep.row_independent_system` accessor (pure
+    prompt assembly — no provider call). ``None`` for steps that expose no such
+    accessor (FunctionSteps and any step without a system prompt).
+
+    Row-independence is **verified, not assumed**: the system half is built
+    against two different dummy rows and compared. If they differ, the step is
+    leaking row data into its cached prefix — a #107 caching bug — so this
+    emits ``None`` and warns, rather than embedding per-row content or crashing
+    the run. Secrets are redacted with the same pass the capture sidecar uses
+    (#134) before the string is embedded.
+    """
+    accessor = getattr(step, "row_independent_system", None)
+    if not callable(accessor):
+        return None
+    try:
+        system_a = accessor(*_PROBE_A)
+        system_b = accessor(*_PROBE_B)
+    except Exception:  # pragma: no cover — defensive: a manifest never fails a run
+        return None
+    if not isinstance(system_a, str):  # pragma: no cover — defensive
+        return None
+    if system_a != system_b:
+        warnings.warn(
+            f"Step {getattr(step, 'name', None)!r}: the system prompt half is not "
+            "row-independent — row data is leaking into the cached prefix (#107). "
+            "Omitting system_prompt from the run-log manifest.",
+            stacklevel=2,
+        )
+        return None
+    return _sanitize_secrets(system_a)
 
 
 def _model_info(step: Any, config: EnrichmentConfig | None) -> dict[str, Any] | None:
