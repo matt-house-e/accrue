@@ -15,6 +15,11 @@
 
 No platform. No markup. Just a pipeline you can version-control, iterate on, and reason about.
 
+<p align="center">
+  <a href="#watch-it-run"><img src="https://raw.githubusercontent.com/matt-house-e/accrue/main/docs/assets/watch-overview.png" alt="Accrue Watch, Overview tab: a live 5,000-row enrichment run with its pipeline steps, models, produced fields, and cost" width="100%"></a>
+  <br><sub>A 5,000-row run in <a href="#watch-it-run"><b>Accrue Watch</b></a> -- every step, model, field, and dollar, read live from the run log.</sub>
+</p>
+
 ```python
 from accrue import Pipeline, LLMStep
 
@@ -112,6 +117,28 @@ pipeline = Pipeline([
 result = pipeline.run(companies_df)
 ```
 
+## Watch It Run
+
+**Accrue Watch** ([accrue-ui](https://github.com/matt-house-e/accrue-ui)) is a local dashboard for a running pipeline -- rows x steps as a live grid, every cell's values and errors, failures grouped by cause, cost by step. It reads the JSONL run log Accrue writes; there is nothing else to configure. The Overview tab is at the top of this page; this is the run grid:
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/matt-house-e/accrue/main/docs/assets/watch-datagrid.png" alt="Accrue Watch, run grid in data view: one produced field per step, with retrying and failed cells highlighted in place" width="100%">
+  <br><sub><b>Run grid, data view</b> -- one field per step, filling in as rows complete; retries and failures show in place.</sub>
+</p>
+
+Turn on the run log, then point the dashboard at it:
+
+```python
+result = pipeline.run(companies_df, run_log=True)  # writes .accrue/runs/<run_id>.jsonl
+```
+
+```bash
+pip install git+https://github.com/matt-house-e/accrue-ui  # not on PyPI yet
+accrue watch                                                # opens the latest run in your browser
+```
+
+`accrue watch` is a thin stub that delegates to accrue-ui. Add `--pipeline module:attr` to enable one-click retry of failed rows from the dashboard. There is no `accrue[ui]` extra until accrue-ui is published. [Run log guide](docs/guides/run-log.md)
+
 ## Features
 
 - **Multi-step pipelines** -- Chain LLM steps and function steps into a DAG with automatic dependency resolution and parallel execution. [Quickstart](docs/getting-started/quickstart.md)
@@ -135,26 +162,6 @@ result = pipeline.run(companies_df)
 - **Run diffs** -- `accrue.compare(result_a, result_b)` diffs two runs (e.g. before/after a prompt tweak) -- changed rows, per-field churn, distribution shift, and cost delta -- no labels needed. [Compare guide](docs/guides/compare.md)
 
 - **`provider_kwargs`** -- Escape hatch for provider-specific features (extended thinking, effort control, etc.) without waiting for first-class support.
-
-### Watching runs
-
-Pair `run_log=True` with `accrue watch` for a live view of a running pipeline:
-
-```python
-result = pipeline.run(companies_df, run_log=True)
-```
-
-```bash
-accrue watch
-```
-
-`accrue watch` delegates to the optional [accrue-ui](https://github.com/matt-house-e/accrue-ui) package. It is not on PyPI, so install it from the repo:
-
-```bash
-pip install git+https://github.com/matt-house-e/accrue-ui
-```
-
-There is no `accrue[ui]` extra: it could only resolve to a package that does not exist, so it failed outright. It returns when accrue-ui is published.
 
 ## Sweet Spot
 
