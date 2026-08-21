@@ -375,6 +375,26 @@ class LLMStep:
             system_prompt_header=self._system_prompt_header,
         )
 
+    def row_independent_system(
+        self,
+        row: dict[str, Any] | None = None,
+        prior_results: dict[str, Any] | None = None,
+    ) -> str:
+        """Return the row-independent ``system`` half of this step's prompt.
+
+        This is the cacheable prefix (#107): by contract it is byte-identical
+        for every row of the step, so a dashboard can show it once as the
+        step's instruction. The ``row`` / ``prior_results`` arguments only
+        satisfy the prompt builder's signature — their *content* must never
+        appear in the result. The run-log manifest calls this with two
+        different dummy contexts and compares them to catch a step that leaks
+        row data into its cached prefix, rather than embed per-row content.
+
+        Pure prompt assembly — no network or provider call.
+        """
+        ctx = StepContext(row=row or {}, fields={}, prior_results=prior_results or {})
+        return self._build_prompt(ctx).system
+
     # -- tools -----------------------------------------------------------
 
     def _build_tools_config(self) -> list[dict[str, Any]] | None:
