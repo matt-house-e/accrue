@@ -22,7 +22,7 @@ pip install -e ".[google]"      # With Google provider
 - **Prompt split**: `build_prompt()` returns `PromptParts(system, user)`. Keep the `system` half row-independent — providers cache on an exact prefix match, so any per-row content in it turns caching into a 1.25x surcharge (#107).
 - **Minimal deps**: Base: `openai`, `pydantic`, `pandas`, `tqdm`, `python-dotenv`. Never add litellm/langfuse.
 - See `docs/guides/` for architecture, providers, caching, grounding, run-log details.
-- **Run-log contract v1**: `run(..., run_log=True)` emits JSONL via `JsonlRunLogger` (a hooks consumer, `accrue/core/runlog.py`). Additive changes only within v1 — never rename/remove fields without bumping `SCHEMA_VERSION`; golden fixture `tests/fixtures/run_small.jsonl` is what accrue-ui tests against.
+- **Run-log contract v1**: `run(..., run_log=True)` emits JSONL via `JsonlRunLogger` (a hooks consumer, `accrue/core/runlog.py`). Additive changes only within v1 — never rename/remove fields without bumping `SCHEMA_VERSION`; golden fixture `tests/fixtures/run_small.jsonl` is what accrue-ui tests against. `pipeline_start` carries a nested `manifest` object (the run's definition: steps+types+models, field schema, config — built by `accrue/core/manifest.py`, #138) that must stay row-independent and deterministic (no timestamps/rng); regenerate the fixture with `python tests/fixtures/generate_run_fixture.py` and keep `test_regeneration_is_stable` green.
 
 ## Git Workflow
 

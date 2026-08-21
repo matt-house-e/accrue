@@ -58,7 +58,42 @@ Every line is a JSON object carrying the same three envelope fields, followed by
 | `num_rows` | `int` | Rows in the input data. |
 | `display_key` | `string \| null` | Label column for UIs (see above). |
 | `steps` | `array` | One `{name, level, mode, model}` per step, in execution order. `level` is the 0-based DAG level; `mode` is `"realtime"` or `"batch"`; `model` is the step's model id when it exposes one (LLM steps), else `null`. |
+| `manifest` | `object \| null` | The run's **definition** — see [Manifest](#manifest) below. `null` only if introspection failed. |
 | `plan` | `object \| null` | Reserved for a `Pipeline.plan()` snapshot. Always `null` in current emitters. |
+
+#### Manifest
+
+The `manifest` object (issue #138) describes *what the pipeline is*, for a dashboard's read-only Overview: the steps and their types, the model and params per step, the enrichment-field schema, and the run config. It is introspected **once at run start** from the real `Pipeline` / `Step` / response-model objects — row-independent, deterministic (no timestamps or rng), and additive to schema v1. It never touches the cached `system` prompt half, so it cannot affect provider prompt caching (#107).
+
+```jsonc
+"manifest": {
+  "accrue_version": "1.3.0",
+  "config": { "max_workers": 6, "caching": false, "checkpointing": true, "batch": false, "capture": "prompts" },
+  "steps": [
+    {
+      "name": "classify",
+      "type": "LLMStep",              // type(step).__name__ — LLMStep / FunctionStep / …
+      "model": { "id": "gpt-4.1-mini", "provider": "openai", "temperature": 0.0, "max_tokens": 512 },
+      "produces": ["category", "icp_fit"],
+      "depends_on": [],
+      "condition": null               // a literal condition string when a step exposes one, else null
+    }
+    // FunctionStep: "model": null, "type": "FunctionStep"; still lists produces/depends_on
+  ],
+  "fields": [
+    { "name": "category", "type": "str",  "enum": null,                     "description": "One short industry category.", "step": "classify", "internal": false },
+    { "name": "icp_fit",  "type": "enum", "enum": ["strong","good","weak"], "description": "Fit as a customer.",           "step": "classify", "internal": false }
+    // internal `__`-prefixed inter-step fields: "internal": true
+  ]
+}
+```
+
+How each part is introspected:
+
+- **`config`** mirrors the run's `EnrichmentConfig` (`max_workers`, `caching`, `checkpointing`) plus the `capture` tier; `batch` is `true` when any step opts into the batch API (there is no config-level batch flag).
+- **`steps[].type`** is `type(step).__name__`. **`steps[].model`** carries the LLM step's model `id`, the `provider` (from `base_url`'s host, e.g. `openrouter.ai` → `"openrouter"`, else the model-name prefix: `claude-*` → `anthropic`, `gemini-*` → `google`, else `openai`), and the **effective** `temperature` / `max_tokens` the runtime would send (the step's value, or the config fallback). FunctionSteps and any step with no model report `"model": null`.
+- **`steps[].condition`** is a literal expression string only when a step exposes one; `run_if` / `skip_if` predicates are lambdas and can't be introspected to a string, so predicate-gated steps report `null`.
+- **`fields[].type`** / `enum` / `description` come from introspecting each step's response model. Inline `FieldSpec`s map `String`/`Date` → `str`, `Number` → `float`, `Boolean` → `bool`, `List[String]` → `list`, `JSON` → `json`, and any `enum` → `type:"enum"` with its members; a custom Pydantic `schema=` is read by field annotation (`int`/`float`/`bool`/`str`, `Literal`/`Enum` → `enum`, `list`/`dict`). Fields with no introspectable source — FunctionStep outputs, `__` inter-step fields, or LLM `list` fields on the permissive default schema — report `type:"unknown"` rather than a fabricated value. `internal` is `true` for `__`-prefixed fields.
 
 ### `step_start` — per step, before its rows
 
@@ -201,7 +236,7 @@ The golden captured fixture for consumers lives at `tests/fixtures/run_captured.
 A 12-row, 3-step run — one row errors in `score`, one is skipped in `flag` (abridged from `tests/fixtures/run_small.jsonl`):
 
 ```json
-{"v": 1, "t": 0.0, "type": "pipeline_start", "run_id": "2026-08-20-080226-4f1c9a", "started_at": "2026-08-20T07:02:26.020167+00:00", "num_rows": 12, "display_key": "company", "steps": [{"name": "normalize", "level": 0, "mode": "realtime", "model": null}, {"name": "score", "level": 1, "mode": "realtime", "model": null}, {"name": "flag", "level": 2, "mode": "realtime", "model": null}], "plan": null}
+{"v": 1, "t": 0.0, "type": "pipeline_start", "run_id": "2026-08-20-080226-4f1c9a", "started_at": "2026-08-20T07:02:26.020167+00:00", "num_rows": 12, "display_key": "company", "steps": [{"name": "normalize", "level": 0, "mode": "realtime", "model": null}, {"name": "score", "level": 1, "mode": "realtime", "model": null}, {"name": "flag", "level": 2, "mode": "realtime", "model": null}], "manifest": {"accrue_version": "1.3.0", "config": {"max_workers": 1, "caching": false, "checkpointing": false, "batch": false, "capture": "metadata"}, "steps": [{"name": "normalize", "type": "FunctionStep", "model": null, "produces": ["name_upper"], "depends_on": [], "condition": null}, {"name": "score", "type": "FunctionStep", "model": null, "produces": ["score"], "depends_on": ["normalize"], "condition": null}, {"name": "flag", "type": "FunctionStep", "model": null, "produces": ["flagged"], "depends_on": ["score"], "condition": null}], "fields": [{"name": "name_upper", "type": "unknown", "enum": null, "description": null, "step": "normalize", "internal": false}, {"name": "score", "type": "unknown", "enum": null, "description": null, "step": "score", "internal": false}, {"name": "flagged", "type": "unknown", "enum": null, "description": null, "step": "flag", "internal": false}]}, "plan": null}
 {"v": 1, "t": 0.00243, "type": "step_start", "step": "normalize", "level": 0, "mode": "realtime", "num_rows": 12}
 {"v": 1, "t": 0.003022, "type": "row_complete", "step": "normalize", "row": 0, "key": "company-00", "status": "ok", "from_cache": false, "values": {"name_upper": "COMPANY-00"}, "error": null, "usage": null, "elapsed_ms": 0.324}
 {"v": 1, "t": 0.005766, "type": "step_end", "step": "normalize", "num_errors": 0, "usage": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.003241, "batch_id": null}

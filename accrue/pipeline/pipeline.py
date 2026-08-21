@@ -866,6 +866,7 @@ class Pipeline:
                 t_offset=t_offset,
                 retry_cells=retry_cells,
                 capture=capture,
+                config=config,
             )
             hooks = _merge_hooks(run_logger.hooks, hooks)
         hooks = hooks or EnrichmentHooks()
