@@ -9,6 +9,11 @@
   <a href="https://github.com/matt-house-e/accrue/blob/main/LICENSE"><img src="https://img.shields.io/github/license/matt-house-e/accrue" alt="License"></a>
 </p>
 
+<p align="center">
+  <a href="#watch-it-run"><img src="https://raw.githubusercontent.com/matt-house-e/accrue/main/docs/assets/watch-overview.png" alt="Accrue Watch, Overview tab: a live 5,000-row enrichment run with its pipeline steps, models, produced fields, and cost" width="100%"></a>
+  <br><sub>A 5,000-row run in <a href="#watch-it-run"><b>Accrue Watch</b></a> -- every step, model, field, and dollar, read live from the run log.</sub>
+</p>
+
 ---
 
 **Define a pipeline. Point it at your data. Get structured results.** Accrue is a Python library for enriching datasets with LLMs. Compose multi-step pipelines, run them across hundreds to tens of thousands of rows, and get validated, structured output back -- with caching, retries, and parallel execution handled for you.
@@ -114,12 +119,7 @@ result = pipeline.run(companies_df)
 
 ## Watch It Run
 
-**Accrue Watch** ([accrue-ui](https://github.com/matt-house-e/accrue-ui)) is a local dashboard for a running pipeline -- rows x steps as a live grid, every cell's values and errors, failures grouped by cause, cost by step. It reads the JSONL run log Accrue writes; there is nothing else to configure.
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/matt-house-e/accrue/main/docs/assets/watch-overview.png" alt="Accrue Watch, Overview tab: run summary strip, the pipeline's steps with models and produced fields, and the enrichment field schema" width="100%">
-  <br><sub><b>Overview</b> -- the run's blueprint: steps, models, produced fields, and the cached system prompt, read straight from the run log.</sub>
-</p>
+**Accrue Watch** ([accrue-ui](https://github.com/matt-house-e/accrue-ui)) is a local dashboard for a running pipeline -- rows x steps as a live grid, every cell's values and errors, failures grouped by cause, cost by step. It reads the JSONL run log Accrue writes; there is nothing else to configure. The Overview tab is at the top of this page; this is the run grid:
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/matt-house-e/accrue/main/docs/assets/watch-datagrid.png" alt="Accrue Watch, run grid in data view: one produced field per step, with retrying and failed cells highlighted in place" width="100%">
