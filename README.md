@@ -9,16 +9,16 @@
   <a href="https://github.com/matt-house-e/accrue/blob/main/LICENSE"><img src="https://img.shields.io/github/license/matt-house-e/accrue" alt="License"></a>
 </p>
 
-<p align="center">
-  <a href="#watch-it-run"><img src="https://raw.githubusercontent.com/matt-house-e/accrue/main/docs/assets/watch-overview.png" alt="Accrue Watch, Overview tab: a live 5,000-row enrichment run with its pipeline steps, models, produced fields, and cost" width="100%"></a>
-  <br><sub>A 5,000-row run in <a href="#watch-it-run"><b>Accrue Watch</b></a> -- every step, model, field, and dollar, read live from the run log.</sub>
-</p>
-
 ---
 
 **Define a pipeline. Point it at your data. Get structured results.** Accrue is a Python library for enriching datasets with LLMs. Compose multi-step pipelines, run them across hundreds to tens of thousands of rows, and get validated, structured output back -- with caching, retries, and parallel execution handled for you.
 
 No platform. No markup. Just a pipeline you can version-control, iterate on, and reason about.
+
+<p align="center">
+  <a href="#watch-it-run"><img src="https://raw.githubusercontent.com/matt-house-e/accrue/main/docs/assets/watch-overview.png" alt="Accrue Watch, Overview tab: a live 5,000-row enrichment run with its pipeline steps, models, produced fields, and cost" width="100%"></a>
+  <br><sub>A 5,000-row run in <a href="#watch-it-run"><b>Accrue Watch</b></a> -- every step, model, field, and dollar, read live from the run log.</sub>
+</p>
 
 ```python
 from accrue import Pipeline, LLMStep
