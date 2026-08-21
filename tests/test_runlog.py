@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import accrue
 from accrue import EnrichmentConfig, EnrichmentHooks, FunctionStep, JsonlRunLogger, Pipeline
 from accrue.core.hooks import RowCompleteEvent
 from accrue.core.runlog import (
@@ -40,7 +41,15 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "run_small.jsonl"
 RECORD_TYPES = {"pipeline_start", "step_start", "row_complete", "step_end", "pipeline_end"}
 
 REQUIRED_KEYS = {
-    "pipeline_start": {"run_id", "started_at", "num_rows", "display_key", "steps", "plan"},
+    "pipeline_start": {
+        "run_id",
+        "started_at",
+        "num_rows",
+        "display_key",
+        "steps",
+        "manifest",
+        "plan",
+    },
     "step_start": {"step", "level", "mode", "num_rows"},
     "row_complete": {
         "step",
@@ -146,6 +155,11 @@ class TestGoldenFixture:
             assert step["level"] == i
             assert step["mode"] == "realtime"
             assert step["model"] is None  # function steps expose no model
+        # The additive manifest (issue #138) rides alongside the legacy steps.
+        manifest = start["manifest"]
+        assert manifest["accrue_version"] == accrue.__version__
+        assert [s["name"] for s in manifest["steps"]] == ["normalize", "score", "flag"]
+        assert all(s["type"] == "FunctionStep" for s in manifest["steps"])
 
     def test_error_row(self):
         records = _load(FIXTURE)

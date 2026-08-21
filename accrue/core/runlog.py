@@ -40,9 +40,11 @@ from .hooks import (
     StepEndEvent,
     StepStartEvent,
 )
+from .manifest import build_manifest
 
 if TYPE_CHECKING:
     from ..pipeline.pipeline import Pipeline
+    from .config import EnrichmentConfig
 
 logger = get_logger(__name__)
 
@@ -336,6 +338,10 @@ class JsonlRunLogger:
             writes a body when an attempt event carries one, so the source (the
             LLM step) is what actually honours the tier; this is a
             belt-and-braces gate on top.
+        config: The :class:`~accrue.core.config.EnrichmentConfig` for this run.
+            Optional; when given it feeds the ``pipeline_start.manifest.config``
+            block (max_workers, caching, checkpointing) and the LLM steps'
+            effective temperature / max_tokens fallbacks (#138).
     """
 
     def __init__(
@@ -350,6 +356,7 @@ class JsonlRunLogger:
         t_offset: float = 0.0,
         retry_cells: dict[str, list[int]] | None = None,
         capture: str = "metadata",
+        config: EnrichmentConfig | None = None,
     ) -> None:
         self.path = Path(path)
         self.run_id = run_id or new_run_id()
@@ -358,6 +365,7 @@ class JsonlRunLogger:
         self.capture = capture
         self._row_keys = resolve_row_keys(data, display_key)
         self._pipeline = pipeline
+        self._config = config
         self._t_offset = t_offset
         self._retry_cells = retry_cells or {}
         self._t0: float | None = None
@@ -512,6 +520,10 @@ class JsonlRunLogger:
                 "num_rows": event.num_rows,
                 "display_key": self.display_key,
                 "steps": self._step_metadata(event),
+                # The run's definition for a dashboard Overview — steps + types +
+                # models, the enrichment-field schema, and the run config (#138).
+                # Built once here, row-independent, additive to schema v1.
+                "manifest": self._build_manifest(),
                 # Reserved for a Pipeline.plan() snapshot — not captured yet (#128).
                 "plan": None,
             },
@@ -655,6 +667,19 @@ class JsonlRunLogger:
         self.close()
 
     # -- helpers ---------------------------------------------------------
+
+    def _build_manifest(self) -> dict[str, Any] | None:
+        """The ``pipeline_start.manifest`` object, or ``None`` if it can't be built.
+
+        Introspection is wrapped so a manifest failure can never take the run
+        down: the run log's completeness guarantee outranks this additive
+        field.  On failure the record still carries ``manifest: null``.
+        """
+        try:
+            return build_manifest(self._pipeline, self._config, self.capture)
+        except Exception:  # pragma: no cover — defensive
+            logger.warning("Could not build run-log manifest", exc_info=True)
+            return None
 
     def _step_metadata(self, event: PipelineStartEvent) -> list[dict[str, Any]]:
         """Per-step {name, level, mode, model} for the pipeline_start record."""
