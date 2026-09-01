@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Public API snapshot test.** `tests/public_api_snapshot.json` pins every name exported from `accrue`, `accrue.providers`, `accrue.data` and `accrue.core.exceptions` — kind, signature, accrue-defined members, Pydantic model fields, Protocol methods and exception base chains. `tests/test_public_api.py` rebuilds that surface at test time and fails on any divergence, printing the exact delta grouped into REMOVED / CHANGED / ADDED plus the regeneration steps. Additions fail too, deliberately: the value of the gate is that every surface change lands in the PR diff as readable JSON. Scope reaches past `accrue.__all__` because `docs/` and `examples/` import `AnthropicClient`, `load_fields` and `ConfigurationError` directly. Regenerate with `python -m tests.test_public_api --update`. No new dependencies — stdlib `inspect` only. (#121)
+
 ## [1.4.0] - 2026-09-01
 
 The first release that actually contains Accrue Watch support. The README has advertised `run_log=True` and `accrue watch` for months, and 1.3.0 shipped neither — 1.4.0 closes that gap. Headline contents: the **run-log contract v1**, an append-only JSONL stream of a run that a dashboard can follow live; the **`accrue` console script** and its **`watch`** subcommand; **`Pipeline.retry_failed()`**, which heals only the cells a previous run left failing; **run-log v0.2**'s capture tiers, per-attempt events and prompt sidecar, so a retried cell can be inspected attempt by attempt; and the **run manifest**, which gives that dashboard the run's *definition* — steps, models, field schema, config, system prompts — and not just its results.
