@@ -1,6 +1,6 @@
 # Accrue
 
-Composable enrichment pipeline engine. The gap between Instructor (single LLM call) and Clay (full SaaS platform). v1.3.0, Python 3.10+.
+Composable enrichment pipeline engine. The gap between Instructor (single LLM call) and Clay (full SaaS platform). v1.4.0, Python 3.10+.
 
 ## Commands
 
@@ -80,7 +80,7 @@ See `docs/guides/` for details.
 |-------|--------|
 | 1-5 (Core engine through DX) | COMPLETE |
 | 6A Ship: examples, README, PyPI | COMPLETE |
-| 6B Power user: conditional steps, grounding (done); batch API (#62, OpenAI+Anthropic); waterfall, chunked, CLI (remaining) | IN PROGRESS |
+| 6B Power user: conditional steps, grounding, batch API (#62, OpenAI+Anthropic), run log + `accrue watch` CLI (done); waterfall, chunked (remaining) | IN PROGRESS |
 
 ## Keeping Docs in Sync
 
