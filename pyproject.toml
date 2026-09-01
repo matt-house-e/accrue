@@ -8,7 +8,7 @@ name = "accrue"
 # one that ships, and .github/workflows/publish.yml reads it via
 # tomllib -> ["project"]["version"] to verify the git tag matches, so it cannot
 # be replaced with `dynamic = ["version"]` without updating that check too.
-version = "1.3.0"
+version = "1.4.0"
 authors = [
   { name="Matthew House", email="matt.house.e@gmail.com" },
 ]

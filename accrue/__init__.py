@@ -49,7 +49,7 @@ from .steps.providers.base import (
 from .utils.logger import setup_logging
 from .utils.web_search import web_search
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 __author__ = "Accrue Team"
 
 __all__ = [
