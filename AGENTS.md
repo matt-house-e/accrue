@@ -4,13 +4,17 @@ Accrue is built using an agentic software development lifecycle modelled on Anth
 
 The patterns here are taken from the official documentation, not guessed. Citations are at the bottom of this file.
 
+> **Before proposing or building a feature, read the [Scope](CLAUDE.md#scope) section of CLAUDE.md.**
+> It states what accrue deliberately will not ship. Out-of-scope proposals get labelled
+> `wontfix` or `backlog` with a one-line rationale — they don't get built.
+
 ## TL;DR
 
 | What | Trigger | Where |
 |---|---|---|
 | `@claude` mention bot | Comment containing `@claude` on any issue, PR, or review | `.github/workflows/claude.yml` |
-| Auto PR review (inline) | Every non-draft PR opened/updated against `main` | `.github/workflows/claude-review.yml` |
-| Weekly maintenance | Sunday 02:00 UTC + manual `workflow_dispatch` | `.github/workflows/weekly-maintenance.yml` |
+| PR review | Ad hoc — comment `@claude review`, or review locally | `.github/workflows/claude.yml` |
+| Repo maintenance | Monthly (1st, 06:00 UTC) + manual `workflow_dispatch` | `.github/workflows/maintenance.yml` |
 | Accrue-triages-accrue | New issue opened | `.github/workflows/accrue-triage.yml` |
 | Lint-on-edit (local) | After every Edit/Write tool call by Claude Code | `.claude/settings.json` + `.claude/hooks/lint-changed.sh` |
 | `/ship-issue <num>` | Local Claude Code | `.claude/skills/ship-issue/SKILL.md` |
@@ -48,8 +52,8 @@ When working in this repo with Claude Code, four project-scoped commands appear 
 ### 2. CI — agents on GitHub
 
 - **`@claude` mention bot.** Comment `@claude implement #9` on any issue or PR and the action picks it up. v1 auto-detects mode from event context — no `mode:` input needed.
-- **Auto PR review.** Runs on every non-draft PR. Uses `track_progress: true` for a visible tracking comment, and the `mcp__github_inline_comment__create_inline_comment` MCP tool so feedback lands as inline review comments rather than one wall of text. Tools are scoped via `claude_args: --allowedTools` for safety.
-- **Weekly maintenance.** Cron + `workflow_dispatch`. Sweeps stale issues, doc drift, version coherence, examples sanity. Posts one summary issue per run.
+- **PR review — ad hoc, not automatic.** The auto-review job was dropped in #136; nothing reviews PRs on its own. Review the diff locally with Claude Code, or comment `@claude review` on the PR (that path is `claude.yml`, which fires on `issue_comment` in base-repo context and so has repository secrets even for fork PRs). Green CI is not a review — see the merge rules in CLAUDE.md.
+- **Repo maintenance.** Monthly cron + `workflow_dispatch`. Sweeps stale issues, doc drift, and stuck PRs/red CI. It posts *only* when it finds something, and edits one rolling issue rather than opening a new one per run — the previous version's "post even when clean" instruction made it the largest single contributor to the open-issue queue. Version coherence and examples sanity moved to `tests/test_repo_metadata.py`, which runs on every commit and cannot hallucinate.
 
 ### 3. Dogfooded triage — the meta move
 
