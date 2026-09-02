@@ -2,6 +2,37 @@
 
 Composable enrichment pipeline engine. The gap between Instructor (single LLM call) and Clay (full SaaS platform). v1.4.0, Python 3.10+.
 
+## Scope
+
+Accrue is a composable pipeline **engine**, not a platform. The positioning — the gap
+between Instructor (single LLM call) and Clay (full SaaS platform) — is a constraint,
+not a slogan. Check a proposal against it before writing code.
+
+**IN**
+
+- New step types, provider adapters, field-spec features
+- Caching, batching, cost accounting, retries, checkpointing
+- Anything making a pipeline cheaper, more reliable, or easier to reason about
+- Run observability *as data* — the run-log contract is accrue's half of that
+
+**OUT**
+
+- **Bundled third-party integrations** (Sheets, Airtable, Salesforce, CRM connectors).
+  `pipeline.serve()` (#34) is the story for connecting accrue to live systems: it makes
+  a pipeline callable by anything speaking HTTP/MCP without accrue owning one connector.
+- **Hosted anything** — no accounts, no server we run, no scheduler.
+- **The dashboard.** Accrue Watch lives in
+  [accrue-ui](https://github.com/matt-house-e/accrue-ui); core ships the run log and the
+  `accrue watch` handoff, nothing more.
+- **Orchestrator ambitions.** Dagster/Prefect/Airflow call accrue, not the reverse.
+
+**Why minimal deps.** Users embed accrue in their own stacks, so every dependency is
+theirs too — a version conflict we import is one they have to solve. Base deps are
+`openai`, `pydantic`, `pandas`, `tqdm`, `python-dotenv`; provider SDKs are extras.
+
+**Out-of-scope proposals** get labelled `wontfix` or `backlog` with a one-line rationale.
+Don't build them, and don't leave them open to dilute the roadmap.
+
 ## Commands
 
 ```bash
@@ -21,7 +52,7 @@ pip install -e ".[google]"      # With Google provider
 - **Step data**: `dict[str, Any]` not `pd.Series`. Steps are pure, no pandas inside.
 - **Internal fields**: `__` prefix (e.g. `__web_context`) for inter-step data, filtered from output.
 - **Prompt split**: `build_prompt()` returns `PromptParts(system, user)`. Keep the `system` half row-independent — providers cache on an exact prefix match, so any per-row content in it turns caching into a 1.25x surcharge (#107).
-- **Minimal deps**: Base: `openai`, `pydantic`, `pandas`, `tqdm`, `python-dotenv`. Never add litellm/langfuse.
+- **Minimal deps**: Base: `openai`, `pydantic`, `pandas`, `tqdm`, `python-dotenv`. Never add litellm/langfuse — see [Scope](#scope) for why.
 - **Public API is under contract.** `tests/public_api_snapshot.json` pins every name exported from `accrue`, `accrue.providers`, `accrue.data` and `accrue.core.exceptions`. Any change to that surface — including a purely additive one — fails `tests/test_public_api.py`. That is deliberate: it puts the change in the PR diff as readable JSON. To change the API on purpose, run `python -m tests.test_public_api --update`, commit the regenerated snapshot in the same PR, and add a `CHANGELOG.md` entry under `[Unreleased]`. Never hand-edit the snapshot (#121).
 - See `docs/guides/` for architecture, providers, caching, grounding, run-log details.
 - **Run-log contract v1**: `run(..., run_log=True)` emits JSONL via `JsonlRunLogger` (a hooks consumer, `accrue/core/runlog.py`). Additive changes only within v1 — never rename/remove fields without bumping `SCHEMA_VERSION`; golden fixture `tests/fixtures/run_small.jsonl` is what accrue-ui tests against. `pipeline_start` carries a nested `manifest` object (the run's definition: steps+types+models, field schema, config — built by `accrue/core/manifest.py`, #138) that must stay row-independent and deterministic (no timestamps/rng); regenerate the fixture with `python tests/fixtures/generate_run_fixture.py` and keep `test_regeneration_is_stable` green.
