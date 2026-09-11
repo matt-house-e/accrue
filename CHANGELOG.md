@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The `accrue[ui]` extra is back.** accrue-ui is published on PyPI, so `pip install 'accrue[ui]'` installs the dashboard alongside the engine, and the `accrue watch` hint and the README point at that line instead of a git URL. The `all` extra is deliberately unchanged — it stays anthropic+google+dev. (#151)
 - **Public API snapshot test.** `tests/public_api_snapshot.json` pins every name exported from `accrue`, `accrue.providers`, `accrue.data` and `accrue.core.exceptions` — kind, signature, accrue-defined members, Pydantic model fields, Protocol methods and exception base chains. `tests/test_public_api.py` rebuilds that surface at test time and fails on any divergence, printing the exact delta grouped into REMOVED / CHANGED / ADDED plus the regeneration steps. Additions fail too, deliberately: the value of the gate is that every surface change lands in the PR diff as readable JSON. Scope reaches past `accrue.__all__` because `docs/` and `examples/` import `AnthropicClient`, `load_fields` and `ConfigurationError` directly. Regenerate with `python -m tests.test_public_api --update`. No new dependencies — stdlib `inspect` only. (#121)
 
 ## [1.4.0] - 2026-09-01
