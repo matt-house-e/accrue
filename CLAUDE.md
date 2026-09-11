@@ -1,6 +1,6 @@
 # Accrue
 
-Composable enrichment pipeline engine. The gap between Instructor (single LLM call) and Clay (full SaaS platform). v1.4.0, Python 3.10+.
+Composable enrichment pipeline engine. The gap between Instructor (single LLM call) and Clay (full SaaS platform). Python 3.10+.
 
 ## Scope
 
@@ -105,14 +105,6 @@ fails. Create the label first if you want a new one.
 
 See `docs/guides/` for details.
 
-## Build Status
-
-| Phase | Status |
-|-------|--------|
-| 1-5 (Core engine through DX) | COMPLETE |
-| 6A Ship: examples, README, PyPI | COMPLETE |
-| 6B Power user: conditional steps, grounding, batch API (#62, OpenAI+Anthropic), run log + `accrue watch` CLI (done); waterfall, chunked (remaining) | IN PROGRESS |
-
 ## Keeping Docs in Sync
 
 **When making architectural decisions or design changes, update:**
@@ -120,3 +112,8 @@ See `docs/guides/` for details.
 1. `CLAUDE.md` — This file. Commands, style, gotchas.
 2. `docs/` — Guides, reference, and technical design.
 3. GitHub issues — Close stale issues, update epics.
+
+**Keep status metadata out of this file.** No version numbers, test counts, or
+phase/status tables — they duplicate `pyproject.toml`, pytest and the issue tracker,
+and every copy has rotted (#126, #149). Write down the rules that live nowhere else;
+let everything else be looked up.

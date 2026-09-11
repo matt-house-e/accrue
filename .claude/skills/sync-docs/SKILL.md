@@ -15,9 +15,11 @@ Audit the accrue repo for drift between `accrue/` (the source) and `docs/` + `RE
 3. **Provider docs.** `accrue/steps/providers/` should match `docs/guides/providers.md`. Check that every provider listed in code is in the doc, with the right install extra.
 
 4. **CLAUDE.md.** Specifically:
-   - The `Build Status` table — is it still accurate vs. closed/open issues?
    - The `pip install` extras list — does it match `pyproject.toml`'s `[project.optional-dependencies]`?
    - The Commands block — do the listed commands still work?
+   - Status metadata that has crept back in — version numbers, test counts, phase/status
+     tables. These duplicate `pyproject.toml`, pytest and the issue tracker, and belong
+     in none of them; flag any for deletion.
 
 5. **Examples drift.** Files under `examples/` should still run against current accrue. Don't run them, but read the imports — flag any that reference symbols that no longer exist.
 
