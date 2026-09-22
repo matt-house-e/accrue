@@ -7,6 +7,7 @@ Implements ``submit_batch()``, ``poll_batch()``, and ``cancel_batch()``.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
 import re
@@ -35,9 +36,21 @@ class AnthropicClient:
         self,
         api_key: str | None = None,
         http_client: Any | None = None,
+        timeout: float | None = None,
     ):
+        """Configure the Anthropic adapter.
+
+        Args:
+            api_key: Anthropic API key.  Falls back to ``ANTHROPIC_API_KEY``.
+            http_client: Pre-configured ``httpx.AsyncClient`` to reuse.
+            timeout: Request timeout in seconds, forwarded to ``AsyncAnthropic``.
+                Needed when ``max_tokens`` exceeds roughly 21,000: the SDK
+                refuses a non-streaming request whose estimated duration
+                exceeds 10 minutes unless a non-default ``timeout`` was set.
+        """
         self._api_key = api_key
         self._http_client = http_client
+        self._timeout = timeout
         self._client: Any = None
         # Scope: per-client-instance (not per-process).  LLMStep constructs a
         # fresh AnthropicClient on each Pipeline.run_async() call, so users see
@@ -90,6 +103,8 @@ class AnthropicClient:
             kwargs: dict[str, Any] = {"api_key": key}
             if self._http_client is not None:
                 kwargs["http_client"] = self._http_client
+            if self._timeout is not None:
+                kwargs["timeout"] = self._timeout
             # max_retries=0: disable SDK-level retry so LLMStep's retry loop
             # is the single source of truth and retries are not double-stacked.
             kwargs["max_retries"] = 0
@@ -119,7 +134,7 @@ class AnthropicClient:
 
         kwargs: dict[str, Any] = dict(
             model=model,
-            messages=chat_messages,
+            messages=_convert_messages(chat_messages),
             max_tokens=max_tokens,
         )
         # Omit temperature for models that reject an explicit value (issue #109).
@@ -273,7 +288,7 @@ class AnthropicClient:
             params: dict[str, Any] = {
                 "model": req.model,
                 "max_tokens": req.max_tokens,
-                "messages": chat_messages,
+                "messages": _convert_messages(chat_messages),
             }
             # Same temperature rule as the realtime path (issue #109), including
             # deferring the warning until after provider_kwargs is merged below.
@@ -510,6 +525,55 @@ def _temperature_hint(model: str, exc: Exception) -> str:
         f"Claude Opus 4.7/4.8); please report '{model}' at "
         "https://github.com/matt-house-e/accrue/issues so the check can cover it."
     )
+
+
+def _to_anthropic_content(content: Any) -> Any:
+    """Convert accrue's neutral message content to Anthropic content blocks (#153).
+
+    A plain string passes through unchanged.  A list of blocks is mapped:
+    ``text`` blocks stay text, ``document`` blocks (raw bytes) become
+    base64 ``document`` source blocks.  Unknown blocks pass through untouched
+    so a future block type is not silently dropped here.
+
+    Args:
+        content: A string, or accrue's list-of-blocks form.
+
+    Returns:
+        Content in Anthropic's message format.
+    """
+    if not isinstance(content, list):
+        return content
+
+    blocks: list[Any] = []
+    for block in content:
+        if not isinstance(block, dict):
+            blocks.append(block)
+            continue
+        if block.get("type") == "document":
+            data = block.get("data", b"")
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            doc_block: dict[str, Any] = {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": block.get("media_type", "application/pdf"),
+                    "data": base64.standard_b64encode(data).decode("ascii"),
+                },
+            }
+            if block.get("title") is not None:
+                doc_block["title"] = block["title"]
+            blocks.append(doc_block)
+        elif block.get("type") == "text":
+            blocks.append({"type": "text", "text": block.get("text", "")})
+        else:
+            blocks.append(block)
+    return blocks
+
+
+def _convert_messages(chat_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply :func:`_to_anthropic_content` to every chat message."""
+    return [{**msg, "content": _to_anthropic_content(msg.get("content"))} for msg in chat_messages]
 
 
 def _translate_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

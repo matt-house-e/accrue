@@ -39,7 +39,7 @@ from .pipeline import (
 from .schemas.base import CostSummary
 from .schemas.field_spec import FieldSpec
 from .schemas.grounding import GroundingConfig
-from .steps import FunctionStep, LLMStep, Step, StepContext, StepResult
+from .steps import Document, FunctionStep, LLMStep, Step, StepContext, StepResult
 from .steps.providers.base import (
     BatchCapableLLMClient,
     BatchRequest,
@@ -78,6 +78,8 @@ __all__ = [
     "Step",
     "StepContext",
     "StepResult",
+    # Attachments
+    "Document",
     # Schemas
     "FieldSpec",
     "GroundingConfig",

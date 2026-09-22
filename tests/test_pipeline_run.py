@@ -284,3 +284,65 @@ class TestPipelineResult:
     def test_empty_dataframe(self):
         r = PipelineResult(data=pd.DataFrame())
         assert r.success_rate == 1.0
+
+
+# -- attachments through the full DataFrame path (#153) ----------------------
+
+
+class TestPipelineRunAttachments:
+    """A DataFrame column of Python lists must survive row loading intact."""
+
+    def test_document_blocks_reach_the_client(self, tmp_path):
+        import json
+
+        from accrue.schemas.base import UsageInfo
+        from accrue.steps.providers.base import LLMResponse
+
+        a = tmp_path / "a.pdf"
+        a.write_bytes(b"%PDF-A")
+        b = tmp_path / "b.pdf"
+        b.write_bytes(b"%PDF-B")
+
+        captured: list[list] = []
+
+        async def fake_complete(**kwargs):
+            captured.append(kwargs["messages"])
+            return LLMResponse(
+                content=json.dumps({"summary": "ok"}),
+                usage=UsageInfo(
+                    prompt_tokens=1, completion_tokens=1, total_tokens=2, model="claude"
+                ),
+            )
+
+        mock_client = AsyncMock()
+        mock_client.complete = AsyncMock(side_effect=fake_complete)
+
+        step = LLMStep(
+            name="read_docs",
+            fields={"summary": "Summarise the attached documents"},
+            client=mock_client,
+            attachments="documents",
+            cache=False,
+        )
+        df = pd.DataFrame(
+            {
+                "company": ["Acme", "Beta"],
+                "documents": [[str(a)], [str(a), str(b)]],
+            }
+        )
+
+        result = Pipeline([step]).run(df, config=EnrichmentConfig(enable_caching=False))
+
+        assert list(result.data["summary"]) == ["ok", "ok"]
+        assert len(captured) == 2
+
+        by_company = {msgs[1]["content"][-1]["text"]: msgs[1]["content"][:-1] for msgs in captured}
+        acme_text = next(t for t in by_company if "Acme" in t)
+        beta_text = next(t for t in by_company if "Beta" in t)
+
+        # <row_data> never carries the attachments column.
+        assert "documents" not in acme_text
+        assert "a.pdf" not in acme_text
+
+        assert [blk["data"] for blk in by_company[acme_text]] == [b"%PDF-A"]
+        assert [blk["data"] for blk in by_company[beta_text]] == [b"%PDF-A", b"%PDF-B"]

@@ -72,6 +72,22 @@ Three consequences worth knowing:
 
 **Structured outputs:** Uses constrained decoding (the Anthropic equivalent of `json_schema`). Auto-detected when using dict fields.
 
+**Attachments:** The only adapter that can send per-row documents. `LLMStep(attachments="column")` renders PDFs as Anthropic `document` blocks ahead of the user text — see the [attachments guide](attachments.md).
+
+**Timeout:** `AnthropicClient(timeout=...)` forwards a request timeout (seconds) to the SDK. You need it once `max_tokens` goes above roughly 21,000: the SDK estimates a non-streaming request's duration from `max_tokens` and refuses outright — `ValueError: Streaming is required for operations that may take longer than 10 minutes` — unless a non-default `timeout` was set on the client. Pass one explicitly for long-output steps:
+
+```python
+from accrue import Pipeline, LLMStep
+from accrue.providers import AnthropicClient
+
+LLMStep("long_report",
+    fields={"report": "Write a full report"},
+    model="claude-sonnet-4-5-20250929",
+    max_tokens=32000,
+    client=AnthropicClient(timeout=1800.0),
+)
+```
+
 **Temperature:** The Claude 5 family (`claude-sonnet-5`, `claude-opus-5`, `claude-fable-5`, ...) and Claude Opus 4.7/4.8 removed the sampling parameters — sending an explicit `temperature` returns ``400 - `temperature` is deprecated for this model.`` Accrue omits the parameter for those models automatically, on both the realtime and batch paths, and the model samples at its own default of `1.0`. If the dropped value was something other than `1.0`, a warning is logged once per pipeline run, since the run is no longer sampling at the temperature you configured. Nothing to configure — but if you need low-temperature determinism, use a model that still supports it (e.g. `claude-sonnet-4-5`). To send a temperature anyway, `provider_kwargs={"temperature": ...}` still overrides.
 
 ## Google
@@ -124,6 +140,7 @@ When `base_url` is set, structured output auto-detection falls back to `json_obj
 | Grounding (web search) | Yes | Yes | Yes | No |
 | Batch API | Yes | Yes | No | No |
 | Prompt caching | No | Automatic | No | No |
+| Attachments (`attachments=`) | No | Yes | No | No |
 
 ## Custom providers
 

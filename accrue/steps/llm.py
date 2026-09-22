@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import random
 import time
@@ -17,11 +18,16 @@ from ..schemas.enrichment import EnrichmentResult
 from ..schemas.field_spec import FieldSpec
 from ..schemas.grounding import GroundingConfig
 from ..utils.logger import get_logger
+from .attachments import normalize_attachments
 from .base import StepContext, StepResult
 from .prompt_builder import PromptParts, build_prompt
 from .providers.base import LLMAPIError, LLMClient, LLMResponse, is_batch_capable
 from .providers.openai import OpenAIClient
-from .schema_builder import build_json_schema, build_response_model
+from .schema_builder import (
+    build_json_schema,
+    build_json_schema_from_model,
+    build_response_model,
+)
 
 # Optional provider imports for structured output auto-detection
 try:
@@ -113,6 +119,7 @@ class LLMStep:
         skip_if: Callable[..., Any] | None = None,
         batch: bool = False,
         provider_kwargs: dict[str, Any] | None = None,
+        attachments: str | None = None,
     ):
         """Configure an LLM enrichment step.
 
@@ -153,9 +160,11 @@ class LLMStep:
             max_retries: Parse/validation retry attempts per API call.
             cache: Enable input-hash caching for this step (default True).
             structured_outputs: Override structured-output auto-detection.
-                ``True`` forces ``json_schema``; ``False`` forces
-                ``json_object``; ``None`` (default) auto-detects based on
-                provider and field specs.
+                ``True`` forces ``json_schema`` — built from a custom
+                ``schema=`` model when one is set, otherwise from the field
+                specs; ``False`` forces ``json_object``; ``None`` (default)
+                auto-detects based on provider and field specs (a custom
+                ``schema=`` stays ``json_object``).
             grounding: Enable provider-level web search grounding.
                 ``True`` enables with defaults, a ``dict`` or
                 :class:`GroundingConfig` allows fine-grained control
@@ -185,6 +194,12 @@ class LLMStep:
                 ``{"thinking": {"type": "adaptive"}}`` for Anthropic
                 extended thinking, or ``{"effort": "high"}``).
                 These are **not** included in the cache key.
+            attachments: Name of a row column holding per-row documents (a
+                :class:`~accrue.steps.attachments.Document`, a file path, raw
+                bytes, or a list of them).  Rendered as provider document
+                blocks ahead of the user text and excluded from
+                ``<row_data>``.  Anthropic only today.  Cache key hashes
+                document bytes, not paths.
         """
         if run_if is not None and skip_if is not None:
             raise PipelineError(
@@ -209,6 +224,7 @@ class LLMStep:
         self.run_if = run_if
         self.skip_if = skip_if
         self.provider_kwargs = provider_kwargs
+        self.attachments = attachments
         # Warn-once guard: is_batch_eligible is a property and may be read more
         # than once per run (pipeline dispatch, plan(), user code).
         self._warned_batch_unavailable: bool = False
@@ -316,7 +332,8 @@ class LLMStep:
           - Non-OpenAI client → json_object
           - OpenAI with base_url and structured_outputs is None → json_object
           - OpenAI native (no base_url) → json_schema
-          - structured_outputs=True → force json_schema
+          - structured_outputs=True → force json_schema (from a custom
+            ``schema=`` model when set, else from the field specs)
           - structured_outputs=False → force json_object
         """
         # Explicit override
@@ -324,7 +341,10 @@ class LLMStep:
             return {"type": "json_object"}
 
         if self._structured_outputs_param is True:
-            # Force on — requires field specs
+            # A custom schema= is the contract the user wants enforced (#154);
+            # field specs only describe the default EnrichmentResult shape.
+            if self.schema is not EnrichmentResult:
+                return build_json_schema_from_model(self.schema)
             if self._field_specs:
                 return build_json_schema(self._field_specs)
             return {"type": "json_object"}
@@ -367,9 +387,14 @@ class LLMStep:
         what makes provider prompt caching actually hit — see
         :mod:`accrue.steps.prompt_builder`.
         """
+        row = ctx.row
+        if self.attachments:
+            # Attachment bytes/paths are not prompt text — they ride as
+            # document blocks instead, so keep them out of <row_data>.
+            row = {k: v for k, v in row.items() if k != self.attachments}
         return build_prompt(
             field_specs=self._field_specs,
-            row=ctx.row,
+            row=row,
             prior_results=ctx.prior_results or None,
             custom_system_prompt=self._custom_system_prompt,
             system_prompt_header=self._system_prompt_header,
@@ -495,7 +520,7 @@ class LLMStep:
             type(client).__name__,
         )
 
-    def build_messages(self, ctx: StepContext) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    def build_messages(self, ctx: StepContext) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Build messages and call kwargs for a single row.
 
         Used by both the realtime path (``run()``) and the batch execution
@@ -526,9 +551,25 @@ class LLMStep:
 
         # The system message holds only step-static content so providers can
         # cache it across rows; row data rides in the user message.
-        messages: list[dict[str, str]] = [
+        user_content: Any = prompt.user
+        if self.attachments:
+            docs = normalize_attachments(ctx.row.get(self.attachments))
+            if docs:
+                # Provider-neutral blocks; the adapter does the encoding.
+                user_content = [
+                    {
+                        "type": "document",
+                        "media_type": d.media_type,
+                        "data": d.data,
+                        "title": d.title,
+                    }
+                    for d in docs
+                ]
+                user_content.append({"type": "text", "text": prompt.user})
+
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": prompt.system},
-            {"role": "user", "content": prompt.user},
+            {"role": "user", "content": user_content},
         ]
 
         call_kwargs: dict[str, Any] = {
@@ -569,7 +610,7 @@ class LLMStep:
         internal_values = {k: v for k, v in parsed.items() if k.startswith("__")}
         parsed_clean = {k: v for k, v in parsed.items() if not k.startswith("__")}
 
-        if self._use_structured_outputs:
+        if self._use_structured_outputs and self.schema is EnrichmentResult:
             dynamic_model = build_response_model(self._field_specs)
             validated = dynamic_model.model_validate(parsed_clean)
         else:
@@ -822,7 +863,7 @@ def _api_status(exc: LLMAPIError) -> str:
 
 
 def _capture_body(
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     response: LLMResponse,
     parsed: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -837,10 +878,45 @@ def _capture_body(
     :class:`LLMResponse` — so ``full`` captures the same body as ``prompts``.
     """
     return {
-        "messages": [dict(m) for m in messages],
+        "messages": _placeholder_documents(messages),
         "response": getattr(response, "content", None),
         "parsed": parsed,
     }
+
+
+def _placeholder_documents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copy *messages*, replacing attachment bytes with a digest placeholder (#153).
+
+    The run-log prompt sidecar is JSON, so raw document bytes must never reach
+    it.  Each document block becomes
+    ``{"type": "document", "title", "media_type", "bytes", "sha256"}`` —
+    enough to tell two attachments apart without carrying either.
+    """
+    copied: list[dict[str, Any]] = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            copied.append(dict(msg))
+            continue
+        blocks: list[Any] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "document":
+                data = block.get("data", b"")
+                blocks.append(
+                    {
+                        "type": "document",
+                        "title": block.get("title"),
+                        "media_type": block.get("media_type"),
+                        "bytes": len(data),
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                    }
+                )
+            elif isinstance(block, dict):
+                blocks.append(dict(block))
+            else:
+                blocks.append(block)
+        copied.append({**msg, "content": blocks})
+    return copied
 
 
 def _is_refusal(value: Any) -> bool:

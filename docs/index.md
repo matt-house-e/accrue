@@ -43,6 +43,7 @@ print(result.cost)  # Token usage breakdown
 - **Caching** -- SQLite-backed input-hash cache so re-runs skip completed work
 - **Batch API** -- `LLMStep(batch=True)` for high-volume jobs at 50% cost via OpenAI and Anthropic batch endpoints
 - **Grounding** -- Web search grounding with citations via `LLMStep(grounding=True)`
+- **Attachments** -- `LLMStep(attachments="column")` sends a row's PDFs to the model as document blocks (Anthropic)
 - **Conditional steps** -- `run_if` / `skip_if` predicates for per-row branching
 - **Dry-run + cost preview** -- `pipeline.plan(df)` previews prompts, schemas, and sample outputs and estimates the full-run cost before you spend
 - **Hooks and observability** -- Progress callbacks, cost tracking, checkpoint recovery
@@ -51,6 +52,6 @@ print(result.cost)  # Token usage breakdown
 ## Quick Links
 
 - [Getting Started](getting-started/quickstart.md) -- Installation, first pipeline, core concepts
-- [Guides](guides/field-specifications.md) -- Field specs, caching, batch API, grounding, conditional steps, providers
+- [Guides](guides/field-specifications.md) -- Field specs, caching, batch API, grounding, [attachments](guides/attachments.md), conditional steps, providers
 - [Cookbook](cookbook/company-enrichment.md) -- Real-world examples and patterns
 - [API Reference](reference/api.md) -- Full class and method reference

@@ -200,6 +200,7 @@ LLMStep(
     skip_if: Callable | None = None,
     batch: bool = False,
     provider_kwargs: dict[str, Any] | None = None,
+    attachments: str | None = None,
 )
 ```
 
@@ -216,24 +217,27 @@ LLMStep(
 | `api_key` | Provider API key. Falls back to the relevant environment variable (e.g. `OPENAI_API_KEY`). |
 | `base_url` | OpenAI-compatible base URL (Ollama, Groq, etc.). Disables structured-output auto-detection. |
 | `client` | Pre-configured `LLMClient` instance. Overrides `api_key` and `base_url`. |
-| `schema` | Pydantic model for response validation. Default `EnrichmentResult` works with dynamic field specs. |
+| `schema` | Pydantic model for response validation. Default `EnrichmentResult` works with dynamic field specs. With `structured_outputs=True` the model's JSON schema is sent as a strict `json_schema` response format. |
 | `max_retries` | Parse/validation retry attempts per API call (inner retry loop). |
 | `cache` | Enable input-hash caching for this step. |
-| `structured_outputs` | Override structured-output auto-detection. `True` forces `json_schema`; `False` forces `json_object`; `None` auto-detects. |
+| `structured_outputs` | Override structured-output auto-detection. `True` forces `json_schema` -- built from a custom `schema=` model when set, otherwise from the field specs; `False` forces `json_object`; `None` auto-detects (a custom `schema=` stays `json_object`). |
 | `grounding` | Enable provider-level web search. `True` for defaults, `dict` or `GroundingConfig` for fine-grained control. `None`/`False` disables. |
 | `sources_field` | Output field name for grounding citations. Set to `None` to disable citation injection. Not in cache key. |
 | `run_if` | Predicate `(row, prior_results) -> bool`. Step only runs for rows where it returns `True`. Mutually exclusive with `skip_if`. |
 | `skip_if` | Predicate `(row, prior_results) -> bool`. Step is skipped for rows where it returns `True`. Mutually exclusive with `run_if`. |
 | `batch` | Use provider Batch API for this step. Requires `BatchCapableLLMClient`. Mutually exclusive with `grounding`. |
 | `provider_kwargs` | Extra kwargs merged into the provider API call. Escape hatch for provider-specific features (e.g. `{"thinking": {"type": "adaptive"}}`). Not in cache key. |
+| `attachments` | Name of a row column holding per-row documents (a `Document`, a file path, raw bytes, or a list of them). Rendered as provider document blocks ahead of the user text and excluded from `<row_data>`. Anthropic only. Cache key hashes document bytes, not paths. See the [attachments guide](../guides/attachments.md). |
 
 ### `step.build_messages(ctx)`
 
 ```python
-step.build_messages(ctx: StepContext) -> tuple[list[dict[str, str]], dict[str, Any]]
+step.build_messages(ctx: StepContext) -> tuple[list[dict[str, Any]], dict[str, Any]]
 ```
 
 Build messages and call kwargs for a single row. Returns `(messages, call_kwargs)` where `call_kwargs` contains `model`, `temperature`, `max_tokens`, `response_format`, `tools`, and `provider_kwargs`. Used by both realtime and batch execution paths.
+
+A message's `content` is a plain string, or -- when `attachments=` is set and the row has documents -- a list of content blocks: one `{"type": "document", "media_type", "data", "title"}` per document (raw bytes; the provider adapter encodes them) followed by `{"type": "text", "text": ...}`.
 
 ### `step.parse_response(response)`
 
@@ -638,6 +642,29 @@ class FieldSpec(BaseModel):
 
 Use `"default" in spec.model_fields_set` to detect whether `default` was explicitly provided.
 
+### Document
+
+```python
+from accrue import Document
+```
+
+A single binary document attached to one row's LLM call, for `LLMStep(attachments=...)`.
+
+```python
+@dataclass(frozen=True)
+class Document:
+    data: bytes                            # Raw file bytes; the provider encodes them.
+    media_type: str = "application/pdf"    # IANA media type.
+    title: str | None = None               # Optional title passed to the provider.
+```
+
+```python
+Document.from_path(path, title=None, media_type=None) -> Document
+document.sha256 -> str                     # Hex digest of the bytes; the cache identity.
+```
+
+`from_path()` defaults `title` to the file name and guesses `media_type` via `mimetypes`, falling back to `application/pdf`. It raises `StepError` on an unreadable path. `repr()` shows title, media type, and byte count -- never the bytes. See the [attachments guide](../guides/attachments.md).
+
 ### GroundingConfig
 
 ```python
@@ -859,10 +886,16 @@ Implements `BatchCapableLLMClient`, but reports `supports_batch = False` when `b
 ```python
 from accrue.providers import AnthropicClient
 
-AnthropicClient(api_key: str | None = None)
+AnthropicClient(
+    api_key: str | None = None,
+    http_client: Any | None = None,
+    timeout: float | None = None,
+)
 ```
 
-Adapter for Anthropic Claude models. Requires `pip install accrue[anthropic]`. Falls back to `ANTHROPIC_API_KEY` env var. Supports `web_search_20250305` server tool for grounding. Automatic prompt caching via `cache_control` on system messages.
+Adapter for Anthropic Claude models. Requires `pip install accrue[anthropic]`. Falls back to `ANTHROPIC_API_KEY` env var. Supports `web_search_20250305` server tool for grounding. Automatic prompt caching via `cache_control` on system messages. The only adapter that sends `LLMStep(attachments=...)` document blocks.
+
+`timeout` (seconds) is forwarded to `AsyncAnthropic`. Set it when `max_tokens` exceeds roughly 21,000 -- the SDK refuses a non-streaming request of that estimated duration unless a non-default timeout was configured.
 
 Implements `BatchCapableLLMClient` via the Anthropic Message Batches API.
 
