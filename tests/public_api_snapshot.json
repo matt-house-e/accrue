@@ -6,6 +6,7 @@
       "BatchResult",
       "ComparisonResult",
       "CostSummary",
+      "Document",
       "Enricher",
       "EnrichmentConfig",
       "EnrichmentError",
@@ -132,6 +133,20 @@
         "kind": "pydantic_model",
         "members": {},
         "signature": "(*, total_prompt_tokens: int = 0, total_completion_tokens: int = 0, total_tokens: int = 0, total_cache_write_tokens: int = 0, total_cache_read_tokens: int = 0, steps: dict[str, StepUsage] = {}) -> None"
+      },
+      "Document": {
+        "kind": "dataclass",
+        "members": {
+          "from_path": {
+            "kind": "classmethod",
+            "signature": "(cls, path: str | os.PathLike[str], title: str | None = None, media_type: str | None = None) -> Document"
+          },
+          "sha256": {
+            "kind": "property",
+            "signature": "(self) -> str"
+          }
+        },
+        "signature": "(data: bytes, media_type: str = 'application/pdf', title: str | None = None) -> None"
       },
       "Enricher": {
         "kind": "class",
@@ -292,7 +307,7 @@
         "members": {
           "build_messages": {
             "kind": "method",
-            "signature": "(self, ctx: StepContext) -> tuple[list[dict[str, str]], dict[str, Any]]"
+            "signature": "(self, ctx: StepContext) -> tuple[list[dict[str, Any]], dict[str, Any]]"
           },
           "is_batch_eligible": {
             "kind": "property",
@@ -311,7 +326,7 @@
             "signature": "(self, ctx: StepContext) -> StepResult"
           }
         },
-        "signature": "(name: str, fields: list[str] | dict[str, str | dict], depends_on: list[str] | None = None, model: str = 'gpt-4.1-mini', temperature: float | None = None, max_tokens: int | None = None, system_prompt: str | None = None, system_prompt_header: str | None = None, api_key: str | None = None, base_url: str | None = None, client: LLMClient | None = None, schema: Type[BaseModel] = <class 'EnrichmentResult'>, max_retries: int = 2, cache: bool = True, structured_outputs: bool | None = None, grounding: bool | dict | GroundingConfig | None = None, sources_field: str | None = 'sources', run_if: Callable[..., Any] | None = None, skip_if: Callable[..., Any] | None = None, batch: bool = False, provider_kwargs: dict[str, Any] | None = None)"
+        "signature": "(name: str, fields: list[str] | dict[str, str | dict], depends_on: list[str] | None = None, model: str = 'gpt-4.1-mini', temperature: float | None = None, max_tokens: int | None = None, system_prompt: str | None = None, system_prompt_header: str | None = None, api_key: str | None = None, base_url: str | None = None, client: LLMClient | None = None, schema: Type[BaseModel] = <class 'EnrichmentResult'>, max_retries: int = 2, cache: bool = True, structured_outputs: bool | None = None, grounding: bool | dict | GroundingConfig | None = None, sources_field: str | None = 'sources', run_if: Callable[..., Any] | None = None, skip_if: Callable[..., Any] | None = None, batch: bool = False, provider_kwargs: dict[str, Any] | None = None, attachments: str | None = None)"
       },
       "Pipeline": {
         "kind": "class",
@@ -634,7 +649,7 @@
             "signature": "(self, requests: list[BatchRequest], metadata: dict[str, str] | None = None) -> str"
           }
         },
-        "signature": "(api_key: str | None = None, http_client: Any | None = None)"
+        "signature": "(api_key: str | None = None, http_client: Any | None = None, timeout: float | None = None)"
       },
       "GoogleClient": {
         "kind": "class",

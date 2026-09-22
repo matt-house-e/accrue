@@ -1026,3 +1026,207 @@ class TestStructuredOutputs:
         result = await step.run(_make_ctx())
         assert result.values == {"f1": "val"}
         assert result.metadata["structured_outputs"] is True
+
+
+# -- attachments (#153) ---------------------------------------------------
+
+
+PDF_A = b"%PDF-1.4 A"
+PDF_B = b"%PDF-1.4 B"
+
+
+@pytest.fixture
+def two_pdfs(tmp_path):
+    a = tmp_path / "a.pdf"
+    a.write_bytes(PDF_A)
+    b = tmp_path / "b.pdf"
+    b.write_bytes(PDF_B)
+    return a, b
+
+
+class TestLLMStepAttachments:
+    def test_attachments_column_excluded_from_row_data(self, two_pdfs):
+        a, _ = two_pdfs
+        step = LLMStep(name="llm", fields={"f1": "test"}, attachments="documents")
+        ctx = _make_ctx(row={"company": "Acme", "documents": [str(a)]})
+        messages, _ = step.build_messages(ctx)
+
+        user_blocks = messages[1]["content"]
+        text = next(b["text"] for b in user_blocks if b["type"] == "text")
+        assert "Acme" in text
+        assert "documents" not in text
+        assert "a.pdf" not in text
+
+    def test_user_content_is_blocks_with_raw_bytes(self, two_pdfs):
+        a, b = two_pdfs
+        step = LLMStep(name="llm", fields={"f1": "test"}, attachments="documents")
+        ctx = _make_ctx(row={"company": "Acme", "documents": [str(a), str(b)]})
+        messages, _ = step.build_messages(ctx)
+
+        content = messages[1]["content"]
+        assert isinstance(content, list)
+        assert [blk["type"] for blk in content] == ["document", "document", "text"]
+        assert content[0]["data"] == PDF_A
+        assert content[1]["data"] == PDF_B
+        assert content[0]["media_type"] == "application/pdf"
+        assert content[0]["title"] == "a.pdf"
+        # System half is untouched by attachments.
+        assert isinstance(messages[0]["content"], str)
+
+    def test_no_docs_keeps_string_content(self):
+        step = LLMStep(name="llm", fields={"f1": "test"}, attachments="documents")
+        ctx = _make_ctx(row={"company": "Acme", "documents": None})
+        messages, _ = step.build_messages(ctx)
+        assert isinstance(messages[1]["content"], str)
+
+    def test_missing_column_keeps_string_content(self):
+        step = LLMStep(name="llm", fields={"f1": "test"}, attachments="documents")
+        messages, _ = step.build_messages(_make_ctx())
+        assert isinstance(messages[1]["content"], str)
+
+    def test_without_attachments_param_column_stays_in_row_data(self):
+        step = LLMStep(name="llm", fields={"f1": "test"})
+        ctx = _make_ctx(row={"company": "Acme", "notes": "hello"})
+        messages, _ = step.build_messages(ctx)
+        assert isinstance(messages[1]["content"], str)
+        assert "hello" in messages[1]["content"]
+
+    def test_row_independent_system_unaffected(self, two_pdfs):
+        a, _ = two_pdfs
+        step = LLMStep(name="llm", fields={"f1": "test"}, attachments="documents")
+        one = step.row_independent_system(row={"company": "Acme", "documents": [str(a)]})
+        two = step.row_independent_system(row={"company": "Other", "documents": []})
+        assert one == two
+
+    def test_capture_body_replaces_documents_with_placeholder(self, two_pdfs):
+        import hashlib
+
+        from accrue.steps.llm import _capture_body
+
+        a, _ = two_pdfs
+        step = LLMStep(name="llm", fields={"f1": "test"}, attachments="documents")
+        ctx = _make_ctx(row={"company": "Acme", "documents": [str(a)]})
+        messages, _ = step.build_messages(ctx)
+
+        body = _capture_body(messages, _mock_llm_response('{"f1": "v"}'), {"f1": "v"})
+        blocks = body["messages"][1]["content"]
+        doc = blocks[0]
+        assert doc == {
+            "type": "document",
+            "title": "a.pdf",
+            "media_type": "application/pdf",
+            "bytes": len(PDF_A),
+            "sha256": hashlib.sha256(PDF_A).hexdigest(),
+        }
+        assert "data" not in doc
+        assert blocks[1]["type"] == "text"
+        assert isinstance(body["messages"][0]["content"], str)
+
+    def test_capture_body_is_json_serialisable(self, two_pdfs):
+        from accrue.steps.llm import _capture_body
+
+        a, _ = two_pdfs
+        step = LLMStep(name="llm", fields={"f1": "test"}, attachments="documents")
+        ctx = _make_ctx(row={"company": "Acme", "documents": [str(a)]})
+        messages, _ = step.build_messages(ctx)
+        body = _capture_body(messages, _mock_llm_response("{}"), None)
+        json.dumps(body)  # must not raise
+
+    def test_capture_body_copies_plain_string_messages(self):
+        from accrue.steps.llm import _capture_body
+
+        messages = [{"role": "user", "content": "hi"}]
+        body = _capture_body(messages, _mock_llm_response("{}"), None)
+        messages.append({"role": "assistant", "content": "later"})
+        assert body["messages"] == [{"role": "user", "content": "hi"}]
+
+    @pytest.mark.asyncio
+    async def test_run_passes_document_blocks_to_client(self, two_pdfs):
+        a, _ = two_pdfs
+        mock_client = _make_mock_client(_mock_llm_response(json.dumps({"f1": "val"})))
+        step = LLMStep(
+            name="llm",
+            fields={"f1": "test"},
+            client=mock_client,
+            attachments="documents",
+        )
+        result = await step.run(_make_ctx(row={"company": "Acme", "documents": str(a)}))
+
+        assert result.values == {"f1": "val"}
+        sent = mock_client.complete.call_args.kwargs["messages"]
+        assert sent[1]["content"][0]["data"] == PDF_A
+
+
+# -- custom schema + structured outputs (#154) ----------------------------
+
+
+class _Address(BaseModel):
+    city: str
+    country: str
+
+
+class _Contact(BaseModel):
+    name: str
+    address: _Address
+
+
+class TestCustomSchemaStructuredOutputs:
+    def test_forced_structured_outputs_builds_json_schema_from_model(self):
+        step = LLMStep(
+            name="llm",
+            fields={"name": "Name", "address": "Address"},
+            schema=_Contact,
+            structured_outputs=True,
+        )
+        rf = step._response_format
+        assert rf["type"] == "json_schema"
+        assert rf["json_schema"]["name"] == "_Contact"
+        assert rf["json_schema"]["strict"] is True
+        schema = rf["json_schema"]["schema"]
+        assert schema["additionalProperties"] is False
+        assert schema["$defs"]["_Address"]["additionalProperties"] is False
+
+    def test_auto_detect_with_custom_schema_still_json_object(self):
+        step = LLMStep(name="llm", fields={"name": "Name"}, schema=_Contact)
+        assert step._response_format == {"type": "json_object"}
+        assert step._use_structured_outputs is False
+
+    def test_structured_outputs_false_with_custom_schema(self):
+        step = LLMStep(
+            name="llm",
+            fields={"name": "Name"},
+            schema=_Contact,
+            structured_outputs=False,
+        )
+        assert step._response_format == {"type": "json_object"}
+
+    @pytest.mark.asyncio
+    async def test_parse_response_validates_with_custom_schema(self):
+        payload = {"name": "Ada", "address": {"city": "London", "country": "UK"}}
+        mock_client = _make_mock_client(_mock_llm_response(json.dumps(payload)))
+        step = LLMStep(
+            name="llm",
+            fields=["name", "address"],
+            client=mock_client,
+            schema=_Contact,
+            structured_outputs=True,
+        )
+        result = await step.run(_make_ctx())
+        assert result.values["name"] == "Ada"
+        assert result.values["address"] == {"city": "London", "country": "UK"}
+        assert result.metadata["structured_outputs"] is True
+
+    @pytest.mark.asyncio
+    async def test_custom_schema_rejects_bad_payload(self):
+        bad = _mock_llm_response(json.dumps({"name": "Ada", "address": "London"}))
+        mock_client = _make_mock_client([bad, bad, bad])
+        step = LLMStep(
+            name="llm",
+            fields=["name", "address"],
+            client=mock_client,
+            schema=_Contact,
+            structured_outputs=True,
+            max_retries=1,
+        )
+        with pytest.raises((StepError, ValidationError)):
+            await step.run(_make_ctx())

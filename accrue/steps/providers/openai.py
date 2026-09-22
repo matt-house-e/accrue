@@ -24,7 +24,13 @@ from typing import Any
 from ...core.exceptions import StepError
 from ...schemas.base import UsageInfo
 from ...schemas.grounding import Citation
-from .base import BatchRequest, BatchResult, LLMAPIError, LLMResponse
+from .base import (
+    BatchRequest,
+    BatchResult,
+    LLMAPIError,
+    LLMResponse,
+    reject_document_blocks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +84,7 @@ class OpenAIClient:
         tools: list[dict[str, Any]] | None = None,
         provider_kwargs: dict[str, Any] | None = None,
     ) -> LLMResponse:
+        reject_document_blocks(messages, "OpenAIClient")
         if self._base_url:
             return await self._complete_chat(
                 messages,
@@ -328,6 +335,7 @@ class OpenAIClient:
         # Build JSONL content
         jsonl_lines: list[str] = []
         for req in requests:
+            reject_document_blocks(req.messages, "OpenAIClient")
             body: dict[str, Any] = {
                 "model": req.model,
                 "messages": req.messages,

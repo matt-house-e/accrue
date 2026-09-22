@@ -452,3 +452,89 @@ class TestXdgCacheDirDefault:
         custom = str(tmp_path / "custom_cache")
         config = EnrichmentConfig(cache_dir=custom)
         assert config.cache_dir == custom
+
+
+# ---------------------------------------------------------------------------
+# Attachments (#153) and custom schema (#154) in the cache key
+# ---------------------------------------------------------------------------
+
+
+class TestCacheKeyAttachments:
+    """Attachments hash by content, not by path."""
+
+    @staticmethod
+    def _step():
+        from accrue.steps.llm import LLMStep
+
+        return LLMStep(name="llm", fields={"f1": "test"}, attachments="documents")
+
+    def test_same_bytes_different_paths_same_key(self, tmp_path):
+        from accrue.core.cache import _compute_step_cache_key
+
+        a = tmp_path / "a.pdf"
+        a.write_bytes(b"%PDF same")
+        b = tmp_path / "subdir_b.pdf"
+        b.write_bytes(b"%PDF same")
+
+        step = self._step()
+        k1 = _compute_step_cache_key(step, {"x": 1, "documents": [str(a)]}, {}, {})
+        k2 = _compute_step_cache_key(step, {"x": 1, "documents": [str(b)]}, {}, {})
+        assert k1 == k2
+
+    def test_changed_bytes_same_path_different_key(self, tmp_path):
+        from accrue.core.cache import _compute_step_cache_key
+
+        p = tmp_path / "doc.pdf"
+        p.write_bytes(b"%PDF v1")
+        step = self._step()
+        k1 = _compute_step_cache_key(step, {"x": 1, "documents": [str(p)]}, {}, {})
+
+        p.write_bytes(b"%PDF v2")
+        k2 = _compute_step_cache_key(step, {"x": 1, "documents": [str(p)]}, {}, {})
+        assert k1 != k2
+
+    def test_no_attachments_column_is_unaffected(self, tmp_path):
+        from accrue.core.cache import _compute_step_cache_key
+
+        step = self._step()
+        k1 = _compute_step_cache_key(step, {"x": 1}, {}, {})
+        k2 = _compute_step_cache_key(step, {"x": 1}, {}, {})
+        assert k1 == k2
+
+
+class TestCacheKeyCustomSchema:
+    def test_custom_schema_changes_key(self):
+        from pydantic import BaseModel
+
+        from accrue.core.cache import _compute_step_cache_key
+        from accrue.steps.llm import LLMStep
+
+        class SchemaA(BaseModel):
+            a: str
+
+        class SchemaB(BaseModel):
+            a: str
+            b: int
+
+        row = {"x": 1}
+        step_a = LLMStep(name="llm", fields=["a"], schema=SchemaA)
+        step_b = LLMStep(name="llm", fields=["a"], schema=SchemaB)
+        assert _compute_step_cache_key(step_a, row, {}, {}) != _compute_step_cache_key(
+            step_b, row, {}, {}
+        )
+
+    def test_custom_schema_differs_from_default_schema(self):
+        from pydantic import BaseModel
+
+        from accrue.core.cache import _compute_step_cache_key
+        from accrue.steps.llm import LLMStep
+
+        class SchemaA(BaseModel):
+            a: str
+
+        row = {"x": 1}
+        custom = LLMStep(name="llm", fields={"a": "test"}, schema=SchemaA)
+        default = LLMStep(name="llm", fields={"a": "test"})
+        assert _compute_step_cache_key(custom, row, {}, {}) != _compute_step_cache_key(
+            default, row, {}, {}
+        )

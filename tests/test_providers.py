@@ -1240,9 +1240,12 @@ class TestAnthropicTemperature:
 
     @pytest.mark.asyncio
     async def test_claude_4_still_receives_temperature(self):
+        """Sent in ``extra_body``: anthropic>=1.0 dropped the ``temperature`` kwarg
+        from ``messages.create()``, and the body is where every SDK version puts it."""
         _, call_kwargs = await self._complete("claude-sonnet-4-5-20250929", 0.2)
 
-        assert call_kwargs["temperature"] == 0.2
+        assert "temperature" not in call_kwargs
+        assert call_kwargs["extra_body"] == {"temperature": 0.2}
 
     @pytest.mark.asyncio
     async def test_none_temperature_is_never_sent(self):
@@ -1268,7 +1271,7 @@ class TestAnthropicTemperature:
         )
 
         call_kwargs = client._client.messages.create.call_args.kwargs
-        assert call_kwargs["temperature"] == 1.0
+        assert call_kwargs["extra_body"]["temperature"] == 1.0
 
     @pytest.mark.asyncio
     async def test_no_warning_when_provider_kwargs_supplies_a_temperature(self, caplog):
@@ -1287,7 +1290,7 @@ class TestAnthropicTemperature:
                 provider_kwargs={"temperature": 0.9},
             )
 
-        assert client._client.messages.create.call_args.kwargs["temperature"] == 0.9
+        assert client._client.messages.create.call_args.kwargs["extra_body"]["temperature"] == 0.9
         assert "does not accept an explicit temperature" not in caplog.text
 
     @pytest.mark.asyncio
@@ -1926,3 +1929,161 @@ class TestGoogleClient:
 
         assert result.status_code == 408
         assert result.retryable is True
+
+
+# -- attachments across providers (#153) ------------------------------------
+
+
+_PDF = b"%PDF-1.4 hello"
+
+
+def _doc_message(title=None):
+    block = {"type": "document", "media_type": "application/pdf", "data": _PDF, "title": title}
+    return [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": [block, {"type": "text", "text": "Analyse this."}]},
+    ]
+
+
+class TestAnthropicAttachments:
+    """Anthropic is the one adapter that can send document blocks."""
+
+    @staticmethod
+    def _client():
+        TestAnthropicClient._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        mock_inner = MagicMock()
+        mock_inner.messages.create = AsyncMock(
+            return_value=SimpleNamespace(
+                content=[SimpleNamespace(text="{}", type="text", citations=None)],
+                usage=None,
+            )
+        )
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+        return client, mock_inner
+
+    @pytest.mark.asyncio
+    async def test_document_block_becomes_base64_source(self):
+        import base64
+
+        client, mock_inner = self._client()
+        await client.complete(
+            messages=_doc_message(title="report.pdf"),
+            model="claude-sonnet-4-5-20250929",
+            temperature=0.2,
+            max_tokens=100,
+        )
+
+        sent = mock_inner.messages.create.call_args.kwargs["messages"]
+        assert len(sent) == 1  # system split out
+        blocks = sent[0]["content"]
+        assert blocks[0] == {
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64.standard_b64encode(_PDF).decode("ascii"),
+            },
+            "title": "report.pdf",
+        }
+        assert blocks[1] == {"type": "text", "text": "Analyse this."}
+
+    @pytest.mark.asyncio
+    async def test_title_omitted_when_none(self):
+        client, mock_inner = self._client()
+        await client.complete(
+            messages=_doc_message(title=None),
+            model="claude-sonnet-4-5-20250929",
+            temperature=0.2,
+            max_tokens=100,
+        )
+        blocks = mock_inner.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert "title" not in blocks[0]
+
+    @pytest.mark.asyncio
+    async def test_string_content_untouched(self):
+        client, mock_inner = self._client()
+        await client.complete(
+            messages=[{"role": "user", "content": "plain"}],
+            model="claude-sonnet-4-5-20250929",
+            temperature=0.2,
+            max_tokens=100,
+        )
+        sent = mock_inner.messages.create.call_args.kwargs["messages"]
+        assert sent == [{"role": "user", "content": "plain"}]
+
+
+class TestAnthropicTimeout:
+    @staticmethod
+    def _installed_anthropic():
+        """The ``anthropic`` module the adapter's deferred import will resolve."""
+        import sys
+
+        TestAnthropicClient._install_mock_anthropic()
+        return sys.modules["anthropic"]
+
+    def test_timeout_forwarded(self):
+        mock_mod = self._installed_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        with patch.object(mock_mod, "AsyncAnthropic") as ctor:
+            AnthropicClient(api_key="k", timeout=1800.0)._get_client()
+        assert ctor.call_args.kwargs["timeout"] == 1800.0
+
+    def test_timeout_omitted_when_none(self):
+        mock_mod = self._installed_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        with patch.object(mock_mod, "AsyncAnthropic") as ctor:
+            AnthropicClient(api_key="k")._get_client()
+        assert "timeout" not in ctor.call_args.kwargs
+
+
+class TestOtherProvidersRejectAttachments:
+    @pytest.mark.asyncio
+    async def test_openai_complete_rejects(self):
+        from accrue.core.exceptions import StepError
+
+        client = OpenAIClient(api_key="test")
+        client._client = MagicMock()  # would explode if we reached the network
+        with pytest.raises(StepError) as exc:
+            await client.complete(
+                messages=_doc_message(),
+                model="gpt-4.1-mini",
+                temperature=0.2,
+                max_tokens=10,
+            )
+        assert "AnthropicClient" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_google_complete_rejects(self):
+        from accrue.core.exceptions import StepError
+        from accrue.steps.providers.google import GoogleClient
+
+        client = GoogleClient(api_key="test")
+        client._client = MagicMock()
+        with pytest.raises(StepError) as exc:
+            await client.complete(
+                messages=_doc_message(),
+                model="gemini-2.5-flash",
+                temperature=0.2,
+                max_tokens=10,
+            )
+        assert "GoogleClient" in str(exc.value)
+
+    def test_string_messages_are_not_rejected(self):
+        from accrue.steps.providers.base import has_document_blocks, reject_document_blocks
+
+        messages = [{"role": "user", "content": "hi"}]
+        assert has_document_blocks(messages) is False
+        reject_document_blocks(messages, "OpenAIClient")  # must not raise
+
+    def test_text_only_blocks_are_not_rejected(self):
+        from accrue.steps.providers.base import has_document_blocks
+
+        assert (
+            has_document_blocks([{"role": "user", "content": [{"type": "text", "text": "x"}]}])
+            is False
+        )

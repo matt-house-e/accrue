@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 # How often to re-run TTL cleanup on init (seconds).
 _CLEANUP_INTERVAL = 86400  # 1 day
 
@@ -216,13 +218,32 @@ def _step_schema_hash(step: Any) -> str:
     if cached is not None:
         return cached
 
+    # Late import to avoid circular dependency: cache.py ← steps/schema_builder.py
+    from accrue.schemas.enrichment import EnrichmentResult  # noqa: PLC0415
+    from accrue.steps.schema_builder import (  # noqa: PLC0415
+        build_json_schema,
+        build_json_schema_from_model,
+    )
+
+    # A custom schema= defines the response contract, so it — not the field
+    # specs — is what the cached result depends on (#154).
+    custom_schema = getattr(step, "schema", None)
+    if (
+        isinstance(custom_schema, type)
+        and issubclass(custom_schema, BaseModel)
+        and custom_schema is not EnrichmentResult
+    ):
+        schema_dict = build_json_schema_from_model(custom_schema)
+        digest = hashlib.sha256(
+            json.dumps(schema_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        step._cached_schema_hash = digest
+        return digest
+
     field_specs = getattr(step, "_field_specs", None)
     if not field_specs:
         step._cached_schema_hash = ""
         return ""
-
-    # Late import to avoid circular dependency: cache.py ← steps/schema_builder.py
-    from accrue.steps.schema_builder import build_json_schema  # noqa: PLC0415
 
     schema_dict = build_json_schema(field_specs)
     digest = hashlib.sha256(
@@ -258,6 +279,17 @@ def _compute_step_cache_key(
         provider_kwargs_hash = hashlib.sha256(
             json.dumps(pk, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
         ).hexdigest()
+        # Attachments hash by content, not path: the same PDF under two names
+        # is one cache entry, an edited PDF at the same path is a new one (#153).
+        attachments_col = getattr(step, "attachments", None)
+        if attachments_col and attachments_col in row:
+            # Late import to avoid circular dependency: cache.py ← steps/
+            from accrue.steps.attachments import normalize_attachments  # noqa: PLC0415
+
+            row = {
+                **row,
+                attachments_col: [d.sha256 for d in normalize_attachments(row[attachments_col])],
+            }
         return compute_cache_key(
             step_name=step.name,
             row=row,

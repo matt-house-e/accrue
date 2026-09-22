@@ -209,3 +209,77 @@ class TestBuildJsonSchema:
         risk_prop = schema["properties"]["risk"]
         assert "enum" in risk_prop
         assert set(risk_prop["enum"]) == {"Low", "High"}
+
+
+# -- build_json_schema_from_model (#154) ----------------------------------
+
+
+class TestBuildJsonSchemaFromModel:
+    def test_envelope_shape(self):
+        from pydantic import BaseModel
+
+        from accrue.steps.schema_builder import build_json_schema_from_model
+
+        class Flat(BaseModel):
+            a: str
+
+        rf = build_json_schema_from_model(Flat)
+        assert rf["type"] == "json_schema"
+        assert rf["json_schema"]["name"] == "Flat"
+        assert rf["json_schema"]["strict"] is True
+        assert rf["json_schema"]["schema"]["additionalProperties"] is False
+
+    def test_nested_defs_are_strict(self):
+        from pydantic import BaseModel
+
+        from accrue.steps.schema_builder import build_json_schema_from_model
+
+        class Inner(BaseModel):
+            x: int
+
+        class Outer(BaseModel):
+            inner: Inner
+
+        schema = build_json_schema_from_model(Outer)["json_schema"]["schema"]
+        assert schema["$defs"]["Inner"]["additionalProperties"] is False
+
+    def test_list_of_models_is_strict(self):
+        from pydantic import BaseModel
+
+        from accrue.steps.schema_builder import build_json_schema_from_model
+
+        class Item(BaseModel):
+            name: str
+
+        class Basket(BaseModel):
+            items: list[Item]
+
+        schema = build_json_schema_from_model(Basket)["json_schema"]["schema"]
+        assert schema["$defs"]["Item"]["additionalProperties"] is False
+
+    def test_optional_nested_model_is_strict(self):
+        from pydantic import BaseModel
+
+        from accrue.steps.schema_builder import build_json_schema_from_model
+
+        class Inner(BaseModel):
+            x: int
+
+        class Outer(BaseModel):
+            inner: Inner | None = None
+
+        schema = build_json_schema_from_model(Outer)["json_schema"]["schema"]
+        assert schema["$defs"]["Inner"]["additionalProperties"] is False
+        # The anyOf branches themselves carry no stray object node to strictify.
+        assert schema["properties"]["inner"]["anyOf"]
+
+    def test_inline_nested_object_is_strict(self):
+        from accrue.steps.schema_builder import _strictify
+
+        node = {
+            "type": "object",
+            "properties": {"a": {"type": "object", "properties": {"b": {"type": "string"}}}},
+        }
+        _strictify(node)
+        assert node["additionalProperties"] is False
+        assert node["properties"]["a"]["additionalProperties"] is False
