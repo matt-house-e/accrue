@@ -1240,9 +1240,12 @@ class TestAnthropicTemperature:
 
     @pytest.mark.asyncio
     async def test_claude_4_still_receives_temperature(self):
+        """Sent in ``extra_body``: anthropic>=1.0 dropped the ``temperature`` kwarg
+        from ``messages.create()``, and the body is where every SDK version puts it."""
         _, call_kwargs = await self._complete("claude-sonnet-4-5-20250929", 0.2)
 
-        assert call_kwargs["temperature"] == 0.2
+        assert "temperature" not in call_kwargs
+        assert call_kwargs["extra_body"] == {"temperature": 0.2}
 
     @pytest.mark.asyncio
     async def test_none_temperature_is_never_sent(self):
@@ -1268,7 +1271,7 @@ class TestAnthropicTemperature:
         )
 
         call_kwargs = client._client.messages.create.call_args.kwargs
-        assert call_kwargs["temperature"] == 1.0
+        assert call_kwargs["extra_body"]["temperature"] == 1.0
 
     @pytest.mark.asyncio
     async def test_no_warning_when_provider_kwargs_supplies_a_temperature(self, caplog):
@@ -1287,7 +1290,7 @@ class TestAnthropicTemperature:
                 provider_kwargs={"temperature": 0.9},
             )
 
-        assert client._client.messages.create.call_args.kwargs["temperature"] == 0.9
+        assert client._client.messages.create.call_args.kwargs["extra_body"]["temperature"] == 0.9
         assert "does not accept an explicit temperature" not in caplog.text
 
     @pytest.mark.asyncio

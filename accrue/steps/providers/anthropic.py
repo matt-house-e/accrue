@@ -197,6 +197,15 @@ class AnthropicClient:
         # Warn only when no temperature reaches the API at all (issue #109).
         if "temperature" not in kwargs:
             self._warn_temperature_dropped(model, temperature)
+        else:
+            # anthropic>=1.0 removed the sampling parameters from the
+            # ``messages.create()`` signature (TypeError: unexpected keyword
+            # argument 'temperature') while the API still accepts them in the
+            # body. ``extra_body`` merges into the JSON body on every SDK
+            # version, so it is the one place the value always reaches the API.
+            extra_body = dict(kwargs.pop("extra_body", None) or {})
+            extra_body["temperature"] = kwargs.pop("temperature")
+            kwargs["extra_body"] = extra_body
 
         try:
             from anthropic import APIError, APITimeoutError, RateLimitError
@@ -216,7 +225,8 @@ class AnthropicClient:
         except APIError as exc:
             exc_status = getattr(exc, "status_code", None)
             # Only claim a temperature problem when we actually sent one.
-            hint = _temperature_hint(model, exc) if "temperature" in kwargs else ""
+            sent_temperature = "temperature" in (kwargs.get("extra_body") or {})
+            hint = _temperature_hint(model, exc) if sent_temperature else ""
             # Promote generic 429 to is_rate_limit (covers cases where RateLimitError
             # is not raised but status_code is 429)
             raise LLMAPIError(
