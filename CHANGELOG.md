@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-10-13
+
+The run log gets more of what accrue already knew, and the `accrue[ui]` extra is back. Headline contents: **cache tokens, a `retryable` flag on errors and every batch id in the run log**, so accrue-ui can give reliable cost and error advice; **custom `schema=` field types in the manifest**, so a nested model reports `object` instead of `str`; and **`pip install 'accrue[ui]'`**, which installs the dashboard from PyPI. All run-log changes are additive within contract v1. No other behaviour changes.
+
 ### Added
 - **The `accrue[ui]` extra is back.** accrue-ui is published on PyPI, so `pip install 'accrue[ui]'` installs the dashboard alongside the engine, and the `accrue watch` hint and the README point at that line instead of a git URL. The `all` extra is deliberately unchanged — it stays anthropic+google+dev. (#151)
 - **Run log: cache tokens, a `retryable` flag on errors, and every batch id.** The run log left out three facts accrue already had in memory, so accrue-ui could not give reliable cost or error advice. All three changes are additive within run-log contract v1 (no `SCHEMA_VERSION` bump), and older logs still parse. (#169)
