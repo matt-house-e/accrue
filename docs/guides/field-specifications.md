@@ -207,6 +207,23 @@ LLMStep("analyze",
 
 When `schema` is set, structured output auto-detection defaults to `json_object` (since Accrue cannot infer `json_schema` from an arbitrary Pydantic model). Force it with `structured_outputs=True` if your provider supports it.
 
+### Custom schemas and structured outputs: specs are sent twice
+
+Field specs reach the model in two places: the `<field_specifications>` block of the system prompt, and the `description` of each property in the JSON schema. Under `structured_outputs=True` the constrained decoder reads the schema copy right next to the value it is writing, so that copy is the one that steers the value.
+
+A built-in schema (no `schema=`) carries both. A custom `schema=` is used exactly as you wrote it, so it carries the spec text only if you put it there. Without it the model still sees the system-prompt copy, but values can drift, for example picking the wrong clause for a field that has a plausible distractor.
+
+Accrue logs one warning per step listing the top-level fields that match a spec but whose schema description is missing or lacks the spec's prompt. To fix it, wrap the schema:
+
+```python
+from accrue import describe_from_specs
+
+schema = describe_from_specs(CompanyAnalysis, fields)
+LLMStep("analyze", fields=fields, schema=schema, structured_outputs=True)
+```
+
+`describe_from_specs` returns a subclass with each matching field's description set to the prompt (plus format and examples), the same text a built-in schema would carry. A field that already contains the spec's prompt is left alone. Accrue never rewrites your schema on its own, because the schema is the contract you asked it to enforce.
+
 ## System prompt tiers
 
 Accrue builds the prompt automatically from field specs and row data. You can inject context or replace the instruction portion entirely.

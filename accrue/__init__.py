@@ -46,6 +46,7 @@ from .steps.providers.base import (
     BatchResult,
     is_batch_capable,
 )
+from .steps.schema_builder import describe_from_specs
 from .utils.logger import setup_logging
 from .utils.web_search import web_search
 
@@ -83,6 +84,7 @@ __all__ = [
     # Schemas
     "FieldSpec",
     "GroundingConfig",
+    "describe_from_specs",
     # Utilities
     "setup_logging",
     "web_search",
