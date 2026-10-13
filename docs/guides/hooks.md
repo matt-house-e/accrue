@@ -76,7 +76,8 @@ Fired after each step finishes.
 | `usage` | `StepUsage` | Token usage for this step |
 | `elapsed_seconds` | `float` | Wall-clock time for this step |
 | `execution_mode` | `str` | `"realtime"` or `"batch"` |
-| `batch_id` | `str \| None` | Batch job ID (batch mode only) |
+| `batch_id` | `str \| None` | First batch job ID (batch mode only) |
+| `batch_ids` | `list[str]` | Every batch job ID the step submitted, in order — more than one when requests were split by count or bytes |
 
 ### RowCompleteEvent
 

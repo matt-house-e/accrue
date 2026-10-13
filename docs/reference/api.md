@@ -533,6 +533,7 @@ Fired after a step finishes all rows.
 | `elapsed_seconds` | `float` | |
 | `execution_mode` | `str` | `"realtime"` |
 | `batch_id` | `str \| None` | `None` |
+| `batch_ids` | `list[str]` | `[]` |
 
 ### RowCompleteEvent
 
@@ -724,7 +725,8 @@ class StepUsage(BaseModel):
     cache_hits: int = 0
     cache_misses: int = 0
     execution_mode: str = "realtime"
-    batch_id: str | None = None
+    batch_id: str | None = None   # first batch submitted
+    batch_ids: list[str] = []     # every batch submitted, in order
 ```
 
 | Property | Type | Description |
