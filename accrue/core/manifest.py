@@ -28,6 +28,8 @@ import warnings
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+from pydantic import BaseModel
+
 from .exceptions import _sanitize_secrets
 
 if TYPE_CHECKING:
@@ -271,56 +273,65 @@ def _field_entries(pipeline: Pipeline | None) -> list[dict[str, Any]]:
 def _introspect_field(step: Any, field_name: str) -> tuple[str, list[str] | None, str | None]:
     """Resolve ``(type, enum, description)`` for one field of a step.
 
-    Sources, in order of richness:
+    Two sources, combined:
 
-    1. An inline :class:`FieldSpec` (LLMStep ``dict`` fields) — the cleanest
-       source: its declared type, enum, and prompt.
-    2. A custom Pydantic response model (``schema=MyModel``) — field annotation
-       (``str`` / ``int`` / ``float`` / ``bool`` / ``Literal`` / enum / ``list``)
-       and the Pydantic field description.
-    3. Nothing introspectable (FunctionStep fields, ``__`` inter-step fields,
-       or LLMStep ``list`` fields on the permissive default ``EnrichmentResult``
-       schema) → ``("unknown", None, None)``.
+    - A custom Pydantic response model (``schema=MyModel``) owns the **type**:
+      it is what the step's output is validated into, so its annotation is the
+      real shape (a nested ``{value, source}`` model reports ``object``, not the
+      field spec's ``String``).  The default ``EnrichmentResult`` is permissive
+      (extra="allow", no declared fields), so its ``model_fields`` is empty and
+      it never contributes.
+    - An inline :class:`FieldSpec` (LLMStep ``dict`` fields) owns the **enum and
+      description** — its prompt is what the model was asked — and is the type
+      source when no custom schema declares the field.
 
+    The spec's type still wins where the annotation says less: an annotation
+    that resolves to ``"unknown"`` (e.g. a multi-arm ``Union``), or a plain
+    ``str`` on a spec with an ``enum``.
+
+    Nothing introspectable (FunctionStep fields, ``__`` inter-step fields, or
+    LLMStep ``list`` fields on the default schema) → ``("unknown", None, None)``.
     Any introspection error degrades to ``"unknown"`` rather than raising.
     """
-    # 1. Inline FieldSpec.
     field_specs = getattr(step, "_field_specs", None)
-    if isinstance(field_specs, dict) and field_name in field_specs:
-        spec = field_specs[field_name]
-        try:
-            spec_enum = getattr(spec, "enum", None)
-            description = getattr(spec, "prompt", None)
-            if spec_enum:
-                return "enum", list(spec_enum), description
-            type_str = _FIELDSPEC_TYPE.get(getattr(spec, "type", None), "unknown")
-            return type_str, None, description
-        except Exception:  # pragma: no cover — defensive
-            return "unknown", None, None
-
-    # 2. Custom Pydantic response model.  The default ``EnrichmentResult`` is
-    #    permissive (extra="allow", no declared fields), so its model_fields is
-    #    empty and this branch is skipped for it.
+    spec = field_specs.get(field_name) if isinstance(field_specs, dict) else None
     model_fields = getattr(getattr(step, "schema", None), "model_fields", None)
-    if isinstance(model_fields, dict) and field_name in model_fields:
-        try:
-            info = model_fields[field_name]
-            type_str, field_enum = _annotation_to_type(info.annotation)
-            return type_str, field_enum, getattr(info, "description", None)
-        except Exception:  # pragma: no cover — defensive
-            return "unknown", None, None
+    info = model_fields.get(field_name) if isinstance(model_fields, dict) else None
 
-    # 3. No cheap source.
-    return "unknown", None, None
+    try:
+        spec_view = _spec_to_type(spec) if spec is not None else None
+        if info is None:
+            return spec_view if spec_view is not None else ("unknown", None, None)
+
+        ann_type, ann_enum = _annotation_to_type(info.annotation)
+        if spec_view is None:
+            return ann_type, ann_enum, getattr(info, "description", None)
+
+        _, spec_enum, spec_description = spec_view
+        if ann_type == "unknown" or (ann_type == "str" and spec_enum):
+            return spec_view
+        return ann_type, spec_enum or ann_enum, spec_description
+    except Exception:  # pragma: no cover — defensive
+        return "unknown", None, None
+
+
+def _spec_to_type(spec: Any) -> tuple[str, list[str] | None, str | None]:
+    """``(type, enum, description)`` as an inline :class:`FieldSpec` declares it."""
+    spec_enum = getattr(spec, "enum", None)
+    description = getattr(spec, "prompt", None)
+    if spec_enum:
+        return "enum", list(spec_enum), description
+    return _FIELDSPEC_TYPE.get(getattr(spec, "type", None), "unknown"), None, description
 
 
 def _annotation_to_type(annotation: Any) -> tuple[str, list[str] | None]:
     """Map a Pydantic field annotation to ``(type, enum_members | None)``.
 
     Handles ``Optional[X]`` / ``X | None`` (unwrapped to X), ``Literal[...]``
-    and ``enum.Enum`` subclasses (→ ``"enum"`` with members), containers
-    (``list`` / ``dict``), and the scalar types.  Unrecognised annotations →
-    ``"unknown"``.
+    and ``enum.Enum`` subclasses (→ ``"enum"`` with members), list-like
+    containers (→ ``"list"``, whatever the item type), nested Pydantic models
+    and ``dict`` (→ ``"object"``), and the scalar types.  Unrecognised
+    annotations → ``"unknown"``.
     """
     origin = typing.get_origin(annotation)
     args = typing.get_args(annotation)
@@ -341,7 +352,9 @@ def _annotation_to_type(annotation: Any) -> tuple[str, list[str] | None]:
     if origin in (list, tuple, set, frozenset) or annotation in (list, tuple, set, frozenset):
         return "list", None
     if origin is dict or annotation is dict:
-        return "json", None
+        return "object", None
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return "object", None
 
     # ``bool`` before ``int`` — ``bool`` is a subclass of ``int``.  Identity
     # checks (``is``) keep them distinct without the subclass trap.
