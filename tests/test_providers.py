@@ -2169,7 +2169,7 @@ class TestAnthropicSchemaTooComplex:
             import httpx
 
             exc = api_error(message, request=httpx.Request("POST", "http://x"), body=None)
-        except TypeError:  # minimal mock class
+        except (ImportError, TypeError):  # no httpx (openai>=3 ships httpx2) or minimal mock
             exc = api_error(message)
         exc.status_code = 400
         mock_inner = MagicMock()
