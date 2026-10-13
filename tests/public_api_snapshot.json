@@ -4,6 +4,7 @@
       "BatchCapableLLMClient",
       "BatchRequest",
       "BatchResult",
+      "Candidate",
       "ComparisonResult",
       "CostSummary",
       "Document",
@@ -17,6 +18,7 @@
       "GroundingConfig",
       "JsonlRunLogger",
       "LLMStep",
+      "MergedResult",
       "Pipeline",
       "PipelineEndEvent",
       "PipelineError",
@@ -35,6 +37,7 @@
       "StepStartEvent",
       "compare",
       "is_batch_capable",
+      "merge_runs",
       "read_prompt_ref",
       "setup_logging",
       "web_search"
@@ -70,6 +73,11 @@
         "kind": "dataclass",
         "members": {},
         "signature": "(responses: dict[str, LLMResponse] = <factory>, failed_ids: list[str] = <factory>, batch_id: str = '', errors: dict[str, str] = <factory>) -> None"
+      },
+      "Candidate": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(run: int, value: Any, row: dict[str, Any]) -> None"
       },
       "ComparisonResult": {
         "kind": "dataclass",
@@ -328,6 +336,20 @@
         },
         "signature": "(name: str, fields: list[str] | dict[str, str | dict], depends_on: list[str] | None = None, model: str = 'gpt-4.1-mini', temperature: float | None = None, max_tokens: int | None = None, system_prompt: str | None = None, system_prompt_header: str | None = None, api_key: str | None = None, base_url: str | None = None, client: LLMClient | None = None, schema: Type[BaseModel] = <class 'EnrichmentResult'>, max_retries: int = 2, cache: bool = True, structured_outputs: bool | None = None, grounding: bool | dict | GroundingConfig | None = None, sources_field: str | None = 'sources', run_if: Callable[..., Any] | None = None, skip_if: Callable[..., Any] | None = None, batch: bool = False, provider_kwargs: dict[str, Any] | None = None, attachments: str | None = None)"
       },
+      "MergedResult": {
+        "kind": "dataclass",
+        "members": {
+          "needs_review": {
+            "kind": "property",
+            "signature": "(self) -> pd.DataFrame"
+          },
+          "summary": {
+            "kind": "method",
+            "signature": "(self) -> str"
+          }
+        },
+        "signature": "(data: pd.DataFrame, agreement: pd.DataFrame, errored_rows: dict[Any, list[int]], cost: CostSummary, elapsed_seconds: float, fields: list[str], rules: dict[str, str], runs: list[PipelineResult]) -> None"
+      },
       "Pipeline": {
         "kind": "class",
         "members": {
@@ -500,6 +522,10 @@
       "is_batch_capable": {
         "kind": "function",
         "signature": "(client: Any) -> bool"
+      },
+      "merge_runs": {
+        "kind": "function",
+        "signature": "(runs: Sequence[PipelineResult], *, fields: Sequence[str] | None = None, key: Callable[[Any], Any] | Mapping[str, Callable[[Any], Any]] | None = None, resolve: Resolver | Mapping[str, Resolver | Rule] | Rule | None = None) -> MergedResult"
       },
       "read_prompt_ref": {
         "kind": "function",

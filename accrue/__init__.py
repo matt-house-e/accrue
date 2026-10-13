@@ -29,12 +29,15 @@ from .core.hooks import (
 )
 from .core.runlog import JsonlRunLogger, read_prompt_ref
 from .pipeline import (
+    Candidate,
     ComparisonResult,
+    MergedResult,
     Pipeline,
     PipelinePlan,
     PipelineResult,
     StepPlan,
     compare,
+    merge_runs,
 )
 from .schemas.base import CostSummary
 from .schemas.field_spec import FieldSpec
@@ -63,6 +66,9 @@ __all__ = [
     "EnrichmentConfig",
     "compare",
     "ComparisonResult",
+    "merge_runs",
+    "MergedResult",
+    "Candidate",
     # Hooks
     "EnrichmentHooks",
     "PipelineStartEvent",

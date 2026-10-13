@@ -163,6 +163,8 @@ accrue watch                                                # opens the latest r
 
 - **Run diffs** -- `accrue.compare(result_a, result_b)` diffs two runs (e.g. before/after a prompt tweak) -- changed rows, per-field churn, distribution shift, and cost delta -- no labels needed. [Compare guide](docs/guides/compare.md)
 
+- **Merging repeated runs** -- `accrue.merge_runs([run_a, run_b, run_c])` combines independent runs over the same rows into one answer per cell by majority vote, with per-cell agreement, the cells that need review, and cost summed across runs. Pluggable per-field resolvers for rules like "prefer the run with a verified quote". [Merge guide](docs/guides/merge-runs.md)
+
 - **`provider_kwargs`** -- Escape hatch for provider-specific features (extended thinking, effort control, etc.) without waiting for first-class support.
 
 ## Sweet Spot
