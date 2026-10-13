@@ -133,11 +133,11 @@ result = pipeline.run(companies_df, run_log=True)  # writes .accrue/runs/<run_id
 ```
 
 ```bash
-pip install git+https://github.com/matt-house-e/accrue-ui  # not on PyPI yet
-accrue watch                                                # opens the latest run in your browser
+pip install 'accrue[ui]'   # the dashboard, alongside the engine
+accrue watch               # opens the latest run in your browser
 ```
 
-`accrue watch` is a thin stub that delegates to accrue-ui. Add `--pipeline module:attr` to enable one-click retry of failed rows from the dashboard. There is no `accrue[ui]` extra until accrue-ui is published. [Run log guide](docs/guides/run-log.md)
+`accrue watch` is a thin stub that delegates to accrue-ui. Add `--pipeline module:attr` to enable one-click retry of failed rows from the dashboard. [Run log guide](docs/guides/run-log.md)
 
 ## Features
 

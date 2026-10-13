@@ -22,8 +22,9 @@ commands:
   watch    Watch pipeline runs live (requires the accrue-ui package)
 """
 
-#: accrue-ui is not on PyPI, so the git URL is the install line that works.
-INSTALL_HINT = "pip install git+https://github.com/matt-house-e/accrue-ui"
+#: accrue-ui is on PyPI, so the `ui` extra is the install line that works.
+#: Quoted because zsh globs the brackets.
+INSTALL_HINT = "pip install 'accrue[ui]'"
 
 
 def _accrue_ui_present() -> bool:
@@ -48,10 +49,6 @@ def _cmd_watch(argv: list[str]) -> int:
             )
         else:
             print(f"accrue watch requires the accrue-ui package: {INSTALL_HINT}", file=sys.stderr)
-            print(
-                "(accrue-ui is not on PyPI yet, so install it from the repo.)",
-                file=sys.stderr,
-            )
         return 1
     rc = ui_main(argv)
     return rc if isinstance(rc, int) else 0

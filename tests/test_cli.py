@@ -45,17 +45,16 @@ class TestMain:
     def test_watch_without_accrue_ui_hints_and_exits_1(self, capsys):
         """The lead hint must be an install line that actually works.
 
-        It used to be ``pip install 'accrue[ui]'``, which fails outright:
-        accrue-ui is not on PyPI, and the extra has been removed.
+        accrue-ui is on PyPI, so the ``ui`` extra resolves (#151); the quotes
+        keep the line copy-pasteable under zsh, which globs the brackets.
         """
         assert main(["watch"]) == 1
         err = capsys.readouterr().err
         lines = err.strip().splitlines()
-        assert len(lines) == 2
+        assert len(lines) == 1
         assert INSTALL_HINT in lines[0]
-        assert INSTALL_HINT == "pip install git+https://github.com/matt-house-e/accrue-ui"
-        assert "accrue[ui]" not in err
-        assert "not on PyPI" in err
+        assert INSTALL_HINT == "pip install 'accrue[ui]'"
+        assert "git+https" not in err
 
     def test_watch_distinguishes_a_broken_accrue_ui_from_a_missing_one(self, monkeypatch, capsys):
         """accrue-ui installed but raising on import must not print an install hint."""
@@ -139,7 +138,7 @@ class TestConsoleEntry:
         proc = self._run("watch")
         assert proc.returncode == 1
         assert INSTALL_HINT in proc.stderr
-        assert "accrue[ui]" not in proc.stderr
+        assert "git+https" not in proc.stderr
 
     @pytest.mark.skipif(
         shutil.which("accrue") is None, reason="accrue script not on PATH (not pip-installed)"
