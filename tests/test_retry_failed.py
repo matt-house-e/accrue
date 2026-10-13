@@ -585,6 +585,37 @@ class TestRunLogContinuity:
         assert recovered, "the retry logged its cells"
         assert all(r["key"] is None for r in recovered), "keys stay as the run recorded them"
 
+    def test_retry_into_a_multi_run_log_heals_the_latest_run(self, tmp_path):
+        """A rerun appended to the log is the run the checkpoint belongs to (#174)."""
+        tracker = Tracker(failing={1})
+        pipeline = _pipeline(tracker)
+        data = _rows(3)
+        config = _config(tmp_path)
+        log = tmp_path / "run.jsonl"
+
+        pipeline.run(data, config=config, run_log=log, display_key="idx")
+        pipeline.run(data, config=config, run_log=log, display_key="company")
+        starts = [r for r in _load_log(log) if r["type"] == "pipeline_start"]
+        assert len(starts) == 2
+        first_id, latest_id = starts[0]["run_id"], starts[1]["run_id"]
+        assert first_id != latest_id
+
+        tracker.reset()
+        tracker.failing.clear()
+        pipeline.retry_failed(data, config=config, run_log=log)
+
+        records = _load_log(log)
+        types = [r["type"] for r in records]
+        start = records[types.index("retry_start")]
+        assert start["run_id"] == latest_id, "tagged with the latest run, not the first"
+        recovered = [
+            r for r in records[types.index("retry_start") :] if r["type"] == "row_complete"
+        ]
+        assert recovered, "the retry logged its cells"
+        assert all(r["key"] == f"company-{r['row']:02d}" for r in recovered), (
+            "keyed by the latest run's display_key"
+        )
+
     def test_retry_without_an_existing_log_starts_a_normal_one(self, tmp_path):
         tracker = Tracker(failing={0})
         pipeline = _pipeline(tracker)
