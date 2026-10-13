@@ -71,7 +71,34 @@ Enough to tell two attachments apart, without putting a megabyte of base64 into 
 
 ## Request limits
 
-Anthropic caps a single request at **32 MB** — measured after base64 encoding, which adds a third, so roughly 24 MB of raw PDF — and at **100 PDF pages** (600 on 1M-context models). The Message Batches API caps a batch at **256 MB** total, so a large PDF set has to be split, for example with a small `EnrichmentConfig(batch_max_requests=...)` — accrue does not size batches by attachment bytes automatically.
+Providers cap request size, and attachments are where you hit the caps. Base64 encoding inflates every file by 4/3, so 25 MB of PDFs is about 34 MB on the wire.
+
+| Limit | Anthropic | OpenAI |
+|---|---|---|
+| One request | 32 MB | none documented, not checked |
+| One batch submission | 256 MB (and 100,000 requests) | 200 MB input file (and 50,000 requests) |
+| PDF pages per request | 600, or 100 under a 1M-token context window | n/a (attachments are Anthropic-only) |
+
+Sources: Anthropic [request size limits](https://platform.claude.com/docs/en/api/overview#request-size-limits), [batch limitations](https://platform.claude.com/docs/en/build-with-claude/batch-processing#batch-limitations), [PDF support](https://platform.claude.com/docs/en/build-with-claude/pdf-support); OpenAI [Batch API](https://developers.openai.com/api/docs/guides/batch). accrue reads MB as 1,000,000 bytes, the conservative reading.
+
+What accrue does about them:
+
+- **It estimates each request's size before sending.** Document bytes are counted at their base64 length without being encoded; the rest of the request (prompt, schema, tools) is measured by serializing it, plus 1 KB for the provider envelope.
+- **An over-limit row fails alone.** If a row's request exceeds the client's per-request limit, the row gets a `StepError` naming the estimated size and the limit, no API call is made, and the rest of the run continues. This applies to realtime and batch steps. `Pipeline.retry_failed()` will retry the row, so shrink or split its attachments first.
+- **Batches are split by size as well as count.** A new batch starts before the summed estimate would pass `EnrichmentConfig.batch_max_bytes`, which defaults to the client's per-batch cap. A request that is bigger than the batch limit on its own fails that row instead of the batch.
+
+The limits are the client attributes `max_request_bytes` and `max_batch_bytes`, in bytes. Set them on an instance for a gateway with tighter caps (Bedrock allows 20 MB per request, Google Cloud 30 MB), or to `None` to switch a check off:
+
+```python
+client = AnthropicClient()
+client.max_request_bytes = 20_000_000
+
+config = EnrichmentConfig(batch_max_bytes=100_000_000)  # smaller batches
+```
+
+A custom client without these attributes is not checked.
+
+**Pages and tokens are not checked.** Counting PDF pages reliably means parsing the PDF (page trees, compressed object streams, incremental updates), and accrue does not take a PDF dependency for that; a regex over the raw bytes miscounts real files. Token counts depend on the model's tokenizer and on how the provider renders each page. A file over the page limit, or a prompt over the context window, is still refused by the provider: on a realtime step the row fails with the provider's error, and on a batch step that one request fails inside the batch and is retried realtime, where it fails the same way. If your files are near the page limit, count pages yourself (for example with `pypdf` in a `FunctionStep`) and skip or split those rows before the `LLMStep`.
 
 A response cut off at `max_tokens` fails the row with an error naming the limit rather than being retried: every retry would resend the full request, documents included, and be cut off again. Raise `max_tokens` (above roughly 21,000 also pass `AnthropicClient(timeout=...)`, see [providers](providers.md)).
 

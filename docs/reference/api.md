@@ -410,6 +410,7 @@ class EnrichmentConfig:
     batch_poll_interval: float = 60.0
     batch_timeout: float = 86400.0
     batch_max_requests: int = 50000
+    batch_max_bytes: int | None = None
 ```
 
 | Field | Default | Description |
@@ -433,6 +434,7 @@ class EnrichmentConfig:
 | `batch_poll_interval` | `60.0` | Seconds between batch job status checks. |
 | `batch_timeout` | `86400.0` | Maximum seconds to wait for a batch job (default: 24 hours). |
 | `batch_max_requests` | `50000` | Maximum requests per batch submission. Larger sets are auto-chunked. |
+| `batch_max_bytes` | `None` | Maximum estimated payload bytes per batch submission (base64 attachments included). `None` uses the client's `max_batch_bytes`. |
 
 ### Presets
 
