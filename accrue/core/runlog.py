@@ -563,6 +563,8 @@ class JsonlRunLogger:
             usage = {
                 "in": getattr(event.usage, "prompt_tokens", 0),
                 "out": getattr(event.usage, "completion_tokens", 0),
+                "cache_read_tokens": getattr(event.usage, "cache_read_tokens", 0),
+                "cache_write_tokens": getattr(event.usage, "cache_write_tokens", 0),
                 "cost": None,
             }
 
@@ -642,6 +644,8 @@ class JsonlRunLogger:
                 "usage": {
                     "in": usage.prompt_tokens if usage is not None else 0,
                     "out": usage.completion_tokens if usage is not None else 0,
+                    "cache_read_tokens": usage.cache_read_tokens if usage is not None else 0,
+                    "cache_write_tokens": usage.cache_write_tokens if usage is not None else 0,
                     "cost": None,
                 },
                 "elapsed_s": round(event.elapsed_seconds, 6),
@@ -657,6 +661,8 @@ class JsonlRunLogger:
             "cost": {
                 "in": getattr(cost, "total_prompt_tokens", 0),
                 "out": getattr(cost, "total_completion_tokens", 0),
+                "cache_read_tokens": getattr(cost, "total_cache_read_tokens", 0),
+                "cache_write_tokens": getattr(cost, "total_cache_write_tokens", 0),
                 "cost": None,
             },
             "elapsed_s": round(event.elapsed_seconds, 6),
