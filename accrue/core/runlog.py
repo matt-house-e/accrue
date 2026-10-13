@@ -673,6 +673,10 @@ class JsonlRunLogger:
                 },
                 "elapsed_s": round(event.elapsed_seconds, 6),
                 "batch_id": event.batch_id,
+                # Every batch, not just the first: byte-aware chunking can split
+                # one step across several (#169).  An event built with only
+                # batch_id still yields a consistent one-element list.
+                "batch_ids": list(event.batch_ids or ([event.batch_id] if event.batch_id else [])),
             },
         )
 

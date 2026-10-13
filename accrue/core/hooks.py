@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
@@ -55,7 +55,11 @@ class StepStartEvent:
 
 @dataclass(frozen=True)
 class StepEndEvent:
-    """Fired after a step finishes all rows."""
+    """Fired after a step finishes all rows.
+
+    ``batch_id`` is the first batch submitted (kept for compatibility);
+    ``batch_ids`` lists every one, in submission order (#169).
+    """
 
     step_name: str
     num_rows: int
@@ -64,6 +68,7 @@ class StepEndEvent:
     elapsed_seconds: float
     execution_mode: str = "realtime"
     batch_id: str | None = None
+    batch_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

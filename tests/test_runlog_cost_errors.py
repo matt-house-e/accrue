@@ -183,3 +183,66 @@ class TestIsRetryable:
         a, b = ValueError("a"), ValueError("b")
         a.__cause__, b.__cause__ = b, a
         assert _is_retryable(a) is False  # a cause cycle terminates
+
+
+class TestBatchIds:
+    def test_step_split_into_n_batches_logs_n_ids(self, tmp_path):
+        from tests.test_size_limits import CONFIG, FakeClient, _rows, _step
+
+        # Each request ~ 40 kB base64 + overhead; 100 kB batch fits two → 3 batches.
+        client = FakeClient(max_batch_bytes=100_000)
+        path = tmp_path / "log.jsonl"
+        result = Pipeline([_step(client, batch=True)]).run(
+            _rows(*[30_000] * 5), config=CONFIG, run_log=path
+        )
+        assert len(client.batches) == 3
+
+        step_end = next(r for r in _load(path) if r["type"] == "step_end")
+        assert step_end["batch_ids"] == ["batch-1", "batch-2", "batch-3"]
+        assert step_end["batch_id"] == "batch-1"  # unchanged: still the first
+        assert result.cost.steps["read_docs"].batch_ids == step_end["batch_ids"]
+
+    def test_batch_oversize_row_is_not_retryable(self, tmp_path):
+        from tests.test_size_limits import CONFIG, FakeClient, _rows, _step
+
+        client = FakeClient(max_request_bytes=100_000, max_batch_bytes=10**9)
+        path = tmp_path / "log.jsonl"
+        Pipeline([_step(client, batch=True)]).run(
+            _rows(1_000, 200_000), config=CONFIG, run_log=path
+        )
+        errored = [r for r in _load(path) if r["type"] == "row_complete" and r["error"]]
+        assert [(r["row"], r["error"]["retryable"]) for r in errored] == [(1, False)]
+
+    @pytest.mark.asyncio
+    async def test_event_with_only_batch_id_still_logs_a_list(self, tmp_path):
+        from accrue import JsonlRunLogger
+        from accrue.core.hooks import StepEndEvent
+
+        logger = JsonlRunLogger(tmp_path / "log.jsonl")
+        for batch_id, expected in (("b-1", ["b-1"]), (None, []), ("", [])):
+            await logger.hooks.on_step_end(
+                StepEndEvent("s", 1, 0, None, 0.0, execution_mode="batch", batch_id=batch_id)
+            )
+            assert _load(logger.path)[-1]["batch_ids"] == expected
+        logger.close()
+
+
+class TestOldLogsStillParse:
+    def test_read_run_context_on_a_pre_169_log(self, tmp_path):
+        """A log written before #169 (no cache keys, retryable or batch_ids) still reads."""
+        from accrue.core.runlog import read_run_context
+
+        old = [
+            {"v": 1, "t": 0.0, "type": "pipeline_start", "run_id": "r1", "display_key": "k"},
+            {"v": 1, "t": 0.5, "type": "row_complete", "step": "s", "row": 0,
+             "status": "error", "error": {"type": "ValueError", "msg": "x"},
+             "usage": {"in": 1, "out": 1, "cost": None}},
+            {"v": 1, "t": 0.7, "type": "step_end", "step": "s", "num_errors": 1,
+             "usage": {"in": 1, "out": 1, "cost": None}, "elapsed_s": 0.1,
+             "batch_id": None},
+            {"v": 1, "t": 0.9, "type": "pipeline_end", "num_rows": 1, "total_errors": 1,
+             "cost": {"in": 1, "out": 1, "cost": None}, "elapsed_s": 0.9},
+        ]  # fmt: skip
+        path = tmp_path / "old.jsonl"
+        path.write_text("".join(json.dumps(r) + "\n" for r in old), encoding="utf-8")
+        assert read_run_context(path) == ("r1", "k", 0.9)

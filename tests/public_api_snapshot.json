@@ -489,7 +489,7 @@
       "StepEndEvent": {
         "kind": "dataclass",
         "members": {},
-        "signature": "(step_name: str, num_rows: int, num_errors: int, usage: Any, elapsed_seconds: float, execution_mode: str = 'realtime', batch_id: str | None = None) -> None"
+        "signature": "(step_name: str, num_rows: int, num_errors: int, usage: Any, elapsed_seconds: float, execution_mode: str = 'realtime', batch_id: str | None = None, batch_ids: list[str] = <factory>) -> None"
       },
       "StepError": {
         "bases": [

@@ -65,7 +65,7 @@ REQUIRED_KEYS = {
         "usage",
         "elapsed_ms",
     },
-    "step_end": {"step", "num_errors", "usage", "elapsed_s", "batch_id"},
+    "step_end": {"step", "num_errors", "usage", "elapsed_s", "batch_id", "batch_ids"},
     "pipeline_end": {"num_rows", "total_errors", "cost", "elapsed_s"},
 }
 
@@ -226,6 +226,7 @@ class TestGoldenFixture:
                 assert set(rec["usage"].keys()) >= {"in", "out", "cost", *CACHE_KEYS}
                 assert rec["usage"]["cost"] is None  # no pricing data by design
                 assert rec["batch_id"] is None
+                assert rec["batch_ids"] == []  # realtime steps submit no batches
             if rec["type"] == "pipeline_end":
                 assert set(rec["cost"].keys()) >= {"in", "out", "cost", *CACHE_KEYS}
                 assert all(rec["cost"][k] == 0 for k in CACHE_KEYS)  # function steps only
