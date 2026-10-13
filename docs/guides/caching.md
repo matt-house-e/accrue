@@ -144,6 +144,7 @@ Points worth knowing:
 - **A clean run has nothing to retry.** Its checkpoint was removed on success, so `retry_failed()` raises.
 - **Steps the run never finished still run in full.** A killed run has no results for them at all.
 - **A cell that fails again surfaces normally.** It comes back in `result.errors` and stays recorded for the next attempt.
+- **`result.row_status` covers the whole dataset; `result.errors` covers only this pass.** A failure you left out with `rows=` / `steps=` is not in `errors`, but reads `"error"` in `row_status`. Checkpointed cells keep their recorded outcome, including `"skipped"`. See [Error Handling](error-handling.md#per-cell-status-resultrow_status).
 - **Downstream cells of a healed row re-run too.** Healing `score` for row 7 re-runs `flag` for row 7, and anything downstream of `flag`, walked transitively through the DAG -- but only for row 7. `flag` had computed its answer from the `None` placeholder the failure left behind; leaving that in place would hand you wrong data with no errors attached to it. A retry therefore costs the failed cells *plus* their dependents for those rows, still nothing for the rows that worked. Steps on a sibling branch, which consumed nothing broken, are untouched.
 - **Row indices are positional**, matching the `row` field in the run log.
 - **A cell that gets *skipped* on the retry stays failed.** If a `run_if` / `skip_if` predicate now excludes a cell you asked to heal, nothing ran, so its recorded failure is kept and the checkpoint stays for a later attempt.

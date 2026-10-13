@@ -46,6 +46,45 @@ print(f"Success rate: {result.success_rate:.1%}")
 
 `result.success_rate` is a float between 0.0 and 1.0 representing the fraction of rows without errors.
 
+## Per-cell status: `result.row_status`
+
+`result.errors` lists what failed in *this* pass. It doesn't tell a blank cell that failed apart from one a `run_if` predicate skipped, or from a step that really returned `None`. `result.row_status` does. It is a DataFrame with one column per step, in execution order, aligned to `result.data`'s index (a `RangeIndex` for `list[dict]` input):
+
+```python
+result.row_status
+#    extract  verify
+# 0       ok      ok
+# 1    error      ok
+# 2       ok skipped
+```
+
+| Value | Meaning |
+|-------|---------|
+| `"ok"` | The step produced values for this row: freshly, from the cache, or from the checkpoint. |
+| `"error"` | The step raised after retries, or the checkpoint still records the cell as failed. |
+| `"skipped"` | A `run_if` / `skip_if` predicate skipped the row. Its fields hold their FieldSpec defaults (or `None`). |
+
+These are the same values as `row_complete.status` in the [run log](run-log.md). A cache hit is `"ok"`: where a value came from is a separate fact, reported by `RowCompleteEvent.from_cache` and `StepUsage.cache_hits`.
+
+**Filter on the row, not the step.** A dependent step still runs on a row whose upstream cell failed. It receives `None` for the failed step's fields, and it can return a perfectly valid-looking value computed from nothing. That cell reads `"ok"`, because the dependent step itself did not raise. To get the rows you can trust:
+
+```python
+ok = ~result.row_status.eq("error").any(axis=1)
+good = result.data[ok]
+```
+
+To export status next to the data, join it explicitly. `result.data` and `save()` never include it:
+
+```python
+result.data.join(result.row_status.add_prefix("status_")).to_csv("out.csv", index=False)
+```
+
+After [`retry_failed()`](caching.md#retrying-failed-cells), `row_status` still covers the whole dataset. Cells served from the checkpoint keep the outcome recorded for them. So a failure you left out with `rows=` / `steps=` reads `"error"` even though it is not in that pass's `result.errors`.
+
+### Missing values stay `None`
+
+A step's `None` stays `None` in `result.data`. On pandas 3, a column holding strings and `None` would otherwise be given the `str` dtype, which stores missing values as `NaN`. `NaN` is truthy, so `if row["flag"]:` would fire for every row that returned `None`. accrue builds such a column as `object`. That matches pandas 2 and the `list[dict]` path. Numeric columns still use `NaN` for missing values, so use `pd.isna()` there, never truthiness.
+
 To re-run just those failed cells -- without paying again for the rows that worked -- see [`pipeline.retry_failed()`](caching.md#retrying-failed-cells). It needs `EnrichmentConfig(enable_checkpointing=True)` on the original run.
 
 ## Exception hierarchy
