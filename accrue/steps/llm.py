@@ -553,7 +553,16 @@ class LLMStep:
         # cache it across rows; row data rides in the user message.
         user_content: Any = prompt.user
         if self.attachments:
-            docs = normalize_attachments(ctx.row.get(self.attachments))
+            if self.attachments not in ctx.row:
+                # A typo in the column name would otherwise send every row
+                # without its documents and bill for answers about nothing.
+                raise StepError(
+                    f"LLMStep '{self.name}': attachments column "
+                    f"'{self.attachments}' is not in the row. "
+                    f"Columns: {sorted(map(str, ctx.row))}",
+                    step_name=self.name,
+                )
+            docs = normalize_attachments(ctx.row[self.attachments])
             if docs:
                 # Provider-neutral blocks; the adapter does the encoding.
                 user_content = [

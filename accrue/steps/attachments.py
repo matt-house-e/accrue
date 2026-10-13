@@ -101,6 +101,10 @@ def normalize_attachments(value: Any) -> list[Document]:
         items: list[Any] = [value]
     elif isinstance(value, (list, tuple)):
         items = list(value)
+    elif getattr(value, "ndim", 0) > 0 and hasattr(value, "tolist"):
+        # A numpy array — what pandas hands back for a list column read from
+        # Parquet/Arrow.  Without this it would fall through to _is_blank.
+        items = list(value.tolist())
     elif _is_blank(value):
         return []
     else:
@@ -140,5 +144,10 @@ def _is_blank(value: Any) -> bool:
         return False
     try:
         return bool(result)
-    except (TypeError, ValueError):
+    except TypeError:
+        # pd.NA: "boolean value of NA is ambiguous".
         return True
+    except ValueError:
+        # An array-like ("truth value of an array is ambiguous") is not a
+        # blank; let the caller reject it rather than silently drop it.
+        return False

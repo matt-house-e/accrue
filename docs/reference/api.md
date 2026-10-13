@@ -218,7 +218,7 @@ LLMStep(
 | `api_key` | Provider API key. Falls back to the relevant environment variable (e.g. `OPENAI_API_KEY`). |
 | `base_url` | OpenAI-compatible base URL (Ollama, Groq, etc.). Disables structured-output auto-detection. |
 | `client` | Pre-configured `LLMClient` instance. Overrides `api_key` and `base_url`. |
-| `schema` | Pydantic model for response validation. Default `EnrichmentResult` works with dynamic field specs. With `structured_outputs=True` the model's JSON schema is sent as a strict `json_schema` response format. |
+| `schema` | Pydantic model for response validation. Default `EnrichmentResult` works with dynamic field specs. With `structured_outputs=True` the model's JSON schema is sent as a strict `json_schema` response format; OpenAI's strict mode also needs every property required (no defaults) and rejects the request otherwise. |
 | `max_retries` | Parse/validation retry attempts per API call (inner retry loop). |
 | `cache` | Enable input-hash caching for this step. |
 | `structured_outputs` | Override structured-output auto-detection. `True` forces `json_schema` -- built from a custom `schema=` model when set, otherwise from the field specs; `False` forces `json_object`; `None` auto-detects (a custom `schema=` stays `json_object`). |

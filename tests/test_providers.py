@@ -2015,6 +2015,65 @@ class TestAnthropicAttachments:
         assert sent == [{"role": "user", "content": "plain"}]
 
 
+class TestAnthropicTruncation:
+    """A response cut off at max_tokens fails once instead of being re-sent."""
+
+    @staticmethod
+    def _client(text: str, stop_reason: str):
+        TestAnthropicClient._install_mock_anthropic()
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        mock_inner = MagicMock()
+        mock_inner.messages.create = AsyncMock(
+            return_value=SimpleNamespace(
+                content=[SimpleNamespace(text=text, type="text", citations=None)],
+                usage=None,
+                stop_reason=stop_reason,
+            )
+        )
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+        return client
+
+    @staticmethod
+    async def _complete(client):
+        return await client.complete(
+            messages=[{"role": "user", "content": "x"}],
+            model="claude-sonnet-4-5-20250929",
+            temperature=None,
+            max_tokens=100,
+        )
+
+    @pytest.mark.asyncio
+    async def test_truncated_json_raises_non_retryable(self):
+        client = self._client('{"a": "unfinish', "max_tokens")
+        with pytest.raises(LLMAPIError, match="truncated at max_tokens=100") as info:
+            await self._complete(client)
+        assert info.value.retryable is False
+
+    @pytest.mark.asyncio
+    async def test_complete_json_at_max_tokens_is_returned(self):
+        client = self._client('{"a": 1}', "max_tokens")
+        assert (await self._complete(client)).content == '{"a": 1}'
+
+    @pytest.mark.asyncio
+    async def test_end_turn_is_not_checked(self):
+        client = self._client("not json", "end_turn")
+        assert (await self._complete(client)).content == "not json"
+
+    @pytest.mark.asyncio
+    async def test_llm_step_makes_one_call_on_truncation(self):
+        from accrue.steps.base import StepContext
+        from accrue.steps.llm import LLMStep
+
+        client = self._client('{"f1": "cut', "max_tokens")
+        step = LLMStep(name="s", fields={"f1": "x"}, model="claude-sonnet-4-5", client=client)
+        with pytest.raises(LLMAPIError):
+            await step.run(StepContext(row={"a": 1}, fields={}, prior_results={}))
+        # No parse retries: each would resend the full request, attachments included.
+        assert client._client.messages.create.await_count == 1
+
+
 class TestAnthropicTimeout:
     @staticmethod
     def _installed_anthropic():
