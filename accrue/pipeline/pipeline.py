@@ -13,7 +13,7 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from ..core.config import EnrichmentConfig
-from ..core.exceptions import PipelineError, RowError
+from ..core.exceptions import PipelineError, RowError, StepError
 from ..core.hooks import (
     EnrichmentHooks,
     PipelineEndEvent,
@@ -1964,14 +1964,20 @@ class Pipeline:
             # Cache check
             cache_key = None
             if step_cache_enabled:
-                cache_key = _compute_step_cache_key(step, rows[idx], prior, step_fields)
-                cached = cache_manager.get(cache_key)
-                if cached is not None:
-                    cache_hits += 1
-                    row_from_cache[idx] = True
-                    results[idx] = cached
-                    row_bar.update(1)
-                    continue
+                try:
+                    cache_key = _compute_step_cache_key(step, rows[idx], prior, step_fields)
+                except StepError:
+                    # An unreadable attachment (#153): leave the row uncached so
+                    # Phase 2 records it as this row's error, not the step's.
+                    cache_key = None
+                if cache_key is not None:
+                    cached = cache_manager.get(cache_key)
+                    if cached is not None:
+                        cache_hits += 1
+                        row_from_cache[idx] = True
+                        results[idx] = cached
+                        row_bar.update(1)
+                        continue
 
             cache_keys[idx] = cache_key
             uncached_indices.append(idx)
@@ -2022,7 +2028,9 @@ class Pipeline:
         # fails here on its own — it never reaches a batch it would sink.
         batch_requests: list[BatchRequest] = []
         request_sizes: list[int] = []
-        oversize_indices: set[int] = set()
+        # Rows that fail before submission: unbuildable request (#153) or
+        # over the request/batch size limit (#159).
+        request_failed: set[int] = set()
         for idx in uncached_indices:
             prior: dict[str, Any] = {}
             for dep_name in step.depends_on:
@@ -2035,7 +2043,22 @@ class Pipeline:
                 prior_results=prior,
                 config=config,
             )
-            messages, call_kwargs = step.build_messages(ctx)
+            try:
+                messages, call_kwargs = step.build_messages(ctx)
+            except StepError as exc:
+                # A row whose request cannot be built (e.g. an unreadable
+                # attachment, #153) fails alone, before anything is submitted,
+                # instead of aborting the whole step.
+                logger.warning("Row %d failed in step '%s': %s", idx, step.name, exc)
+                errors.append(RowError(row_index=idx, step_name=step.name, error=exc))
+                results[idx] = {f: None for f in step.fields}
+                request_failed.add(idx)
+                row_bar.update(1)
+                if on_error == "raise":
+                    step_values[step.name] = results
+                    row_bar.close()
+                    raise
+                continue
             size = estimate_request_bytes(messages, **call_kwargs)
             limit_hit = None
             if request_limit is not None and size > request_limit:
@@ -2046,7 +2069,7 @@ class Pipeline:
                 logger.warning("Step '%s' row %d: %s", step.name, idx, limit_hit)
                 errors.append(RowError(row_index=idx, step_name=step.name, error=limit_hit))
                 results[idx] = {f: None for f in step.fields}
-                oversize_indices.add(idx)
+                request_failed.add(idx)
                 row_bar.update(1)
                 if on_error == "raise":
                     step_values[step.name] = results
@@ -2067,6 +2090,9 @@ class Pipeline:
                 )
             )
 
+        if request_failed:
+            uncached_indices = [i for i in uncached_indices if i not in request_failed]
+
         logger.info(
             "Step '%s': batch mode — %d uncached, %d cached, %d skipped",
             step.name,
@@ -2074,9 +2100,6 @@ class Pipeline:
             cache_hits,
             rows_skipped,
         )
-
-        if oversize_indices:
-            uncached_indices = [i for i in uncached_indices if i not in oversize_indices]
 
         # ── Phase 3: Auto-chunk and submit ─────────────────────────────
         chunks = chunk_by_size(

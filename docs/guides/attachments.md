@@ -31,10 +31,10 @@ The named column is removed from the `<row_data>` JSON in the prompt and rendere
 | `"path/to/file.pdf"` or a `pathlib.Path` | one `Document` read from disk |
 | `b"%PDF-..."` | one `Document` with `media_type="application/pdf"` |
 | `Document(...)` | itself |
-| a `list`/`tuple` of any of the above | one `Document` each, in order |
+| a `list`/`tuple`/numpy array of any of the above | one `Document` each, in order |
 | `None`, `NaN`, `pd.NA`, `""`, `[]` | no attachments — a plain text prompt |
 
-Anything else raises `StepError` naming the offending type, as does a path that cannot be read.
+Anything else raises `StepError` naming the offending type, as does a path that cannot be read. A row that lacks the column altogether also raises, so a misspelt column name fails every row before any call instead of quietly sending prompts without their documents. On the batch path these are per-row errors raised before anything is submitted; the rest of the batch still goes out.
 
 ## `Document`
 
@@ -99,6 +99,8 @@ config = EnrichmentConfig(batch_max_bytes=100_000_000)  # smaller batches
 A custom client without these attributes is not checked.
 
 **Pages and tokens are not checked.** Counting PDF pages reliably means parsing the PDF (page trees, compressed object streams, incremental updates), and accrue does not take a PDF dependency for that; a regex over the raw bytes miscounts real files. Token counts depend on the model's tokenizer and on how the provider renders each page. A file over the page limit, or a prompt over the context window, is still refused by the provider: on a realtime step the row fails with the provider's error, and on a batch step that one request fails inside the batch and is retried realtime, where it fails the same way. If your files are near the page limit, count pages yourself (for example with `pypdf` in a `FunctionStep`) and skip or split those rows before the `LLMStep`.
+
+A response cut off at `max_tokens` fails the row with an error naming the limit rather than being retried: every retry would resend the full request, documents included, and be cut off again. Raise `max_tokens` (above roughly 21,000 also pass `AnthropicClient(timeout=...)`, see [providers](providers.md)).
 
 Attachment bytes are input tokens: a long PDF is a real cost, and the cached system prefix does not cover them.
 
