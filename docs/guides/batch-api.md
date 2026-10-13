@@ -96,7 +96,8 @@ result = pipeline.run(data, config=EnrichmentConfig.for_batch())
 
 usage = result.cost.steps["analyze"]
 print(usage.execution_mode)  # "batch"
-print(usage.batch_id)        # "batch_abc123"
+print(usage.batch_id)        # "batch_abc123" (the first batch)
+print(usage.batch_ids)       # Every batch, more than one if auto-chunked
 print(usage.cache_hits)      # Rows served from cache
 print(usage.cache_misses)    # Rows sent to batch
 print(usage.cache_hit_rate)  # Float between 0.0 and 1.0

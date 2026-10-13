@@ -89,6 +89,11 @@ def _sum_costs(costs: Sequence[CostSummary]) -> CostSummary:
             for f in int_fields:
                 setattr(acc, f, getattr(acc, f) + getattr(usage, f))
             acc.model = acc.model or usage.model
+            # The tokens cover every run, so the batch ids must too; batch_id
+            # stays the first of them.  Rebind, never extend: model_copy() is
+            # shallow, so the list is still run 0's own.
+            acc.batch_id = acc.batch_id or usage.batch_id
+            acc.batch_ids = [*acc.batch_ids, *usage.batch_ids]
     return CostSummary(
         total_prompt_tokens=sum(c.total_prompt_tokens for c in costs),
         total_completion_tokens=sum(c.total_completion_tokens for c in costs),

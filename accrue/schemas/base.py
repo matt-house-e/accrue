@@ -37,6 +37,12 @@ class StepUsage(BaseModel):
         cache_misses: Rows that required a fresh LLM/function call.
         cache_write_tokens: Total cache-write tokens across all rows.
         cache_read_tokens: Total cache-read tokens across all rows.
+        execution_mode: ``"realtime"`` or ``"batch"``.
+        batch_id: First provider batch id submitted for this step (batch
+            mode only).
+        batch_ids: Every provider batch id submitted for this step, in
+            submission order — more than one when the step's requests were
+            split across batches by count or byte limits.
     """
 
     prompt_tokens: int = 0
@@ -51,6 +57,7 @@ class StepUsage(BaseModel):
     cache_misses: int = 0
     execution_mode: str = "realtime"
     batch_id: str | None = None
+    batch_ids: list[str] = []
 
     @property
     def cache_hit_rate(self) -> float:

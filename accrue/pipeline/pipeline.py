@@ -1495,6 +1495,7 @@ class Pipeline:
                             elapsed_seconds=elapsed_s,
                             execution_mode=usage.execution_mode if usage else "realtime",
                             batch_id=usage.batch_id if usage else None,
+                            batch_ids=list(usage.batch_ids) if usage else [],
                         ),
                     )
 
@@ -2398,6 +2399,7 @@ class Pipeline:
                 cache_misses=cache_misses,
                 execution_mode="batch",
                 batch_id=primary_batch_id,
+                batch_ids=list(batch_ids),
             )
 
         elapsed = _time.monotonic() - step_start

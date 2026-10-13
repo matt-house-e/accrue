@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Run log: cache tokens, a `retryable` flag on errors, and every batch id.** The run log left out three facts accrue already had in memory, so accrue-ui could not give reliable cost or error advice. All three changes are additive within run-log contract v1 (no `SCHEMA_VERSION` bump), and older logs still parse. (#169)
+  - Every usage object (`row_complete.usage`, `step_end.usage`, `pipeline_end.cost`, `retry_end.cost`) gains `cache_read_tokens` and `cache_write_tokens`. These are always ints, `0` when the provider reports none. `AnthropicClient` fills both. `OpenAIClient` and `GoogleClient` report `0` for now. On a cached Anthropic run, tokens alone used to understate the cost.
+  - `row_complete.error` and `row_attempt.error` gain `retryable: bool`, accrue's verdict on whether the error is transient (rate limit, timeout, 5xx). A truncation at `max_tokens`, a schema too complex to compile, an over-size request, a parse failure that outlived its retries, or a function step raising reads `false`. Those were all reported the same way before, so a UI suggested lowering concurrency for errors that fail identically every time.
+  - `step_end` gains `batch_ids`, every batch a step submitted. `batch_id` is still the first one. `StepUsage` and `StepEndEvent` gain a matching `batch_ids: list[str]`. `merge_runs()` concatenates every run's `batch_ids`, and its `batch_id` is now the first run's that has one rather than always run 0's.
+  - `LLMStep`'s "API error after N retries" `StepError` is now raised `from` the last API error, so the cause shows up in tracebacks and is visible to the run log.
+  - See `docs/guides/run-log.md#usage-objects-and-cost` and `#error-objects-and-retryable`.
+
 ## [1.5.0] - 2026-10-13
 
 Documents in, reliable answers out. Headline contents: **PDF attachments** (`LLMStep(attachments="column")`, Anthropic only); **strict custom schemas**, so `structured_outputs=True` with a custom `schema=` now actually sends a strict `json_schema`; **provider size limits**, checked per request and used to split batches by bytes as well as count; **`PipelineResult.row_status`**, how every `(step, row)` cell ended; and **`merge_runs()`**, which votes repeated runs into one answer per cell. Behaviour changes to check when upgrading: a step whose `attachments=` column is missing from a row raises `StepError` instead of sending the prompt without documents; an Anthropic reply cut off at `max_tokens` fails once with a clear error instead of being retried; every step with a custom `schema=` misses the cache once, because the schema is now part of the cache key; and a `None` stays `None` in an enriched string column on pandas 3 instead of becoming `NaN`.
