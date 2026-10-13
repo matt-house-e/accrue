@@ -24,6 +24,7 @@ from accrue.core.runlog import (
     SCHEMA_VERSION,
     default_display_key,
     new_run_id,
+    read_run_context,
     resolve_row_keys,
     resolve_run_log_path,
 )
@@ -669,3 +670,46 @@ class TestJsonlRunLoggerStandalone:
         )
         assert event.usage is None
         assert event.elapsed_ms is None
+
+
+class TestReadRunContext:
+    def _write(self, path: Path, records: list[dict]) -> None:
+        path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+
+    def test_a_multi_run_log_reports_the_latest_run(self, tmp_path):
+        """A rerun appended to the same file is the run a retry heals (#174)."""
+        path = tmp_path / "log.jsonl"
+        self._write(
+            path,
+            [
+                {"v": 1, "t": 0.0, "type": "pipeline_start", "run_id": "r1", "display_key": "a"},
+                {"v": 1, "t": 0.4, "type": "pipeline_end"},
+                {"v": 1, "t": 0.5, "type": "pipeline_start", "run_id": "r2", "display_key": "b"},
+                {"v": 1, "t": 0.9, "type": "pipeline_end"},
+            ],
+        )
+        assert read_run_context(path) == ("r2", "b", 0.9)
+
+    def test_id_and_key_come_from_the_same_run(self, tmp_path):
+        """Run 2 has no display key; it must not inherit run 1's."""
+        path = tmp_path / "log.jsonl"
+        self._write(
+            path,
+            [
+                {"v": 1, "t": 0.0, "type": "pipeline_start", "run_id": "r1", "display_key": "a"},
+                {"v": 1, "t": 0.5, "type": "pipeline_start", "run_id": "r2", "display_key": None},
+            ],
+        )
+        assert read_run_context(path) == ("r2", None, 0.5)
+
+    def test_a_malformed_latest_start_is_not_backfilled_from_an_older_run(self, tmp_path):
+        """Falling back to run 1's id would re-tag the retry with the wrong run."""
+        path = tmp_path / "log.jsonl"
+        self._write(
+            path,
+            [
+                {"v": 1, "t": 0.0, "type": "pipeline_start", "run_id": "r1", "display_key": "a"},
+                {"v": 1, "t": 0.5, "type": "pipeline_start", "run_id": 7, "display_key": "b"},
+            ],
+        )
+        assert read_run_context(path) == (None, "b", 0.5)
