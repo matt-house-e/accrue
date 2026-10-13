@@ -190,6 +190,11 @@ def read_run_context(path: str | Path) -> tuple[str | None, str | None, float]:
     its ``t`` clock at the file's last ``t`` so the envelope stays
     non-decreasing across segments.
 
+    A file can hold several runs (a rerun to the same path appends).  The
+    ``run_id`` and ``display_key`` come from the **last** ``pipeline_start``:
+    that is the run whose checkpoint a retry heals (#174).  Both come from
+    that one record, never mixed across runs.
+
     Returns ``(None, None, 0.0)`` when the file is missing, empty, or has no
     readable ``pipeline_start``.  Malformed lines are skipped, not raised —
     a partially written log must never block a retry.
@@ -216,7 +221,7 @@ def read_run_context(path: str | Path) -> tuple[str | None, str | None, float]:
                 t = record.get("t")
                 if isinstance(t, (int, float)):
                     last_t = max(last_t, float(t))
-                if record.get("type") == "pipeline_start" and run_id is None:
+                if record.get("type") == "pipeline_start":
                     raw_id = record.get("run_id")
                     run_id = raw_id if isinstance(raw_id, str) else None
                     raw_key = record.get("display_key")
