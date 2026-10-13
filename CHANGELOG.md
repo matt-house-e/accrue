@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-10-13
+
+A one-fix patch: `retry_failed()` into a multi-run log now heals the latest run instead of the first.
+
 ### Fixed
 - **`retry_failed()` into a multi-run log heals the latest run.** A rerun to the same `run_log` path appends a second `pipeline_start`, but the retry kept the **first** run's `run_id` and `display_key`. A dashboard that routes by `run_id` (accrue-ui) then applied the recovered cells to run 1 instead of the run that was retried. The retry now takes both from the latest `pipeline_start` in the file. A single-run log behaves as before. (#174)
 
