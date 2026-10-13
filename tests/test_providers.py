@@ -2146,3 +2146,73 @@ class TestOtherProvidersRejectAttachments:
             has_document_blocks([{"role": "user", "content": [{"type": "text", "text": "x"}]}])
             is False
         )
+
+
+class TestAnthropicSchemaTooComplex:
+    """Anthropic's strict-schema size rejection becomes one clear, non-retried error."""
+
+    @staticmethod
+    def _client(message: str):
+        TestAnthropicClient._install_mock_anthropic()
+        import sys
+
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        mod = sys.modules["anthropic"]
+        if not (isinstance(mod.APIError, type) and issubclass(mod.APIError, Exception)):
+            # Another test left a bare MagicMock module behind.
+            mod.APIError = type("APIError", (Exception,), {})
+            mod.APITimeoutError = type("APITimeoutError", (Exception,), {})
+            mod.RateLimitError = type("RateLimitError", (Exception,), {})
+        api_error = mod.APIError
+        try:  # real SDK signature
+            import httpx
+
+            exc = api_error(message, request=httpx.Request("POST", "http://x"), body=None)
+        except (ImportError, TypeError):  # no httpx (openai>=3 ships httpx2) or minimal mock
+            exc = api_error(message)
+        exc.status_code = 400
+        mock_inner = MagicMock()
+        mock_inner.messages.create = AsyncMock(side_effect=exc)
+        client = AnthropicClient(api_key="test")
+        client._client = mock_inner
+        return client, mock_inner
+
+    @staticmethod
+    async def _complete(client):
+        return await client.complete(
+            messages=[{"role": "user", "content": "x"}],
+            model="claude-sonnet-4-5-20250929",
+            temperature=None,
+            max_tokens=100,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "message",
+        ["Schema is too complex for compilation", "The compiled grammar is too large"],
+    )
+    async def test_recognised_and_non_retryable(self, message):
+        client, _ = self._client(message)
+        with pytest.raises(LLMAPIError, match="\\$ref") as info:
+            await self._complete(client)
+        assert info.value.retryable is False
+        assert "enum" in str(info.value)
+
+    @pytest.mark.asyncio
+    async def test_unrelated_error_untouched(self):
+        client, _ = self._client("something else")
+        with pytest.raises(LLMAPIError) as info:
+            await self._complete(client)
+        assert "$ref" not in str(info.value)
+
+    @pytest.mark.asyncio
+    async def test_llm_step_makes_one_call(self):
+        from accrue.steps.base import StepContext
+        from accrue.steps.llm import LLMStep
+
+        client, inner = self._client("Schema is too complex for compilation")
+        step = LLMStep(name="s", fields={"a": "x"}, model="claude-sonnet-4-5", client=client)
+        with pytest.raises(LLMAPIError):
+            await step.run(StepContext(row={"k": 1}, fields={}, prior_results={}))
+        assert inner.messages.create.await_count == 1
