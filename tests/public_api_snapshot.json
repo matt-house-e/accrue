@@ -34,6 +34,7 @@
       "StepResult",
       "StepStartEvent",
       "compare",
+      "describe_from_specs",
       "is_batch_capable",
       "read_prompt_ref",
       "setup_logging",
@@ -337,7 +338,7 @@
           },
           "execute": {
             "kind": "method",
-            "signature": "(self, rows: list[dict[str, Any]], all_fields: dict[str, dict[str, Any]], config: EnrichmentConfig | None = None, prior_step_results: dict[str, list[dict[str, Any]]] | None = None, on_step_complete: Callable[[str, list[dict[str, Any]], list[RowError], set[int]], None] | None = None, cache_manager: Any = None, on_partial_checkpoint: Callable[[str, list[dict], int], None] | None = None, hooks: EnrichmentHooks | None = None, retry_cells: dict[str, list[int]] | None = None, capture: str = 'metadata') -> tuple[list[dict[str, Any]], list[RowError], CostSummary, dict[str, float]]"
+            "signature": "(self, rows: list[dict[str, Any]], all_fields: dict[str, dict[str, Any]], config: EnrichmentConfig | None = None, prior_step_results: dict[str, list[dict[str, Any]]] | None = None, on_step_complete: Callable[[str, list[dict[str, Any]], list[RowError], set[int]], None] | None = None, cache_manager: Any = None, on_partial_checkpoint: Callable[[str, list[dict], int], None] | None = None, hooks: EnrichmentHooks | None = None, retry_cells: dict[str, list[int]] | None = None, capture: str = 'metadata', row_status: dict[str, list[str]] | None = None) -> tuple[list[dict[str, Any]], list[RowError], CostSummary, dict[str, float]]"
           },
           "execution_levels": {
             "kind": "property",
@@ -427,7 +428,7 @@
             "signature": "(self) -> str"
           }
         },
-        "signature": "(data: pd.DataFrame | list[dict[str, Any]], cost: CostSummary = <factory>, errors: list[RowError] = <factory>, pipeline_elapsed_seconds: float = 0.0, step_elapsed_seconds: dict[str, float] = <factory>, field_specs: dict[str, dict[str, Any]] = <factory>) -> None"
+        "signature": "(data: pd.DataFrame | list[dict[str, Any]], cost: CostSummary = <factory>, errors: list[RowError] = <factory>, pipeline_elapsed_seconds: float = 0.0, step_elapsed_seconds: dict[str, float] = <factory>, field_specs: dict[str, dict[str, Any]] = <factory>, row_status: pd.DataFrame = <factory>) -> None"
       },
       "PipelineStartEvent": {
         "kind": "dataclass",
@@ -496,6 +497,10 @@
       "compare": {
         "kind": "function",
         "signature": "(a: PipelineResult, b: PipelineResult, *, label_a: str = 'A', label_b: str = 'B') -> ComparisonResult"
+      },
+      "describe_from_specs": {
+        "kind": "function",
+        "signature": "(model: type[BaseModel], field_specs: dict[str, FieldSpec | str | dict[str, Any]]) -> type[BaseModel]"
       },
       "is_batch_capable": {
         "kind": "function",

@@ -72,6 +72,8 @@ Three consequences worth knowing:
 
 **Structured outputs:** Uses constrained decoding (the Anthropic equivalent of `json_schema`). Auto-detected when using dict fields.
 
+**Schema size limit:** Anthropic compiles the strict output schema into a decoding grammar and rejects grammars above an undocumented size ("Schema is too complex for compilation" / "compiled grammar is too large"; seen at around 30 fields with nested objects and enums). The failure is deterministic, so accrue raises one explanatory error and does not retry. To shrink the schema: reuse one nested class through a shared `$ref` rather than many sub-classes; use fewer `Literal`/enum fields and validate allowed values after parsing; flatten nested objects into strings your code parses; or split fields across more steps. Accrue does not try to predict the limit before the call.
+
 **Attachments:** The only adapter that can send per-row documents. `LLMStep(attachments="column")` renders PDFs as Anthropic `document` blocks ahead of the user text — see the [attachments guide](attachments.md).
 
 **Timeout:** `AnthropicClient(timeout=...)` forwards a request timeout (seconds) to the SDK. You need it once `max_tokens` goes above roughly 21,000: the SDK estimates a non-streaming request's duration from `max_tokens` and refuses outright — `ValueError: Streaming is required for operations that may take longer than 10 minutes` — unless a non-default `timeout` was set on the client. Pass one explicitly for long-output steps:

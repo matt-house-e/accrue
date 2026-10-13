@@ -90,6 +90,31 @@ def _build_skip_values(step: Any) -> dict[str, Any]:
     return values
 
 
+def _record_row_status(
+    row_status: dict[str, list[str]],
+    step_name: str,
+    num_rows: int,
+    *,
+    ran: list[int] | None,
+    errored: set[int],
+    skipped: set[int],
+) -> None:
+    """Write the fresh outcome of the cells a step just executed into ``row_status``.
+
+    ``ran`` is the row subset a retry re-executed (``None`` = every row);
+    cells outside it keep whatever outcome ``row_status`` was seeded with.
+    """
+    cells = list(row_status.get(step_name) or ["ok"] * num_rows)
+    for idx in range(num_rows) if ran is None else ran:
+        if idx in errored:
+            cells[idx] = "error"
+        elif idx in skipped:
+            cells[idx] = "skipped"
+        else:
+            cells[idx] = "ok"
+    row_status[step_name] = cells
+
+
 def _dataset_columns(data: pd.DataFrame | list[dict[str, Any]]) -> list[Any]:
     """Column names of a DataFrame, or the first row's keys for ``list[dict]``.
 
@@ -99,6 +124,24 @@ def _dataset_columns(data: pd.DataFrame | list[dict[str, Any]]) -> list[Any]:
     if isinstance(data, pd.DataFrame):
         return list(data.columns)
     return list(data[0].keys()) if data else []
+
+
+def _result_column(values: list[Any], index: pd.Index) -> pd.Series:
+    """Build one enriched column, keeping a step's ``None`` as ``None``.
+
+    pandas 3 infers its ``str`` dtype for a column of strings, and that dtype
+    stores a missing value as ``NaN`` — so one row returning ``"x"`` turns
+    every other row's ``None`` into ``NaN``, which is truthy.  pandas 2 keeps
+    such a column as ``object`` with its ``None``s, and the ``list[dict]``
+    path never coerces at all.  Falling back to ``object`` exactly when the
+    ``str`` dtype would swallow a ``None`` makes the DataFrame output agree
+    across pandas versions and with the list path.  Numeric columns keep
+    their ``NaN`` (``[None, 3]`` is ``float64`` on both versions).
+    """
+    series = pd.Series(values, index=index)
+    if isinstance(series.dtype, pd.StringDtype) and any(v is None for v in values):
+        series = pd.Series(values, index=index, dtype=object)
+    return series
 
 
 def _merge_results_into_df(
@@ -113,7 +156,8 @@ def _merge_results_into_df(
     overwrite_fields: True => new value wins; False => existing non-null
                       DataFrame value wins.
     Filters out keys starting with "__" (internal fields).
-    Preserves df.index and untouched-column dtypes.
+    Preserves df.index and untouched-column dtypes, and keeps a step's
+    ``None`` as ``None`` in string columns (see :func:`_result_column`).
 
     Raises ValueError if df has duplicate column names.
     """
@@ -145,11 +189,9 @@ def _merge_results_into_df(
             if k in row_result:
                 new_cols[k][i] = row_result[k]
 
-    new_df = pd.DataFrame(new_cols, index=df.index)
-
     df_out = df.copy()
     for col in field_names:
-        new_series = new_df[col]
+        new_series = _result_column(new_cols[col], df.index)
         if col in df_out.columns and not overwrite_fields:
             # existing non-null, non-empty wins; use where to keep existing
             existing = df_out[col]
@@ -172,6 +214,17 @@ class PipelineResult:
         field_specs: Field-spec dicts collected from steps, used by
             :meth:`report` to drive heuristics (enum collapse, length
             anomaly, …).  Empty for FunctionStep-only pipelines.
+        row_status: How every ``(step, row)`` cell ended — a DataFrame with
+            one column per step (execution order), aligned to ``data``'s
+            index (a ``RangeIndex`` for ``list[dict]`` input).  Values are
+            ``"ok"`` (the step produced values, fresh or from cache or
+            checkpoint), ``"error"`` (it raised, or the checkpoint still
+            records it as failed), or ``"skipped"`` (``run_if`` /
+            ``skip_if``).  Covers the whole dataset, including after
+            :meth:`Pipeline.retry_failed`.  A row is trustworthy only when no
+            step errored — dependents still run on a failed upstream cell::
+
+                ok = ~result.row_status.eq("error").any(axis=1)
     """
 
     data: pd.DataFrame | list[dict[str, Any]]
@@ -180,6 +233,7 @@ class PipelineResult:
     pipeline_elapsed_seconds: float = 0.0
     step_elapsed_seconds: dict[str, float] = field(default_factory=dict)
     field_specs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    row_status: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     @property
     def success_rate(self) -> float:
@@ -809,8 +863,12 @@ class Pipeline:
             )
         prior_step_results: dict[str, list[dict[str, Any]]] | None = None
         retry_cells: dict[str, list[int]] | None = None
+        # Per-cell outcome, seeded with what the checkpoint recorded for the
+        # steps it already holds; execute() overwrites the cells it runs.
+        row_status: dict[str, list[str]] = {}
         if session is not None:
             prior_step_results = session.prior_step_results or None
+            row_status = session.prior_row_status(len(rows_data))
             # Resolve the requested cells into the work this run will really
             # do — dropping what has no prior result, adding the downstream
             # cells a healed value invalidates — before anything reports on
@@ -914,6 +972,7 @@ class Pipeline:
                 hooks=hooks,
                 retry_cells=retry_cells,
                 capture=capture,
+                row_status=row_status,
             )
         finally:
             if cache_manager is not None:
@@ -935,6 +994,11 @@ class Pipeline:
         if session is not None:
             session.finish()
 
+        status_index = data.index if not input_is_list else pd.RangeIndex(len(rows_data))
+        status_df = pd.DataFrame(
+            {name: row_status[name] for name in self.step_names}, index=status_index
+        )
+
         # Build output matching input type
         if input_is_list:
             result_rows: list[dict[str, Any]] = []
@@ -951,6 +1015,7 @@ class Pipeline:
                 pipeline_elapsed_seconds=elapsed,
                 step_elapsed_seconds=step_elapsed,
                 field_specs=all_fields,
+                row_status=status_df,
             )
         else:
             df_out = self._build_result_df(data, accumulated, config)
@@ -961,6 +1026,7 @@ class Pipeline:
                 pipeline_elapsed_seconds=elapsed,
                 step_elapsed_seconds=step_elapsed,
                 field_specs=all_fields,
+                row_status=status_df,
             )
 
         # Persist before returning so downstream user errors can't lose a
@@ -1252,6 +1318,7 @@ class Pipeline:
         hooks: EnrichmentHooks | None = None,
         retry_cells: dict[str, list[int]] | None = None,
         capture: str = "metadata",
+        row_status: dict[str, list[str]] | None = None,
     ) -> tuple[list[dict[str, Any]], list[RowError], CostSummary, dict[str, float]]:
         """Execute the pipeline across all rows (column-oriented).
 
@@ -1277,6 +1344,11 @@ class Pipeline:
                 broken one.  Every other row keeps its prior result without
                 re-invocation.  Steps absent from ``prior_step_results`` run
                 in full as usual.
+            row_status: Optional in/out mapping of step name to per-row
+                outcome (``"ok"`` / ``"error"`` / ``"skipped"``).  Seed it with
+                the recorded outcome of checkpointed steps; every cell this
+                call executes is overwritten with its fresh outcome, and a step
+                with no seed starts as all ``"ok"``.
 
         Returns:
             Tuple of (accumulated results, row errors, cost summary,
@@ -1400,6 +1472,15 @@ class Pipeline:
                     all_errors.extend(step_errors)
                     errors_by_step[step_name] = step_errors
                     step_elapsed[step_name] = elapsed_s
+                    if row_status is not None:
+                        _record_row_status(
+                            row_status,
+                            step_name,
+                            num_rows,
+                            ran=retry_map.get(step_name),
+                            errored={e.row_index for e in step_errors},
+                            skipped=skipped_by_step[step_name],
+                        )
                     if usage:
                         step_usage_map[step_name] = usage
 
@@ -1445,6 +1526,10 @@ class Pipeline:
                             break
 
         step_bar.close()
+
+        if row_status is not None:
+            for name in self.step_names:
+                row_status.setdefault(name, ["ok"] * num_rows)
 
         # Merge all step results in execution order
         accumulated: list[dict[str, Any]] = [{} for _ in range(num_rows)]

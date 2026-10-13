@@ -28,6 +28,7 @@ from .schema_builder import (
     build_json_schema,
     build_json_schema_from_model,
     build_response_model,
+    undescribed_fields,
 )
 
 # Optional provider imports for structured output auto-detection
@@ -345,6 +346,20 @@ class LLMStep:
             # A custom schema= is the contract the user wants enforced (#154);
             # field specs only describe the default EnrichmentResult shape.
             if self.schema is not EnrichmentResult:
+                missing = undescribed_fields(self.schema, self._field_specs)
+                if missing:
+                    logger.warning(
+                        "LLMStep '%s': custom schema %s sends no field-spec prompt in the "
+                        "JSON schema description of %d field(s): %s. With "
+                        "structured_outputs=True the decoder reads the schema "
+                        "description when writing each value, so these fields get no "
+                        "instruction there. Wrap the schema with "
+                        "accrue.describe_from_specs(schema, fields) or add Field(description=...).",
+                        self.name,
+                        self.schema.__name__,
+                        len(missing),
+                        ", ".join(missing),
+                    )
                 return build_json_schema_from_model(self.schema)
             if self._field_specs:
                 return build_json_schema(self._field_specs)

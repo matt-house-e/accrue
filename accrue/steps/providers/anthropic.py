@@ -236,6 +236,12 @@ class AnthropicClient:
             ) from exc
         except APIError as exc:
             exc_status = getattr(exc, "status_code", None)
+            if _is_schema_too_complex(exc):
+                raise LLMAPIError(
+                    _schema_too_complex_message(model, exc),
+                    status_code=exc_status,
+                    retryable=False,
+                ) from exc
             # Only claim a temperature problem when we actually sent one.
             sent_temperature = "temperature" in (kwargs.get("extra_body") or {})
             hint = _temperature_hint(model, exc) if sent_temperature else ""
@@ -535,6 +541,33 @@ def _supports_temperature(model: str) -> bool:
         Claude Opus 4.7/4.8), ``True`` otherwise.
     """
     return _NO_EXPLICIT_TEMPERATURE.search(model.lower()) is None
+
+
+_SCHEMA_TOO_COMPLEX_MARKERS = (
+    "schema is too complex for compilation",
+    "compiled grammar is too large",
+)
+
+
+def _is_schema_too_complex(exc: Exception) -> bool:
+    """True when Anthropic rejected the strict output schema for its size."""
+    text = str(exc).lower()
+    return any(marker in text for marker in _SCHEMA_TOO_COMPLEX_MARKERS)
+
+
+def _schema_too_complex_message(model: str, exc: Exception) -> str:
+    """Plain-words explanation of Anthropic's strict-schema size limit."""
+    return (
+        f"Anthropic could not compile this step's output schema for model '{model}': "
+        "the strict (structured-outputs) schema is too large. Anthropic turns the "
+        "schema into a decoding grammar and refuses grammars above an undocumented "
+        "size, so this fails the same way every time and accrue does not retry it. "
+        "Shrink the schema: reuse one nested class through a shared $ref instead of "
+        "many separate sub-classes; use fewer Literal/enum fields and validate the "
+        "allowed values after parsing instead; flatten nested objects into strings "
+        "that your code parses; or split the fields across more steps. "
+        f"Provider message: {exc}"
+    )
 
 
 def _temperature_hint(model: str, exc: Exception) -> str:
