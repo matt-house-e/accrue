@@ -45,7 +45,18 @@ class OpenAIClient:
     Third-party providers with a ``base_url`` (Ollama, Groq, DeepSeek,
     Together, Fireworks, vLLM, Mistral, LM Studio) use the Chat Completions
     API for maximum compatibility.
+
+    Size limits (bytes) — accrue checks these before sending, see
+    :mod:`accrue.steps.providers.limits`.
+
+    Attributes:
+        max_request_bytes: ``None`` — OpenAI documents no single request-body
+            cap for these endpoints, so accrue does not check one.
+        max_batch_bytes: Batch API input file cap (200 MB).
     """
+
+    max_request_bytes: int | None = None
+    max_batch_bytes: int | None = 200_000_000
 
     def __init__(
         self,

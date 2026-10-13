@@ -189,6 +189,13 @@ class CheckpointData:
     Empty for checkpoints written before row-error tracking (#129) — those
     resume with the old all-or-nothing semantics.
     """
+    row_skipped: dict[str, list[int]] = field(default_factory=dict)
+    """Cells ``run_if`` / ``skip_if`` skipped, per completed step: ``{step: [row_index, ...]}``.
+
+    Lets a resumed or retried run report a checkpointed cell as ``"skipped"``
+    in ``PipelineResult.row_status`` rather than ``"ok"``.  Empty for
+    checkpoints written before it was recorded.
+    """
 
 
 class CheckpointManager:
@@ -235,6 +242,8 @@ class CheckpointManager:
         partial: bool = False,
         step_row_errors: dict[int, dict[str, str]] | None = None,
         existing_row_errors: dict[str, dict[int, dict[str, str]]] | None = None,
+        step_row_skipped: list[int] | None = None,
+        existing_row_skipped: dict[str, list[int]] | None = None,
     ) -> bool:
         """Write full pipeline state to disk after a step completes.
 
@@ -253,6 +262,10 @@ class CheckpointManager:
                 mid-retry must not lose the record of what is still failing.
             existing_row_errors: Failed cells of previously completed steps,
                 carried forward unchanged (``{step: {row_index: {...}}}``).
+            step_row_skipped: Row indices ``run_if`` / ``skip_if`` skipped in
+                *this* step, so a resumed run can report them as skipped.
+            existing_row_skipped: Skipped cells of previously completed steps,
+                carried forward unchanged (``{step: [row_index, ...]}``).
 
         Returns True on success or when checkpointing is disabled (no-op).
         """
@@ -274,6 +287,14 @@ class CheckpointManager:
         if step_row_errors:
             row_errors[step_name] = step_row_errors
 
+        row_skipped = {
+            step: sorted(cells)
+            for step, cells in (existing_row_skipped or {}).items()
+            if step != step_name and cells
+        }
+        if step_row_skipped:
+            row_skipped[step_name] = sorted(step_row_skipped)
+
         payload = {
             "timestamp": time.time(),
             "category": category,
@@ -287,6 +308,7 @@ class CheckpointManager:
                 step: {str(idx): err for idx, err in cells.items()}
                 for step, cells in row_errors.items()
             },
+            "row_skipped": row_skipped,
         }
 
         path = self._get_path(data_identifier, category)
@@ -417,6 +439,11 @@ class CheckpointManager:
                 row_errors={
                     step: {int(idx): err for idx, err in cells.items()}
                     for step, cells in raw.get("row_errors", {}).items()
+                },
+                # Absent in checkpoints written before skip tracking.
+                row_skipped={
+                    step: [int(idx) for idx in cells]
+                    for step, cells in raw.get("row_skipped", {}).items()
                 },
             )
             logger.info(
@@ -595,10 +622,14 @@ class CheckpointSession:
             self.row_errors: dict[str, dict[int, dict[str, str]]] = {
                 k: dict(v) for k, v in checkpoint.row_errors.items() if k in self.completed
             }
+            self.row_skipped: dict[str, set[int]] = {
+                k: set(v) for k, v in checkpoint.row_skipped.items() if k in self.completed
+            }
         else:
             self.completed = []
             self.results = {}
             self.row_errors = {}
+            self.row_skipped = {}
 
         if retry_cells is None:
             selection = {step: set(cells) for step, cells in self.row_errors.items() if cells}
@@ -615,6 +646,25 @@ class CheckpointSession:
     def retry_cells(self) -> dict[str, list[int]]:
         """Selected failed cells, for ``Pipeline.execute(retry_cells=...)``."""
         return {step: sorted(cells) for step, cells in self._selection.items() if cells}
+
+    def prior_row_status(self, num_rows: int) -> dict[str, list[str]]:
+        """Per-cell outcome of every checkpointed step, as recorded (``ok``/``error``/``skipped``).
+
+        Seeds ``Pipeline.execute(row_status=...)`` so a cell served from the
+        checkpoint reports how it ended in the run that produced it; a cell
+        this run re-executes is overwritten with its fresh outcome.
+        """
+        status: dict[str, list[str]] = {}
+        for step in self.results:
+            cells = ["ok"] * num_rows
+            for idx in self.row_skipped.get(step, ()):
+                if 0 <= idx < num_rows:
+                    cells[idx] = "skipped"
+            for idx in self.row_errors.get(step, {}):
+                if 0 <= idx < num_rows:
+                    cells[idx] = "error"
+            status[step] = cells
+        return status
 
     @property
     def has_failed_cells(self) -> bool:
@@ -673,6 +723,12 @@ class CheckpointSession:
             }
             errors_by_row = {**carried, **errors_by_row}
 
+        # Skips follow the same rule: a retried step re-evaluated only its
+        # selected cells, so the skips recorded for the rest still stand.
+        skipped = set(skipped_rows or ())
+        if retried is not None:
+            skipped |= {idx for idx in self.row_skipped.get(step_name, ()) if idx not in retried}
+
         prior_completed = [s for s in self.completed if s != step_name]
 
         self.results[step_name] = step_row_results
@@ -680,6 +736,10 @@ class CheckpointSession:
             self.row_errors[step_name] = errors_by_row
         else:
             self.row_errors.pop(step_name, None)
+        if skipped:
+            self.row_skipped[step_name] = skipped
+        else:
+            self.row_skipped.pop(step_name, None)
         if step_name not in self.completed:
             self.completed.append(step_name)
 
@@ -694,6 +754,8 @@ class CheckpointSession:
             existing_results={k: v for k, v in self.results.items() if k != step_name},
             step_row_errors=errors_by_row or None,
             existing_row_errors={k: v for k, v in self.row_errors.items() if k != step_name},
+            step_row_skipped=sorted(skipped) or None,
+            existing_row_skipped=self._skipped_except(step_name),
         )
 
     def finish(self) -> None:
@@ -746,5 +808,13 @@ class CheckpointSession:
             existing_results={k: v for k, v in self.results.items() if k != step_name},
             step_row_errors=self.row_errors.get(step_name) if seeded else None,
             existing_row_errors={k: v for k, v in self.row_errors.items() if k != step_name},
+            step_row_skipped=(
+                sorted(self.row_skipped.get(step_name, ())) or None if seeded else None
+            ),
+            existing_row_skipped=self._skipped_except(step_name),
             partial=not seeded,
         )
+
+    def _skipped_except(self, step_name: str) -> dict[str, list[int]]:
+        """Recorded skipped cells of every step but ``step_name``, for ``save_step``."""
+        return {k: sorted(v) for k, v in self.row_skipped.items() if k != step_name and v}

@@ -158,7 +158,8 @@ Returned by `Pipeline.run()` and `Pipeline.run_async()`.
 |-------|------|-------------|
 | `data` | `pd.DataFrame \| list[dict[str, Any]]` | Enriched output. Matches the input type. |
 | `cost` | `CostSummary` | Aggregated token usage across all steps. |
-| `errors` | `list[RowError]` | Per-row errors. Empty if all rows succeeded. |
+| `errors` | `list[RowError]` | Per-row errors from this pass. Empty if all rows succeeded. |
+| `row_status` | `pd.DataFrame` | How each `(step, row)` cell ended: one column per step, aligned to `data`'s index (`RangeIndex` for `list[dict]` input), values `"ok"` / `"error"` / `"skipped"`. Covers the whole dataset after `retry_failed()`. See [Error Handling](../guides/error-handling.md#per-cell-status-resultrow_status). |
 
 | Property | Type | Description |
 |----------|------|-------------|
@@ -409,6 +410,7 @@ class EnrichmentConfig:
     batch_poll_interval: float = 60.0
     batch_timeout: float = 86400.0
     batch_max_requests: int = 50000
+    batch_max_bytes: int | None = None
 ```
 
 | Field | Default | Description |
@@ -432,6 +434,7 @@ class EnrichmentConfig:
 | `batch_poll_interval` | `60.0` | Seconds between batch job status checks. |
 | `batch_timeout` | `86400.0` | Maximum seconds to wait for a batch job (default: 24 hours). |
 | `batch_max_requests` | `50000` | Maximum requests per batch submission. Larger sets are auto-chunked. |
+| `batch_max_bytes` | `None` | Maximum estimated payload bytes per batch submission (base64 attachments included). `None` uses the client's `max_batch_bytes`. |
 
 ### Presets
 

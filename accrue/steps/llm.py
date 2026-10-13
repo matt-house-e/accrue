@@ -22,11 +22,13 @@ from .attachments import normalize_attachments
 from .base import StepContext, StepResult
 from .prompt_builder import PromptParts, build_prompt
 from .providers.base import LLMAPIError, LLMClient, LLMResponse, is_batch_capable
+from .providers.limits import client_limit, estimate_request_bytes, oversize_error
 from .providers.openai import OpenAIClient
 from .schema_builder import (
     build_json_schema,
     build_json_schema_from_model,
     build_response_model,
+    undescribed_fields,
 )
 
 # Optional provider imports for structured output auto-detection
@@ -344,6 +346,20 @@ class LLMStep:
             # A custom schema= is the contract the user wants enforced (#154);
             # field specs only describe the default EnrichmentResult shape.
             if self.schema is not EnrichmentResult:
+                missing = undescribed_fields(self.schema, self._field_specs)
+                if missing:
+                    logger.warning(
+                        "LLMStep '%s': custom schema %s sends no field-spec prompt in the "
+                        "JSON schema description of %d field(s): %s. With "
+                        "structured_outputs=True the decoder reads the schema "
+                        "description when writing each value, so these fields get no "
+                        "instruction there. Wrap the schema with "
+                        "accrue.describe_from_specs(schema, fields) or add Field(description=...).",
+                        self.name,
+                        self.schema.__name__,
+                        len(missing),
+                        ", ".join(missing),
+                    )
                 return build_json_schema_from_model(self.schema)
             if self._field_specs:
                 return build_json_schema(self._field_specs)
@@ -592,6 +608,28 @@ class LLMStep:
 
         return messages, call_kwargs
 
+    def _check_request_size(
+        self,
+        client: LLMClient,
+        messages: list[dict[str, Any]],
+        call_kwargs: dict[str, Any],
+    ) -> None:
+        """Preflight a realtime request against the client's per-request byte limit.
+
+        The batch path does its own check in ``Pipeline._execute_step_batch``,
+        where the same size estimate also drives batch splitting.
+
+        Raises:
+            StepError: When the estimate exceeds ``client.max_request_bytes``.
+                No API call is made, so the row fails alone.
+        """
+        limit = client_limit(client, "max_request_bytes")
+        if limit is None:
+            return
+        size = estimate_request_bytes(messages, **call_kwargs)
+        if size > limit:
+            raise oversize_error(self.name, size, limit, scope="request")
+
     def parse_response(self, response: LLMResponse) -> StepResult:
         """Parse and validate an LLM response into a StepResult.
 
@@ -662,6 +700,7 @@ class LLMStep:
         """
         client = self._resolve_client()
         messages, call_kwargs = self.build_messages(ctx)
+        self._check_request_size(client, messages, call_kwargs)
         temperature = call_kwargs["temperature"]
         max_tokens = call_kwargs["max_tokens"]
         tools = call_kwargs["tools"]
