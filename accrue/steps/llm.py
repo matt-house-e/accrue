@@ -872,12 +872,14 @@ class LLMStep:
                     )
                     await asyncio.sleep(backoff)
 
+        # Chained so the cause stays inspectable: the run log reads the last
+        # API error's ``retryable`` through it (#169).
         raise StepError(
             f"LLMStep '{self.name}' API error after {api_max_retries + 1} retries "
             f"(model={self.model}): {last_api_error}. "
             f"Check your API key, rate limits, and model availability.",
             step_name=self.name,
-        )
+        ) from last_api_error
 
 
 def _normalize_grounding(

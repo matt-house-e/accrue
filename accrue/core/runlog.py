@@ -91,6 +91,44 @@ def _replace_non_finite(value: Any, depth: int = 0) -> Any:
     return value
 
 
+def _is_retryable(exc: BaseException) -> bool:
+    """Whether accrue classifies *exc* as transient — the same request could succeed.
+
+    Walks *exc* and its ``__cause__`` chain and returns the first boolean
+    ``retryable`` attribute found — in practice
+    :attr:`~accrue.steps.providers.base.LLMAPIError.retryable` (rate limit,
+    timeout, 5xx).  ``LLMStep`` raises its exhausted-retries ``StepError``
+    *from* the last API error, so a row that died on repeated 429s still
+    reads ``True``.  Everything else is ``False``: a truncation, an
+    over-complex schema, an over-size request, a parse/validation failure
+    that survived the self-correction loop, or a user function raising will
+    fail the same way again.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        flag = getattr(current, "retryable", None)
+        if isinstance(flag, bool):
+            return flag
+        current = current.__cause__
+    return False
+
+
+def _error_payload(exc: BaseException) -> dict[str, Any]:
+    """The ``error`` object shared by ``row_complete`` and ``row_attempt``.
+
+    Error text goes through the same redaction the checkpoint path uses: a
+    provider error can quote the request headers, and the log outlives the
+    process.
+    """
+    return {
+        "type": type(exc).__name__,
+        "msg": _sanitize_secrets(str(exc)),
+        "retryable": _is_retryable(exc),
+    }
+
+
 def resolve_run_log_path(run_log: bool | str | Path, run_id: str) -> Path:
     """Resolve the ``run_log`` argument to a concrete file path.
 
@@ -548,15 +586,7 @@ class JsonlRunLogger:
         else:
             status = "ok"
 
-        # Error text goes through the same redaction the checkpoint path uses:
-        # a provider error can quote the request headers, and the log outlives
-        # the process.
-        error = None
-        if event.error is not None:
-            error = {
-                "type": type(event.error).__name__,
-                "msg": _sanitize_secrets(str(event.error)),
-            }
+        error = None if event.error is None else _error_payload(event.error)
 
         usage = None
         if event.usage is not None:
@@ -610,14 +640,7 @@ class JsonlRunLogger:
         if event.body is not None and self.capture != "metadata":
             prompt_ref = self._write_sidecar(event.body)
 
-        # Error text goes through the same redaction as row_complete / the
-        # checkpoint path — a provider error can quote request headers.
-        error = None
-        if event.error is not None:
-            error = {
-                "type": type(event.error).__name__,
-                "msg": _sanitize_secrets(str(event.error)),
-            }
+        error = None if event.error is None else _error_payload(event.error)
 
         self._emit(
             "row_attempt",

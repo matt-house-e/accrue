@@ -108,3 +108,78 @@ class TestCacheTokens:
             if isinstance(usage, dict):
                 assert usage["cache_read_tokens"] == 0
                 assert usage["cache_write_tokens"] == 0
+
+
+def _run_one(tmp_path: Path, step: LLMStep) -> tuple[list[dict], dict]:
+    """Run *step* over one row; return its row_attempt records and its row_complete."""
+    path = tmp_path / "log.jsonl"
+    Pipeline([step]).run(ROWS[:1], config=_quiet_config(), run_log=path)
+    records = _load(path)
+    attempts = [r for r in records if r["type"] == "row_attempt"]
+    complete = next(r for r in records if r["type"] == "row_complete")
+    assert complete["status"] == "error"
+    return attempts, complete
+
+
+class TestRetryable:
+    def test_truncation_is_not_retryable(self, tmp_path, mock_anthropic):
+        truncated = _message(0, 0, text='{"f1": "cut o', stop="max_tokens")
+        step = _anthropic_step(AsyncMock(return_value=truncated))
+        attempts, complete = _run_one(tmp_path, step)
+        assert complete["error"]["type"] == "LLMAPIError"
+        assert complete["error"]["retryable"] is False
+        assert [a["error"]["retryable"] for a in attempts] == [False]
+
+    def test_schema_too_complex_is_not_retryable(self, tmp_path, mock_anthropic):
+        rejected = mock_anthropic.APIError("The schema is too complex for compilation.")
+        step = _anthropic_step(AsyncMock(side_effect=rejected))
+        attempts, complete = _run_one(tmp_path, step)
+        assert complete["error"]["retryable"] is False
+        assert [a["error"]["retryable"] for a in attempts] == [False]
+
+    def test_oversize_request_is_not_retryable(self, tmp_path, mock_anthropic):
+        create = AsyncMock(return_value=_message(0, 0))
+        step = _anthropic_step(create)
+        step._client.max_request_bytes = 10
+        _, complete = _run_one(tmp_path, step)
+        assert complete["error"]["type"] == "StepError"
+        assert complete["error"]["retryable"] is False
+        create.assert_not_called()
+
+    def test_rate_limit_is_retryable_on_every_attempt_and_the_row(self, tmp_path, mock_anthropic):
+        step = _anthropic_step(AsyncMock(side_effect=mock_anthropic.RateLimitError("429")))
+        attempts, complete = _run_one(tmp_path, step)
+        assert len(attempts) == 2  # max_retries=1 → two api attempts
+        assert all(a["status"] == "rate_limited" for a in attempts)
+        assert all(a["error"]["retryable"] is True for a in attempts)
+        # The row's StepError is chained from the last 429, so it reads true too.
+        assert complete["error"]["type"] == "StepError"
+        assert complete["error"]["retryable"] is True
+
+    def test_exhausted_parse_retries_are_not_retryable(self, tmp_path, mock_anthropic):
+        step = _anthropic_step(AsyncMock(return_value=_message(0, 0, text="not json")))
+        attempts, complete = _run_one(tmp_path, step)
+        assert len(attempts) == step.max_retries + 1
+        assert all(a["status"] == "parse_error" for a in attempts)
+        assert all(a["error"]["retryable"] is False for a in attempts)
+        assert complete["error"]["retryable"] is False
+
+
+class TestIsRetryable:
+    def test_cause_chain_and_cycles(self):
+        from accrue.core.exceptions import StepError
+        from accrue.core.runlog import _is_retryable
+        from accrue.steps.providers.base import LLMAPIError
+
+        assert _is_retryable(LLMAPIError("x", status_code=503)) is True
+        assert _is_retryable(LLMAPIError("x", status_code=400)) is False
+        assert _is_retryable(ValueError("boom")) is False
+
+        try:
+            raise StepError("exhausted") from LLMAPIError("x", is_rate_limit=True)
+        except StepError as exc:
+            assert _is_retryable(exc) is True
+
+        a, b = ValueError("a"), ValueError("b")
+        a.__cause__, b.__cause__ = b, a
+        assert _is_retryable(a) is False  # a cause cycle terminates

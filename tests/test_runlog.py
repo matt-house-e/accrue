@@ -173,6 +173,7 @@ class TestGoldenFixture:
         assert err["row"] == ERROR_ROW
         assert err["error"]["type"] == "ValueError"
         assert err["error"]["msg"]
+        assert err["error"]["retryable"] is False  # a user function raising is not transient
         assert err["values"] is None  # errored rows carry no real output
         # The step_end for 'score' counts it; pipeline_end totals it
         score_end = next(r for r in records if r["type"] == "step_end" and r["step"] == "score")
@@ -300,7 +301,7 @@ class TestRunLogParam:
         _assert_coherent(records)
         row = next(r for r in records if r["type"] == "row_complete")
         assert row["status"] == "error"
-        assert row["error"] == {"type": "RuntimeError", "msg": "kaboom"}
+        assert row["error"] == {"type": "RuntimeError", "msg": "kaboom", "retryable": False}
 
     def test_user_hooks_still_fire_with_run_log(self, tmp_path):
         seen: list[str] = []
