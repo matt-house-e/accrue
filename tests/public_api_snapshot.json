@@ -182,7 +182,7 @@
             "signature": "(cls) -> \"'EnrichmentConfig'\""
           }
         },
-        "signature": "(max_tokens: int = 4000, temperature: float = 0.2, max_workers: int = 10, overwrite_fields: bool = False, max_retries: int = 3, retry_base_delay: float = 1.0, on_error: str = 'continue', log_level: str = 'INFO', enable_progress_bar: bool = True, enable_checkpointing: bool = False, checkpoint_dir: str = <factory>, auto_resume: bool = True, enable_caching: bool = True, cache_ttl: int = 3600, cache_dir: str = <factory>, checkpoint_interval: int = 0, batch_poll_interval: float = 60.0, batch_timeout: float = 86400.0, batch_max_requests: int = 50000) -> None"
+        "signature": "(max_tokens: int = 4000, temperature: float = 0.2, max_workers: int = 10, overwrite_fields: bool = False, max_retries: int = 3, retry_base_delay: float = 1.0, on_error: str = 'continue', log_level: str = 'INFO', enable_progress_bar: bool = True, enable_checkpointing: bool = False, checkpoint_dir: str = <factory>, auto_resume: bool = True, enable_caching: bool = True, cache_ttl: int = 3600, cache_dir: str = <factory>, checkpoint_interval: int = 0, batch_poll_interval: float = 60.0, batch_timeout: float = 86400.0, batch_max_requests: int = 50000, batch_max_bytes: int | None = None) -> None"
       },
       "EnrichmentError": {
         "bases": [

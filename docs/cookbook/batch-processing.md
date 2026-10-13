@@ -232,7 +232,8 @@ typically complete faster for smaller volumes.
 
 **Auto-chunking.** Datasets larger than 50,000 rows (configurable via
 `config.batch_max_requests`) are automatically split into multiple batch jobs and
-reassembled.
+reassembled. Batches are also split by estimated payload size (`config.batch_max_bytes`,
+defaulting to the provider's per-batch cap), so a set of large attachments cannot exceed it.
 
 **Realtime fallback.** If individual rows fail within a batch, the pipeline automatically
 retries those rows using realtime API calls so you always get complete results.
@@ -246,6 +247,7 @@ The `EnrichmentConfig` batch settings:
 | `batch_poll_interval` | 60.0 | Seconds between status checks |
 | `batch_timeout` | 86400.0 | Maximum wait time (24 hours) |
 | `batch_max_requests` | 50000 | Auto-chunk threshold |
+| `batch_max_bytes` | `None` | Auto-chunk byte threshold; `None` = provider default (Anthropic 256 MB, OpenAI 200 MB) |
 
 Override any of these on the config:
 

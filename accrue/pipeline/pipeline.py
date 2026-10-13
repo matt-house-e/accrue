@@ -1879,6 +1879,12 @@ class Pipeline:
 
         from ..core.cache import _compute_step_cache_key
         from ..steps.providers.base import BatchRequest
+        from ..steps.providers.limits import (
+            chunk_by_size,
+            client_limit,
+            estimate_request_bytes,
+            oversize_error,
+        )
 
         hooks = hooks or EnrichmentHooks()
         step_start = _time.monotonic()
@@ -1909,13 +1915,21 @@ class Pipeline:
         poll_interval = 60.0
         batch_timeout = 86400.0
         batch_max_requests = 50000
+        batch_max_bytes: int | None = None
         if config is not None:
             poll_interval = config.batch_poll_interval
             batch_timeout = config.batch_timeout
             batch_max_requests = config.batch_max_requests
+            batch_max_bytes = config.batch_max_bytes
 
         # Get the batch-capable client
         client = step._resolve_client()
+
+        # Provider size limits: a batch item is a Messages request, so
+        # the per-request cap applies to it as well as the per-batch cap.
+        request_limit = client_limit(client, "max_request_bytes")
+        if batch_max_bytes is None:
+            batch_max_bytes = client_limit(client, "max_batch_bytes")
 
         row_bar = tqdm(
             total=len(target_rows),
@@ -2003,7 +2017,12 @@ class Pipeline:
             return errors, step_usage, elapsed
 
         # ── Phase 2: Build batch requests ──────────────────────────────
+        # Each request's size is estimated once and used for both the
+        # per-request preflight and byte-aware chunking.  An oversize row
+        # fails here on its own — it never reaches a batch it would sink.
         batch_requests: list[BatchRequest] = []
+        request_sizes: list[int] = []
+        oversize_indices: set[int] = set()
         for idx in uncached_indices:
             prior: dict[str, Any] = {}
             for dep_name in step.depends_on:
@@ -2017,6 +2036,24 @@ class Pipeline:
                 config=config,
             )
             messages, call_kwargs = step.build_messages(ctx)
+            size = estimate_request_bytes(messages, **call_kwargs)
+            limit_hit = None
+            if request_limit is not None and size > request_limit:
+                limit_hit = oversize_error(step.name, size, request_limit, scope="request")
+            elif batch_max_bytes is not None and size > batch_max_bytes:
+                limit_hit = oversize_error(step.name, size, batch_max_bytes, scope="batch")
+            if limit_hit is not None:
+                logger.warning("Step '%s' row %d: %s", step.name, idx, limit_hit)
+                errors.append(RowError(row_index=idx, step_name=step.name, error=limit_hit))
+                results[idx] = {f: None for f in step.fields}
+                oversize_indices.add(idx)
+                row_bar.update(1)
+                if on_error == "raise":
+                    step_values[step.name] = results
+                    row_bar.close()
+                    raise limit_hit
+                continue
+            request_sizes.append(size)
             batch_requests.append(
                 BatchRequest(
                     custom_id=f"row-{idx}",
@@ -2038,18 +2075,25 @@ class Pipeline:
             rows_skipped,
         )
 
+        if oversize_indices:
+            uncached_indices = [i for i in uncached_indices if i not in oversize_indices]
+
         # ── Phase 3: Auto-chunk and submit ─────────────────────────────
-        chunks = [
-            batch_requests[i : i + batch_max_requests]
-            for i in range(0, len(batch_requests), batch_max_requests)
-        ]
+        chunks = chunk_by_size(
+            batch_requests,
+            request_sizes,
+            max_count=batch_max_requests,
+            max_bytes=batch_max_bytes,
+        )
         if len(chunks) > 1:
             logger.info(
-                "Step '%s': auto-chunking %d requests into %d batches (max %d per batch)",
+                "Step '%s': auto-chunking %d requests into %d batches "
+                "(max %d requests / %s bytes per batch)",
                 step.name,
                 len(batch_requests),
                 len(chunks),
                 batch_max_requests,
+                f"{batch_max_bytes:,}" if batch_max_bytes is not None else "unlimited",
             )
 
         batch_ids: list[str] = []

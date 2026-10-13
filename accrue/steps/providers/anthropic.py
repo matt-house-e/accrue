@@ -30,7 +30,18 @@ class AnthropicClient:
     Supports the ``web_search_20250305`` server tool for grounded responses.
     When web search tools are active, structured outputs via
     ``output_config.format`` are disabled (incompatible with citations).
+
+    Size limits (bytes, decimal MB as Anthropic states them) — accrue checks
+    these before sending, see :mod:`accrue.steps.providers.limits`.  Override
+    on an instance for a gateway with tighter caps.
+
+    Attributes:
+        max_request_bytes: Messages API request cap (32 MB).
+        max_batch_bytes: Message Batches API cap per batch (256 MB).
     """
+
+    max_request_bytes: int | None = 32_000_000
+    max_batch_bytes: int | None = 256_000_000
 
     def __init__(
         self,
