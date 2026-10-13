@@ -119,7 +119,13 @@ def _strictify(node: Any) -> None:
         return
 
     if node.get("type") == "object" or "properties" in node:
-        node["additionalProperties"] = False
+        if isinstance(node.get("additionalProperties"), dict):
+            # A dict[str, X] field.  Forcing it to false would make the
+            # provider decode it as an always-empty object — a silent drop.
+            # Leave it for the provider to accept or reject loudly.
+            _strictify(node["additionalProperties"])
+        else:
+            node["additionalProperties"] = False
 
     for key in ("properties", "$defs", "definitions", "patternProperties"):
         sub = node.get(key)

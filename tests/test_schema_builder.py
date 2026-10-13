@@ -283,3 +283,20 @@ class TestBuildJsonSchemaFromModel:
         _strictify(node)
         assert node["additionalProperties"] is False
         assert node["properties"]["a"]["additionalProperties"] is False
+
+    def test_dict_field_value_schema_is_not_overwritten(self):
+        # dict[str, X] must not become an always-empty object (review of #156).
+        from pydantic import BaseModel
+
+        from accrue.steps.schema_builder import build_json_schema_from_model
+
+        class _Inner(BaseModel):
+            x: str
+
+        class _M(BaseModel):
+            tags: dict[str, int]
+            inner: dict[str, _Inner]
+
+        props = build_json_schema_from_model(_M)["json_schema"]["schema"]["properties"]
+        assert props["tags"]["additionalProperties"] == {"type": "integer"}
+        assert props["inner"]["additionalProperties"] == {"$ref": "#/$defs/_Inner"}
