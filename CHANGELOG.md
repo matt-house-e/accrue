@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`retry_failed()` into a multi-run log heals the latest run.** A rerun to the same `run_log` path appends a second `pipeline_start`, but the retry kept the **first** run's `run_id` and `display_key`. A dashboard that routes by `run_id` (accrue-ui) then applied the recovered cells to run 1 instead of the run that was retried. The retry now takes both from the latest `pipeline_start` in the file. A single-run log behaves as before. (#174)
+
 ## [1.5.1] - 2026-10-13
 
 The run log gets more of what accrue already knew, and the `accrue[ui]` extra is back. Headline contents: **cache tokens, a `retryable` flag on errors and every batch id in the run log**, so accrue-ui can give reliable cost and error advice; **custom `schema=` field types in the manifest**, so a nested model reports `object` instead of `str`; and **`pip install 'accrue[ui]'`**, which installs the dashboard from PyPI. All run-log changes are additive within contract v1. No other behaviour changes.

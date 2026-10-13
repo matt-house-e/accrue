@@ -191,9 +191,9 @@ def read_run_context(path: str | Path) -> tuple[str | None, str | None, float]:
     non-decreasing across segments.
 
     A file can hold several runs (a rerun to the same path appends).  The
-    ``run_id`` and ``display_key`` come from the **last** ``pipeline_start``:
-    that is the run whose checkpoint a retry heals (#174).  Both come from
-    that one record, never mixed across runs.
+    ``run_id`` and ``display_key`` come from the **last** ``pipeline_start``,
+    the run a retry appended there is healing (#174).  Both come from that
+    one record, never mixed across runs.
 
     Returns ``(None, None, 0.0)`` when the file is missing, empty, or has no
     readable ``pipeline_start``.  Malformed lines are skipped, not raised —

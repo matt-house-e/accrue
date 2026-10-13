@@ -168,13 +168,13 @@ Fires even when the run errors.
 
 ### `retry_start` / `retry_end` — a failed-only retry appended to the run
 
-`pipeline.retry_failed(data, config=config, run_log=<the run's log>)` re-runs only the cells that errored and appends its events to the same file, keeping the original `run_id` and `display_key`. The segment is framed by `retry_start` … `retry_end` rather than a second `pipeline_start` / `pipeline_end`, so a consumer that only knows the records above ignores the frame (per the versioning policy) and still applies the recovered rows. Between the frame, `step_start` / `row_complete` / `step_end` are exactly as documented — only the retried steps report, and only for the retried rows.
+`pipeline.retry_failed(data, config=config, run_log=<the run's log>)` re-runs only the cells that errored and appends its events to the same file, keeping the `run_id` and `display_key` of the run it heals: the file's latest run, if the file holds several. The segment is framed by `retry_start` … `retry_end` rather than a second `pipeline_start` / `pipeline_end`, so a consumer that only knows the records above ignores the frame (per the versioning policy) and still applies the recovered rows. Between the frame, `step_start` / `row_complete` / `step_end` are exactly as documented — only the retried steps report, and only for the retried rows.
 
 `retry_start`:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `run_id` | `string` | The **original** run's id, unchanged. |
+| `run_id` | `string` | The healed run's id, unchanged: the latest `pipeline_start` in the file. |
 | `started_at` | `string` | Wall-clock start of the retry, ISO-8601 UTC. |
 | `num_rows` | `int` | Rows in the input data (unchanged from the run). |
 | `num_cells` | `int` | `(step, row)` cells this retry will re-execute. |
@@ -282,7 +282,7 @@ An LLM row looks like:
 - **Append-only.** The file is opened in append mode and never truncated; pointing `run_log` at an existing file adds to it. A second run appended that way opens its own `pipeline_start` … `pipeline_end` frame with its own `run_id`, and its `t` continues from the file's last `t` rather than restarting at zero — `t` is a within-file ordering clock, not wall-clock elapsed. One file per run is still the recommended layout; readers that assume a single run per file should key on `run_id`.
 - **Flush per line.** Every record is flushed as soon as it is written. A crashed or killed run leaves a valid prefix of the stream — the tail is always complete lines, so `tail -f` and crash-recovery readers work.
 - **Ordering.** `pipeline_start` is first; `pipeline_end` closes the run and fires even on error. Each step's `step_start` precedes all of its `row_complete` records, which precede its `step_end`. Steps at the same DAG level run in parallel, so *their* records may interleave; `t` stays non-decreasing throughout.
-- **Segments.** A file holds one run, optionally followed by one `retry_start` … `retry_end` segment per `retry_failed()` call, each carrying the run's original `run_id`. Nothing follows a `pipeline_end` except retry segments.
+- **Segments.** Each run is a `pipeline_start` … `pipeline_end` frame. A `retry_failed()` call appends one `retry_start` … `retry_end` segment carrying the `run_id` of the latest `pipeline_start` in the file, so a retry segment always belongs to the run frame above it. Point a retry at a log whose latest run used the same data, since the retry heals the checkpoint of the data you pass it. Once a later run starts, an earlier run in the file gets no further retries. A `pipeline_end` is followed only by retry segments or the next run's `pipeline_start`.
 - **Completeness.** Every row of every executed step gets exactly one `row_complete` — including cached, skipped, and errored rows, and including rows whose values cannot be encoded (those carry the `__unserializable__` placeholder). In a retry segment, "executed" means the retried cells: a row served from the checkpoint produces no record, and its state is whatever the earlier segment last said.
   The same applies to a run that **auto-resumed from a checkpoint**: steps served from the checkpoint are never executed, so they emit no `step_start` / `row_complete` / `step_end` at all. Such a log covers only the steps (and failed cells) that actually ran — a consumer reading it alone sees partial coverage of the dataset, not a complete run.
 - **Never crashes the run.** The logger is an ordinary hooks consumer; hook errors are caught and logged, and values JSON cannot represent degrade (to strings, to `null`, or to the `__unserializable__` placeholder) rather than raise.
