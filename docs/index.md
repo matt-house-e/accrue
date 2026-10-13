@@ -8,7 +8,7 @@
 pip install accrue
 ```
 
-Python 3.10+. Set `OPENAI_API_KEY` to get started. Optional extras: `accrue[anthropic]`, `accrue[google]`.
+Python 3.10+. Set `OPENAI_API_KEY` to get started. Optional extras: `accrue[anthropic]`, `accrue[google]`, and `accrue[ui]` for the Accrue Watch dashboard.
 
 ## Example
 

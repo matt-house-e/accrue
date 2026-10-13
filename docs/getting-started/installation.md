@@ -8,6 +8,7 @@ Accrue requires **Python 3.10+**.
 pip install accrue                # Base install (includes OpenAI support)
 pip install accrue[anthropic]     # Add Anthropic (Claude) support
 pip install accrue[google]        # Add Google (Gemini) support
+pip install 'accrue[ui]'          # Add Accrue Watch, the run dashboard (`accrue watch`)
 ```
 
 ## API Keys
