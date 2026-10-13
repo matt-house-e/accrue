@@ -109,6 +109,63 @@ def build_json_schema_from_model(model: type[BaseModel]) -> dict[str, Any]:
     }
 
 
+def describe_from_specs(
+    model: type[BaseModel],
+    field_specs: dict[str, FieldSpec | str | dict[str, Any]],
+) -> type[BaseModel]:
+    """Return ``model`` with each field spec's prompt written into its property description.
+
+    With ``LLMStep(schema=..., structured_outputs=True)`` the constrained decoder
+    reads the JSON schema ``description`` next to each value, and a custom schema
+    does not get the spec text automatically.  This is the opt-in fix: every
+    top-level field whose name matches a spec gets the same description
+    ``build_json_schema`` would have written (prompt, format, examples).
+
+    A field that already carries a description containing the spec's prompt is left
+    alone; otherwise its description is set (an existing unrelated description is
+    replaced).  The input model is not modified: a subclass with the same name is
+    returned.  Names with no matching field are ignored.
+    """
+    from pydantic.fields import FieldInfo
+
+    overrides: dict[str, Any] = {}
+    for name, raw in field_specs.items():
+        info = model.model_fields.get(name)
+        if info is None:
+            continue
+        spec = (
+            raw
+            if isinstance(raw, FieldSpec)
+            else (FieldSpec(prompt=raw) if isinstance(raw, str) else FieldSpec.model_validate(raw))
+        )
+        if info.description and spec.prompt in info.description:
+            continue
+        merged = FieldInfo.merge_field_infos(info, description=_build_description(spec))
+        overrides[name] = (info.annotation, merged)
+
+    if not overrides:
+        return model
+    return create_model(model.__name__, __base__=model, __module__=model.__module__, **overrides)
+
+
+def undescribed_fields(
+    model: type[BaseModel],
+    field_specs: dict[str, FieldSpec],
+) -> list[str]:
+    """Top-level properties of ``model`` matching a spec whose schema description
+    is missing or does not contain the spec's prompt."""
+    properties = model.model_json_schema().get("properties", {})
+    missing: list[str] = []
+    for name, spec in field_specs.items():
+        prop = properties.get(name)
+        if prop is None:
+            continue
+        description = prop.get("description") or ""
+        if spec.prompt not in description:
+            missing.append(name)
+    return missing
+
+
 def _strictify(node: Any) -> None:
     """Recursively set ``additionalProperties: false`` on every object node."""
     if isinstance(node, list):

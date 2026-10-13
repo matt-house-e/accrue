@@ -300,3 +300,97 @@ class TestBuildJsonSchemaFromModel:
         props = build_json_schema_from_model(_M)["json_schema"]["schema"]["properties"]
         assert props["tags"]["additionalProperties"] == {"type": "integer"}
         assert props["inner"]["additionalProperties"] == {"$ref": "#/$defs/_Inner"}
+
+
+class TestDescribeFromSpecs:
+    def _model(self):
+        from pydantic import BaseModel, Field
+
+        class VS(BaseModel):
+            value: str
+            source: str
+
+        class Out(BaseModel):
+            a: VS
+            b: VS = Field(description="Own text, Find the b")
+            c: VS = Field(description="unrelated")
+            extra: str
+
+        return Out
+
+    def test_sets_missing_and_unrelated_descriptions(self):
+        from accrue.steps.schema_builder import describe_from_specs
+
+        Out = self._model()
+        specs = {
+            "a": FieldSpec(prompt="Find the a", format="ISO", examples=["x", "y"]),
+            "b": "Find the b",
+            "c": {"prompt": "Find the c"},
+            "nope": "ignored",
+        }
+        New = describe_from_specs(Out, specs)
+        props = New.model_json_schema()["properties"]
+        assert props["a"]["description"] == "Find the a. Format: ISO. Examples: x; y"
+        assert props["b"]["description"] == "Own text, Find the b"  # already has prompt
+        assert props["c"]["description"] == "Find the c"
+        assert "description" not in props["extra"]
+        assert New.__name__ == "Out"
+        # original untouched
+        assert "description" not in Out.model_json_schema()["properties"]["a"]
+
+    def test_no_overrides_returns_same_model(self):
+        from accrue.steps.schema_builder import describe_from_specs
+
+        Out = self._model()
+        assert describe_from_specs(Out, {"nope": "x"}) is Out
+
+
+class TestCustomSchemaDescriptionWarning:
+    def _schema(self, described: bool):
+        from pydantic import BaseModel, Field
+
+        class Out(BaseModel):
+            a: str = Field(description="Find the a") if described else Field()
+            b: str
+
+        return Out
+
+    def test_warns_once_listing_fields(self, caplog):
+        import logging
+
+        from accrue import LLMStep
+
+        with caplog.at_level(logging.WARNING, logger="accrue"):
+            LLMStep(
+                "s",
+                fields={"a": "Find the a", "b": "Find the b"},
+                schema=self._schema(False),
+                structured_outputs=True,
+            )
+        warnings = [r for r in caplog.records if "field-spec prompt" in r.getMessage()]
+        assert len(warnings) == 1
+        assert "a, b" in warnings[0].getMessage()
+
+    def test_silent_when_described_or_helper_used(self, caplog):
+        import logging
+
+        from accrue import LLMStep, describe_from_specs
+
+        fields = {"a": "Find the a", "b": "Find the b"}
+        with caplog.at_level(logging.WARNING, logger="accrue"):
+            LLMStep(
+                "s",
+                fields=fields,
+                schema=describe_from_specs(self._schema(False), fields),
+                structured_outputs=True,
+            )
+        assert not [r for r in caplog.records if "field-spec prompt" in r.getMessage()]
+
+    def test_no_warning_without_structured_outputs(self, caplog):
+        import logging
+
+        from accrue import LLMStep
+
+        with caplog.at_level(logging.WARNING, logger="accrue"):
+            LLMStep("s", fields={"a": "Find the a"}, schema=self._schema(False))
+        assert not caplog.records
