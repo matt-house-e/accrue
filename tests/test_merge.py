@@ -310,6 +310,19 @@ class TestCostAndWarnings:
         assert m.elapsed_seconds == 5.0
         assert a.cost.steps["extract"].prompt_tokens == 100  # inputs untouched
 
+    def test_batch_ids_from_every_run(self):
+        # A realtime run first, then two batch runs (#169).
+        costs = [_cost(1, 1), _cost(1, 1), _cost(1, 1)]
+        costs[1].steps["extract"].batch_id = "a-1"
+        costs[1].steps["extract"].batch_ids = ["a-1", "a-2"]
+        costs[2].steps["extract"].batch_id = "b-1"
+        costs[2].steps["extract"].batch_ids = ["b-1"]
+        m = merge_runs([_run([{"tier": "low"}], cost=c) for c in costs])
+        usage = m.cost.steps["extract"]
+        assert usage.batch_ids == ["a-1", "a-2", "b-1"]
+        assert usage.batch_id == "a-1"  # still the first one
+        assert costs[0].steps["extract"].batch_ids == []  # inputs untouched
+
     def test_warns_when_a_run_looks_like_a_cache_replay(self):
         a = _run([{"tier": "low"}], cost=_cost(100, 10))
         b = _run([{"tier": "low"}], cost=_cost(0, 0, hits=1, misses=0))
