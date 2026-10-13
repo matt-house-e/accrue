@@ -45,7 +45,7 @@ def _is_default_range_index(idx: pd.Index) -> bool:
 
 
 def _align_rows(
-    df_a: pd.DataFrame, df_b: pd.DataFrame
+    df_a: pd.DataFrame, df_b: pd.DataFrame, caller: str = "compare"
 ) -> tuple[list[int], list[int], Literal["positional", "label"]]:
     """Pair up rows of *df_a* and *df_b* for comparison.
 
@@ -73,7 +73,7 @@ def _align_rows(
         n = min(len(df_a), len(df_b))
         if len(df_a) != len(df_b):
             warnings.warn(
-                f"compare(): row counts differ (A={len(df_a)}, B={len(df_b)}); "
+                f"{caller}(): row counts differ (A={len(df_a)}, B={len(df_b)}); "
                 f"comparing the first {n} row(s) positionally and ignoring the rest.",
                 stacklevel=3,
             )
@@ -87,7 +87,7 @@ def _align_rows(
             unmatched_b = len(df_b) - len(common)
             if unmatched_a or unmatched_b:
                 warnings.warn(
-                    f"compare(): {unmatched_a} row(s) in A and {unmatched_b} row(s) in B "
+                    f"{caller}(): {unmatched_a} row(s) in A and {unmatched_b} row(s) in B "
                     "have no matching index label on the other side; comparing the "
                     "intersection only.",
                     stacklevel=3,
@@ -97,7 +97,7 @@ def _align_rows(
             return pos_a, pos_b, "label"
 
         warnings.warn(
-            "compare(): index is non-unique on one or both sides; "
+            f"{caller}(): index is non-unique on one or both sides; "
             "falling back to positional row alignment.",
             stacklevel=3,
         )
@@ -106,7 +106,7 @@ def _align_rows(
 
     # Mixed: one default RangeIndex, one real index.
     warnings.warn(
-        "compare(): one side has a default positional index and the other a custom "
+        f"{caller}(): one side has a default positional index and the other a custom "
         "index; falling back to positional row alignment.",
         stacklevel=3,
     )
