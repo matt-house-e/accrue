@@ -29,27 +29,31 @@ from .core.hooks import (
 )
 from .core.runlog import JsonlRunLogger, read_prompt_ref
 from .pipeline import (
+    Candidate,
     ComparisonResult,
+    MergedResult,
     Pipeline,
     PipelinePlan,
     PipelineResult,
     StepPlan,
     compare,
+    merge_runs,
 )
 from .schemas.base import CostSummary
 from .schemas.field_spec import FieldSpec
 from .schemas.grounding import GroundingConfig
-from .steps import FunctionStep, LLMStep, Step, StepContext, StepResult
+from .steps import Document, FunctionStep, LLMStep, Step, StepContext, StepResult
 from .steps.providers.base import (
     BatchCapableLLMClient,
     BatchRequest,
     BatchResult,
     is_batch_capable,
 )
+from .steps.schema_builder import describe_from_specs
 from .utils.logger import setup_logging
 from .utils.web_search import web_search
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 __author__ = "Accrue Team"
 
 __all__ = [
@@ -63,6 +67,9 @@ __all__ = [
     "EnrichmentConfig",
     "compare",
     "ComparisonResult",
+    "merge_runs",
+    "MergedResult",
+    "Candidate",
     # Hooks
     "EnrichmentHooks",
     "PipelineStartEvent",
@@ -78,9 +85,12 @@ __all__ = [
     "Step",
     "StepContext",
     "StepResult",
+    # Attachments
+    "Document",
     # Schemas
     "FieldSpec",
     "GroundingConfig",
+    "describe_from_specs",
     # Utilities
     "setup_logging",
     "web_search",

@@ -24,7 +24,13 @@ from typing import Any
 from ...core.exceptions import StepError
 from ...schemas.base import UsageInfo
 from ...schemas.grounding import Citation
-from .base import BatchRequest, BatchResult, LLMAPIError, LLMResponse
+from .base import (
+    BatchRequest,
+    BatchResult,
+    LLMAPIError,
+    LLMResponse,
+    reject_document_blocks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +45,18 @@ class OpenAIClient:
     Third-party providers with a ``base_url`` (Ollama, Groq, DeepSeek,
     Together, Fireworks, vLLM, Mistral, LM Studio) use the Chat Completions
     API for maximum compatibility.
+
+    Size limits (bytes) — accrue checks these before sending, see
+    :mod:`accrue.steps.providers.limits`.
+
+    Attributes:
+        max_request_bytes: ``None`` — OpenAI documents no single request-body
+            cap for these endpoints, so accrue does not check one.
+        max_batch_bytes: Batch API input file cap (200 MB).
     """
+
+    max_request_bytes: int | None = None
+    max_batch_bytes: int | None = 200_000_000
 
     def __init__(
         self,
@@ -78,6 +95,7 @@ class OpenAIClient:
         tools: list[dict[str, Any]] | None = None,
         provider_kwargs: dict[str, Any] | None = None,
     ) -> LLMResponse:
+        reject_document_blocks(messages, "OpenAIClient")
         if self._base_url:
             return await self._complete_chat(
                 messages,
@@ -328,6 +346,7 @@ class OpenAIClient:
         # Build JSONL content
         jsonl_lines: list[str] = []
         for req in requests:
+            reject_document_blocks(req.messages, "OpenAIClient")
             body: dict[str, Any] = {
                 "model": req.model,
                 "messages": req.messages,

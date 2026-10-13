@@ -153,6 +153,8 @@ accrue watch               # opens the latest run in your browser
 
 - **Web search and grounding** -- `web_search()` factory for search-then-analyze pipelines, or `grounding=True` for native provider web search with normalized citations. [Web search guide](docs/guides/web-search.md)
 
+- **Attachments** -- `LLMStep(attachments="documents")` sends each row's PDFs to the model as document blocks instead of making you extract the text first. Cached by content, placeholdered in run logs. Anthropic today. [Attachments guide](docs/guides/attachments.md)
+
 - **Conditional steps** -- `run_if` / `skip_if` predicates for per-row branching. Skipped rows get defaults, never hit the API. [Conditional steps guide](docs/guides/conditional-steps.md)
 
 - **Hooks** -- Typed lifecycle events for observability. Sync and async callables, never crash the pipeline. [Hooks guide](docs/guides/hooks.md)
@@ -160,6 +162,8 @@ accrue watch               # opens the latest run in your browser
 - **Run logs** -- `run(..., run_log=True)` streams the run as append-only JSONL (schema v1): per-step and per-row events with status, errors, and token usage. Crash-safe, `tail -f`-able. [Run log guide](docs/guides/run-log.md)
 
 - **Run diffs** -- `accrue.compare(result_a, result_b)` diffs two runs (e.g. before/after a prompt tweak) -- changed rows, per-field churn, distribution shift, and cost delta -- no labels needed. [Compare guide](docs/guides/compare.md)
+
+- **Merging repeated runs** -- `accrue.merge_runs([run_a, run_b, run_c])` combines independent runs over the same rows into one answer per cell by majority vote, with per-cell agreement, the cells that need review, and cost summed across runs. Pluggable per-field resolvers for rules like "prefer the run with a verified quote". [Merge guide](docs/guides/merge-runs.md)
 
 - **`provider_kwargs`** -- Escape hatch for provider-specific features (extended thinking, effort control, etc.) without waiting for first-class support.
 
@@ -182,7 +186,7 @@ With `batch=True`, halve the API costs. Cached steps re-run in seconds.
 |---------|-------------|
 | [Getting Started](docs/getting-started/quickstart.md) | Installation, first pipeline, core concepts |
 | [Claude Code Skill](docs/getting-started/claude-code-skill.md) | Interactive pipeline builder via `/accrue` |
-| [Guides](docs/guides/) | Field specs, providers, caching, batch API, grounding, hooks, run logs, errors, configuration |
+| [Guides](docs/guides/) | Field specs, providers, caching, batch API, grounding, attachments, hooks, run logs, errors, configuration |
 | [Cookbook](docs/cookbook/) | End-to-end examples: [company enrichment](docs/cookbook/company-enrichment.md), [lead scoring](docs/cookbook/lead-scoring.md), [content analysis](docs/cookbook/content-analysis.md), [batch processing](docs/cookbook/batch-processing.md) |
 | [API Reference](docs/reference/api.md) | Complete reference for every public export |
 

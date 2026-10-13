@@ -9,7 +9,7 @@ from typing import Any
 
 from ...schemas.base import UsageInfo
 from ...schemas.grounding import Citation
-from .base import LLMAPIError, LLMResponse
+from .base import LLMAPIError, LLMResponse, reject_document_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,7 @@ class GoogleClient:
         tools: list[dict[str, Any]] | None = None,
         provider_kwargs: dict[str, Any] | None = None,
     ) -> LLMResponse:
+        reject_document_blocks(messages, "GoogleClient")
         client = self._get_client()
 
         # Convert messages to Gemini format

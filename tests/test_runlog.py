@@ -38,6 +38,9 @@ from tests.fixtures.generate_run_fixture import (
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "run_small.jsonl"
 
+#: Cache-token counters on every usage / cost object (#169).
+CACHE_KEYS = ("cache_read_tokens", "cache_write_tokens")
+
 RECORD_TYPES = {"pipeline_start", "step_start", "row_complete", "step_end", "pipeline_end"}
 
 REQUIRED_KEYS = {
@@ -62,7 +65,7 @@ REQUIRED_KEYS = {
         "usage",
         "elapsed_ms",
     },
-    "step_end": {"step", "num_errors", "usage", "elapsed_s", "batch_id"},
+    "step_end": {"step", "num_errors", "usage", "elapsed_s", "batch_id", "batch_ids"},
     "pipeline_end": {"num_rows", "total_errors", "cost", "elapsed_s"},
 }
 
@@ -170,6 +173,7 @@ class TestGoldenFixture:
         assert err["row"] == ERROR_ROW
         assert err["error"]["type"] == "ValueError"
         assert err["error"]["msg"]
+        assert err["error"]["retryable"] is False  # a user function raising is not transient
         assert err["values"] is None  # errored rows carry no real output
         # The step_end for 'score' counts it; pipeline_end totals it
         score_end = next(r for r in records if r["type"] == "step_end" and r["step"] == "score")
@@ -219,11 +223,13 @@ class TestGoldenFixture:
         records = _load(FIXTURE)
         for rec in records:
             if rec["type"] == "step_end":
-                assert set(rec["usage"].keys()) >= {"in", "out", "cost"}
+                assert set(rec["usage"].keys()) >= {"in", "out", "cost", *CACHE_KEYS}
                 assert rec["usage"]["cost"] is None  # no pricing data by design
                 assert rec["batch_id"] is None
+                assert rec["batch_ids"] == []  # realtime steps submit no batches
             if rec["type"] == "pipeline_end":
-                assert set(rec["cost"].keys()) >= {"in", "out", "cost"}
+                assert set(rec["cost"].keys()) >= {"in", "out", "cost", *CACHE_KEYS}
+                assert all(rec["cost"][k] == 0 for k in CACHE_KEYS)  # function steps only
 
     def test_regeneration_is_stable(self, tmp_path):
         """Regenerating produces the same record sequence, timestamps aside."""
@@ -296,7 +302,7 @@ class TestRunLogParam:
         _assert_coherent(records)
         row = next(r for r in records if r["type"] == "row_complete")
         assert row["status"] == "error"
-        assert row["error"] == {"type": "RuntimeError", "msg": "kaboom"}
+        assert row["error"] == {"type": "RuntimeError", "msg": "kaboom", "retryable": False}
 
     def test_user_hooks_still_fire_with_run_log(self, tmp_path):
         seen: list[str] = []
@@ -341,7 +347,13 @@ class TestRunLogParam:
         path = tmp_path / "log.jsonl"
         Pipeline([UsageStep()]).run([{"name": "acme"}], config=_quiet_config(), run_log=path)
         row = next(r for r in _load(path) if r["type"] == "row_complete")
-        assert row["usage"] == {"in": 5, "out": 2, "cost": None}
+        assert row["usage"] == {
+            "in": 5,
+            "out": 2,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cost": None,
+        }
         assert isinstance(row["elapsed_ms"], (int, float))
 
     def test_non_json_values_degrade_to_strings(self, tmp_path):

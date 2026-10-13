@@ -114,6 +114,12 @@ class EnrichmentConfig:
     batch_max_requests: int = 50000
     """Maximum requests per batch submission. Larger sets are auto-chunked."""
 
+    batch_max_bytes: int | None = None
+    """Maximum estimated payload bytes per batch submission (base64 attachments
+    included). ``None`` uses the client's ``max_batch_bytes`` default (Anthropic
+    256 MB, OpenAI 200 MB). Batches are split on whichever of this and
+    ``batch_max_requests`` is reached first."""
+
     # === Validation ===
     def __post_init__(self):
         if not 0.0 <= self.temperature <= 2.0:
@@ -138,6 +144,8 @@ class EnrichmentConfig:
             raise ValueError(f"batch_timeout must be positive, got {self.batch_timeout}")
         if self.batch_max_requests <= 0:
             raise ValueError(f"batch_max_requests must be positive, got {self.batch_max_requests}")
+        if self.batch_max_bytes is not None and self.batch_max_bytes <= 0:
+            raise ValueError(f"batch_max_bytes must be positive, got {self.batch_max_bytes}")
 
     # === Presets ===
     @classmethod

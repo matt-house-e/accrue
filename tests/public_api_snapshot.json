@@ -4,8 +4,10 @@
       "BatchCapableLLMClient",
       "BatchRequest",
       "BatchResult",
+      "Candidate",
       "ComparisonResult",
       "CostSummary",
+      "Document",
       "Enricher",
       "EnrichmentConfig",
       "EnrichmentError",
@@ -16,6 +18,7 @@
       "GroundingConfig",
       "JsonlRunLogger",
       "LLMStep",
+      "MergedResult",
       "Pipeline",
       "PipelineEndEvent",
       "PipelineError",
@@ -33,7 +36,9 @@
       "StepResult",
       "StepStartEvent",
       "compare",
+      "describe_from_specs",
       "is_batch_capable",
+      "merge_runs",
       "read_prompt_ref",
       "setup_logging",
       "web_search"
@@ -69,6 +74,11 @@
         "kind": "dataclass",
         "members": {},
         "signature": "(responses: dict[str, LLMResponse] = <factory>, failed_ids: list[str] = <factory>, batch_id: str = '', errors: dict[str, str] = <factory>) -> None"
+      },
+      "Candidate": {
+        "kind": "dataclass",
+        "members": {},
+        "signature": "(run: int, value: Any, row: dict[str, Any]) -> None"
       },
       "ComparisonResult": {
         "kind": "dataclass",
@@ -133,6 +143,20 @@
         "members": {},
         "signature": "(*, total_prompt_tokens: int = 0, total_completion_tokens: int = 0, total_tokens: int = 0, total_cache_write_tokens: int = 0, total_cache_read_tokens: int = 0, steps: dict[str, StepUsage] = {}) -> None"
       },
+      "Document": {
+        "kind": "dataclass",
+        "members": {
+          "from_path": {
+            "kind": "classmethod",
+            "signature": "(cls, path: str | os.PathLike[str], title: str | None = None, media_type: str | None = None) -> Document"
+          },
+          "sha256": {
+            "kind": "property",
+            "signature": "(self) -> str"
+          }
+        },
+        "signature": "(data: bytes, media_type: str = 'application/pdf', title: str | None = None) -> None"
+      },
       "Enricher": {
         "kind": "class",
         "members": {
@@ -167,7 +191,7 @@
             "signature": "(cls) -> \"'EnrichmentConfig'\""
           }
         },
-        "signature": "(max_tokens: int = 4000, temperature: float = 0.2, max_workers: int = 10, overwrite_fields: bool = False, max_retries: int = 3, retry_base_delay: float = 1.0, on_error: str = 'continue', log_level: str = 'INFO', enable_progress_bar: bool = True, enable_checkpointing: bool = False, checkpoint_dir: str = <factory>, auto_resume: bool = True, enable_caching: bool = True, cache_ttl: int = 3600, cache_dir: str = <factory>, checkpoint_interval: int = 0, batch_poll_interval: float = 60.0, batch_timeout: float = 86400.0, batch_max_requests: int = 50000) -> None"
+        "signature": "(max_tokens: int = 4000, temperature: float = 0.2, max_workers: int = 10, overwrite_fields: bool = False, max_retries: int = 3, retry_base_delay: float = 1.0, on_error: str = 'continue', log_level: str = 'INFO', enable_progress_bar: bool = True, enable_checkpointing: bool = False, checkpoint_dir: str = <factory>, auto_resume: bool = True, enable_caching: bool = True, cache_ttl: int = 3600, cache_dir: str = <factory>, checkpoint_interval: int = 0, batch_poll_interval: float = 60.0, batch_timeout: float = 86400.0, batch_max_requests: int = 50000, batch_max_bytes: int | None = None) -> None"
       },
       "EnrichmentError": {
         "bases": [
@@ -292,7 +316,7 @@
         "members": {
           "build_messages": {
             "kind": "method",
-            "signature": "(self, ctx: StepContext) -> tuple[list[dict[str, str]], dict[str, Any]]"
+            "signature": "(self, ctx: StepContext) -> tuple[list[dict[str, Any]], dict[str, Any]]"
           },
           "is_batch_eligible": {
             "kind": "property",
@@ -311,7 +335,21 @@
             "signature": "(self, ctx: StepContext) -> StepResult"
           }
         },
-        "signature": "(name: str, fields: list[str] | dict[str, str | dict], depends_on: list[str] | None = None, model: str = 'gpt-4.1-mini', temperature: float | None = None, max_tokens: int | None = None, system_prompt: str | None = None, system_prompt_header: str | None = None, api_key: str | None = None, base_url: str | None = None, client: LLMClient | None = None, schema: Type[BaseModel] = <class 'EnrichmentResult'>, max_retries: int = 2, cache: bool = True, structured_outputs: bool | None = None, grounding: bool | dict | GroundingConfig | None = None, sources_field: str | None = 'sources', run_if: Callable[..., Any] | None = None, skip_if: Callable[..., Any] | None = None, batch: bool = False, provider_kwargs: dict[str, Any] | None = None)"
+        "signature": "(name: str, fields: list[str] | dict[str, str | dict], depends_on: list[str] | None = None, model: str = 'gpt-4.1-mini', temperature: float | None = None, max_tokens: int | None = None, system_prompt: str | None = None, system_prompt_header: str | None = None, api_key: str | None = None, base_url: str | None = None, client: LLMClient | None = None, schema: Type[BaseModel] = <class 'EnrichmentResult'>, max_retries: int = 2, cache: bool = True, structured_outputs: bool | None = None, grounding: bool | dict | GroundingConfig | None = None, sources_field: str | None = 'sources', run_if: Callable[..., Any] | None = None, skip_if: Callable[..., Any] | None = None, batch: bool = False, provider_kwargs: dict[str, Any] | None = None, attachments: str | None = None)"
+      },
+      "MergedResult": {
+        "kind": "dataclass",
+        "members": {
+          "needs_review": {
+            "kind": "property",
+            "signature": "(self) -> pd.DataFrame"
+          },
+          "summary": {
+            "kind": "method",
+            "signature": "(self) -> str"
+          }
+        },
+        "signature": "(data: pd.DataFrame, agreement: pd.DataFrame, errored_rows: dict[Any, list[int]], cost: CostSummary, elapsed_seconds: float, fields: list[str], rules: dict[str, str], runs: list[PipelineResult]) -> None"
       },
       "Pipeline": {
         "kind": "class",
@@ -322,7 +360,7 @@
           },
           "execute": {
             "kind": "method",
-            "signature": "(self, rows: list[dict[str, Any]], all_fields: dict[str, dict[str, Any]], config: EnrichmentConfig | None = None, prior_step_results: dict[str, list[dict[str, Any]]] | None = None, on_step_complete: Callable[[str, list[dict[str, Any]], list[RowError], set[int]], None] | None = None, cache_manager: Any = None, on_partial_checkpoint: Callable[[str, list[dict], int], None] | None = None, hooks: EnrichmentHooks | None = None, retry_cells: dict[str, list[int]] | None = None, capture: str = 'metadata') -> tuple[list[dict[str, Any]], list[RowError], CostSummary, dict[str, float]]"
+            "signature": "(self, rows: list[dict[str, Any]], all_fields: dict[str, dict[str, Any]], config: EnrichmentConfig | None = None, prior_step_results: dict[str, list[dict[str, Any]]] | None = None, on_step_complete: Callable[[str, list[dict[str, Any]], list[RowError], set[int]], None] | None = None, cache_manager: Any = None, on_partial_checkpoint: Callable[[str, list[dict], int], None] | None = None, hooks: EnrichmentHooks | None = None, retry_cells: dict[str, list[int]] | None = None, capture: str = 'metadata', row_status: dict[str, list[str]] | None = None) -> tuple[list[dict[str, Any]], list[RowError], CostSummary, dict[str, float]]"
           },
           "execution_levels": {
             "kind": "property",
@@ -412,7 +450,7 @@
             "signature": "(self) -> str"
           }
         },
-        "signature": "(data: pd.DataFrame | list[dict[str, Any]], cost: CostSummary = <factory>, errors: list[RowError] = <factory>, pipeline_elapsed_seconds: float = 0.0, step_elapsed_seconds: dict[str, float] = <factory>, field_specs: dict[str, dict[str, Any]] = <factory>) -> None"
+        "signature": "(data: pd.DataFrame | list[dict[str, Any]], cost: CostSummary = <factory>, errors: list[RowError] = <factory>, pipeline_elapsed_seconds: float = 0.0, step_elapsed_seconds: dict[str, float] = <factory>, field_specs: dict[str, dict[str, Any]] = <factory>, row_status: pd.DataFrame = <factory>) -> None"
       },
       "PipelineStartEvent": {
         "kind": "dataclass",
@@ -451,7 +489,7 @@
       "StepEndEvent": {
         "kind": "dataclass",
         "members": {},
-        "signature": "(step_name: str, num_rows: int, num_errors: int, usage: Any, elapsed_seconds: float, execution_mode: str = 'realtime', batch_id: str | None = None) -> None"
+        "signature": "(step_name: str, num_rows: int, num_errors: int, usage: Any, elapsed_seconds: float, execution_mode: str = 'realtime', batch_id: str | None = None, batch_ids: list[str] = <factory>) -> None"
       },
       "StepError": {
         "bases": [
@@ -482,9 +520,17 @@
         "kind": "function",
         "signature": "(a: PipelineResult, b: PipelineResult, *, label_a: str = 'A', label_b: str = 'B') -> ComparisonResult"
       },
+      "describe_from_specs": {
+        "kind": "function",
+        "signature": "(model: type[BaseModel], field_specs: dict[str, FieldSpec | str | dict[str, Any]]) -> type[BaseModel]"
+      },
       "is_batch_capable": {
         "kind": "function",
         "signature": "(client: Any) -> bool"
+      },
+      "merge_runs": {
+        "kind": "function",
+        "signature": "(runs: Sequence[PipelineResult], *, fields: Sequence[str] | None = None, key: Callable[[Any], Any] | Mapping[str, Callable[[Any], Any]] | None = None, resolve: Resolver | Mapping[str, Resolver | Rule] | Rule | None = None) -> MergedResult"
       },
       "read_prompt_ref": {
         "kind": "function",
@@ -634,7 +680,7 @@
             "signature": "(self, requests: list[BatchRequest], metadata: dict[str, str] | None = None) -> str"
           }
         },
-        "signature": "(api_key: str | None = None, http_client: Any | None = None)"
+        "signature": "(api_key: str | None = None, http_client: Any | None = None, timeout: float | None = None)"
       },
       "GoogleClient": {
         "kind": "class",

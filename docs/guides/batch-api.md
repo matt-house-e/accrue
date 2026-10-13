@@ -32,7 +32,7 @@ result = pipeline.run(data, config=config)
 
 1. **Cache check** -- only uncached rows are sent to the batch job.
 2. **Build request payload** -- `build_messages()` is called for each uncached row.
-3. **Auto-chunk** -- if the batch exceeds `batch_max_requests` (default 50,000), it is split into multiple submissions.
+3. **Auto-chunk** -- if the batch exceeds `batch_max_requests` (default 50,000) or `batch_max_bytes` (default: the provider's per-batch cap), it is split into multiple submissions. A row whose request alone exceeds the per-request or per-batch cap fails on its own and is not submitted -- see [attachments limits](attachments.md#request-limits).
 4. **Submit batch job** -- the provider's batch API receives the payload.
 5. **Poll until complete** -- status is checked every `batch_poll_interval` seconds.
 6. **Parse results and cache** -- responses are parsed with `parse_response()` and cached for future runs.
@@ -47,6 +47,7 @@ config = EnrichmentConfig(
     batch_poll_interval=60.0,    # Seconds between status checks (default: 60)
     batch_timeout=86400.0,       # Max wait time in seconds (default: 24h)
     batch_max_requests=50000,    # Auto-chunk threshold (default: 50,000)
+    batch_max_bytes=None,        # Byte threshold (default: provider cap)
 )
 ```
 
@@ -95,7 +96,8 @@ result = pipeline.run(data, config=EnrichmentConfig.for_batch())
 
 usage = result.cost.steps["analyze"]
 print(usage.execution_mode)  # "batch"
-print(usage.batch_id)        # "batch_abc123"
+print(usage.batch_id)        # "batch_abc123" (the first batch)
+print(usage.batch_ids)       # Every batch, more than one if auto-chunked
 print(usage.cache_hits)      # Rows served from cache
 print(usage.cache_misses)    # Rows sent to batch
 print(usage.cache_hit_rate)  # Float between 0.0 and 1.0

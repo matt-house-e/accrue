@@ -7,6 +7,8 @@ Implements ``submit_batch()``, ``poll_batch()``, and ``cancel_batch()``.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import os
 import re
@@ -29,15 +31,38 @@ class AnthropicClient:
     Supports the ``web_search_20250305`` server tool for grounded responses.
     When web search tools are active, structured outputs via
     ``output_config.format`` are disabled (incompatible with citations).
+
+    Size limits (bytes, decimal MB as Anthropic states them) — accrue checks
+    these before sending, see :mod:`accrue.steps.providers.limits`.  Override
+    on an instance for a gateway with tighter caps.
+
+    Attributes:
+        max_request_bytes: Messages API request cap (32 MB).
+        max_batch_bytes: Message Batches API cap per batch (256 MB).
     """
+
+    max_request_bytes: int | None = 32_000_000
+    max_batch_bytes: int | None = 256_000_000
 
     def __init__(
         self,
         api_key: str | None = None,
         http_client: Any | None = None,
+        timeout: float | None = None,
     ):
+        """Configure the Anthropic adapter.
+
+        Args:
+            api_key: Anthropic API key.  Falls back to ``ANTHROPIC_API_KEY``.
+            http_client: Pre-configured ``httpx.AsyncClient`` to reuse.
+            timeout: Request timeout in seconds, forwarded to ``AsyncAnthropic``.
+                Needed when ``max_tokens`` exceeds roughly 21,000: the SDK
+                refuses a non-streaming request whose estimated duration
+                exceeds 10 minutes unless a non-default ``timeout`` was set.
+        """
         self._api_key = api_key
         self._http_client = http_client
+        self._timeout = timeout
         self._client: Any = None
         # Scope: per-client-instance (not per-process).  LLMStep constructs a
         # fresh AnthropicClient on each Pipeline.run_async() call, so users see
@@ -90,6 +115,8 @@ class AnthropicClient:
             kwargs: dict[str, Any] = {"api_key": key}
             if self._http_client is not None:
                 kwargs["http_client"] = self._http_client
+            if self._timeout is not None:
+                kwargs["timeout"] = self._timeout
             # max_retries=0: disable SDK-level retry so LLMStep's retry loop
             # is the single source of truth and retries are not double-stacked.
             kwargs["max_retries"] = 0
@@ -119,7 +146,7 @@ class AnthropicClient:
 
         kwargs: dict[str, Any] = dict(
             model=model,
-            messages=chat_messages,
+            messages=_convert_messages(chat_messages),
             max_tokens=max_tokens,
         )
         # Omit temperature for models that reject an explicit value (issue #109).
@@ -182,6 +209,15 @@ class AnthropicClient:
         # Warn only when no temperature reaches the API at all (issue #109).
         if "temperature" not in kwargs:
             self._warn_temperature_dropped(model, temperature)
+        else:
+            # anthropic>=1.0 removed the sampling parameters from the
+            # ``messages.create()`` signature (TypeError: unexpected keyword
+            # argument 'temperature') while the API still accepts them in the
+            # body. ``extra_body`` merges into the JSON body on every SDK
+            # version, so it is the one place the value always reaches the API.
+            extra_body = dict(kwargs.pop("extra_body", None) or {})
+            extra_body["temperature"] = kwargs.pop("temperature")
+            kwargs["extra_body"] = extra_body
 
         try:
             from anthropic import APIError, APITimeoutError, RateLimitError
@@ -200,8 +236,15 @@ class AnthropicClient:
             ) from exc
         except APIError as exc:
             exc_status = getattr(exc, "status_code", None)
+            if _is_schema_too_complex(exc):
+                raise LLMAPIError(
+                    _schema_too_complex_message(model, exc),
+                    status_code=exc_status,
+                    retryable=False,
+                ) from exc
             # Only claim a temperature problem when we actually sent one.
-            hint = _temperature_hint(model, exc) if "temperature" in kwargs else ""
+            sent_temperature = "temperature" in (kwargs.get("extra_body") or {})
+            hint = _temperature_hint(model, exc) if sent_temperature else ""
             # Promote generic 429 to is_rate_limit (covers cases where RateLimitError
             # is not raised but status_code is 429)
             raise LLMAPIError(
@@ -212,6 +255,18 @@ class AnthropicClient:
 
         # Extract text from potentially multi-block response
         content = _extract_text(response)
+
+        # Output cut off at max_tokens: the JSON is incomplete, and LLMStep's
+        # parse retry would resend the identical request (every attachment
+        # included) only to be cut off again.  Fail the row once, loudly.
+        if getattr(response, "stop_reason", None) == "max_tokens" and not _is_json(content):
+            raise LLMAPIError(
+                f"Anthropic response for model '{model}' was truncated at "
+                f"max_tokens={max_tokens}; the JSON is incomplete. Raise the "
+                f"step's max_tokens (above ~21,000 also pass "
+                f"AnthropicClient(timeout=...)).",
+                retryable=False,
+            )
 
         # Extract citations from web_search_result_location blocks
         citations = _extract_citations(response) if anthropic_tools else []
@@ -273,7 +328,7 @@ class AnthropicClient:
             params: dict[str, Any] = {
                 "model": req.model,
                 "max_tokens": req.max_tokens,
-                "messages": chat_messages,
+                "messages": _convert_messages(chat_messages),
             }
             # Same temperature rule as the realtime path (issue #109), including
             # deferring the warning until after provider_kwargs is merged below.
@@ -488,6 +543,33 @@ def _supports_temperature(model: str) -> bool:
     return _NO_EXPLICIT_TEMPERATURE.search(model.lower()) is None
 
 
+_SCHEMA_TOO_COMPLEX_MARKERS = (
+    "schema is too complex for compilation",
+    "compiled grammar is too large",
+)
+
+
+def _is_schema_too_complex(exc: Exception) -> bool:
+    """True when Anthropic rejected the strict output schema for its size."""
+    text = str(exc).lower()
+    return any(marker in text for marker in _SCHEMA_TOO_COMPLEX_MARKERS)
+
+
+def _schema_too_complex_message(model: str, exc: Exception) -> str:
+    """Plain-words explanation of Anthropic's strict-schema size limit."""
+    return (
+        f"Anthropic could not compile this step's output schema for model '{model}': "
+        "the strict (structured-outputs) schema is too large. Anthropic turns the "
+        "schema into a decoding grammar and refuses grammars above an undocumented "
+        "size, so this fails the same way every time and accrue does not retry it. "
+        "Shrink the schema: reuse one nested class through a shared $ref instead of "
+        "many separate sub-classes; use fewer Literal/enum fields and validate the "
+        "allowed values after parsing instead; flatten nested objects into strings "
+        "that your code parses; or split the fields across more steps. "
+        f"Provider message: {exc}"
+    )
+
+
 def _temperature_hint(model: str, exc: Exception) -> str:
     """Actionable suffix for API errors caused by an unsupported ``temperature``.
 
@@ -510,6 +592,67 @@ def _temperature_hint(model: str, exc: Exception) -> str:
         f"Claude Opus 4.7/4.8); please report '{model}' at "
         "https://github.com/matt-house-e/accrue/issues so the check can cover it."
     )
+
+
+def _is_json(content: str) -> bool:
+    """True when *content* (optionally fenced) parses as JSON."""
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", text)
+    try:
+        json.loads(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _to_anthropic_content(content: Any) -> Any:
+    """Convert accrue's neutral message content to Anthropic content blocks (#153).
+
+    A plain string passes through unchanged.  A list of blocks is mapped:
+    ``text`` blocks stay text, ``document`` blocks (raw bytes) become
+    base64 ``document`` source blocks.  Unknown blocks pass through untouched
+    so a future block type is not silently dropped here.
+
+    Args:
+        content: A string, or accrue's list-of-blocks form.
+
+    Returns:
+        Content in Anthropic's message format.
+    """
+    if not isinstance(content, list):
+        return content
+
+    blocks: list[Any] = []
+    for block in content:
+        if not isinstance(block, dict):
+            blocks.append(block)
+            continue
+        if block.get("type") == "document":
+            data = block.get("data", b"")
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            doc_block: dict[str, Any] = {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": block.get("media_type", "application/pdf"),
+                    "data": base64.standard_b64encode(data).decode("ascii"),
+                },
+            }
+            if block.get("title") is not None:
+                doc_block["title"] = block["title"]
+            blocks.append(doc_block)
+        elif block.get("type") == "text":
+            blocks.append({"type": "text", "text": block.get("text", "")})
+        else:
+            blocks.append(block)
+    return blocks
+
+
+def _convert_messages(chat_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply :func:`_to_anthropic_content` to every chat message."""
+    return [{**msg, "content": _to_anthropic_content(msg.get("content"))} for msg in chat_messages]
 
 
 def _translate_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

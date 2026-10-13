@@ -95,7 +95,7 @@ How each part is introspected:
 - **`steps[].type`** is `type(step).__name__`. **`steps[].model`** carries the LLM step's model `id`, the `provider` (from `base_url`'s host, e.g. `openrouter.ai` → `"openrouter"`, else the model-name prefix: `claude-*` → `anthropic`, `gemini-*` → `google`, else `openai`), and the **effective** `temperature` / `max_tokens` the runtime would send (the step's value, or the config fallback). FunctionSteps and any step with no model report `"model": null`.
 - **`steps[].condition`** is a literal expression string only when a step exposes one; `run_if` / `skip_if` predicates are lambdas and can't be introspected to a string, so predicate-gated steps report `null`.
 - **`steps[].system_prompt`** carries the LLM step's **row-independent `system` prompt half** — the exact cached prefix (#107), so the Overview can show the instruction the model follows. It is assembled once at run start (pure prompt building, no provider call) and passed through the same `_sanitize_secrets` redaction the capture sidecar uses. It is `null` for FunctionSteps and any step with no system prompt. Row-independence is **verified, not assumed**: the half is built against two different dummy rows and compared — if they differ, the step is leaking row data into its cached prefix (a #107 bug), so the manifest emits `null` and warns rather than embedding per-row content or failing the run.
-- **`fields[].type`** / `enum` / `description` come from introspecting each step's response model. Inline `FieldSpec`s map `String`/`Date` → `str`, `Number` → `float`, `Boolean` → `bool`, `List[String]` → `list`, `JSON` → `json`, and any `enum` → `type:"enum"` with its members; a custom Pydantic `schema=` is read by field annotation (`int`/`float`/`bool`/`str`, `Literal`/`Enum` → `enum`, `list`/`dict`). Fields with no introspectable source — FunctionStep outputs, `__` inter-step fields, or LLM `list` fields on the permissive default schema — report `type:"unknown"` rather than a fabricated value. `internal` is `true` for `__`-prefixed fields.
+- **`fields[].type`** / `enum` / `description` come from introspecting each step's response model. Inline `FieldSpec`s map `String`/`Date` → `str`, `Number` → `float`, `Boolean` → `bool`, `List[String]` → `list`, `JSON` → `json`, and any `enum` → `type:"enum"` with its members; a custom Pydantic `schema=` is read by field annotation (`int`/`float`/`bool`/`str`, `Literal`/`Enum` → `enum`, any list → `list`, a nested model, dataclass, `dict` or `TypedDict` → `object`). When a step has both, the `schema=` annotation is the `type`, because that is what the output is validated into, and the field spec keeps `enum` and `description`. The spec's type is used instead when the annotation says less: one that maps to `unknown` (such as a multi-type `Union`), or a plain `str` on a spec with an `enum`. A step with field specs and no `schema=` reports exactly what the specs say. Fields with no introspectable source — FunctionStep outputs, `__` inter-step fields, or LLM `list` fields on the permissive default schema — report `type:"unknown"` rather than a fabricated value. `internal` is `true` for `__`-prefixed fields.
 
 ### `step_start` — per step, before its rows
 
@@ -119,15 +119,15 @@ Emitted once per provider call an LLM step makes, **before** the row's single `r
 | `status` | `string` | Short outcome: `"ok"`, `"rate_limited"`, `"timeout"`, `"api_error"`, `"parse_error"`, `"validation_error"`. |
 | `latency_ms` | `float \| null` | Wall-clock milliseconds for this attempt's provider call. |
 | `backoff_s` | `float \| null` | Seconds slept before the *next* attempt (set on a retrying `api` attempt), else `null`. |
-| `error` | `object \| null` | `{type, msg}` — exception class and message, secret patterns redacted as `***REDACTED***`. `null` on a successful attempt. |
+| `error` | `object \| null` | `{type, msg, retryable}` — exception class and message, secret patterns redacted as `***REDACTED***`, and whether the error is [transient](#error-objects-and-retryable). `null` on a successful attempt. |
 | `prompt_ref` | `object \| null` | `{off, len}` byte offset + length into the [prompt sidecar](#prompt-sidecar) at `capture >= "prompts"`, else `null`. Bodies are never inlined into the main log. |
 
 A cell that is rate-limited once, then parses cleanly:
 
 ```json
-{"v": 1, "t": 0.481, "type": "row_attempt", "step": "classify", "row": 1, "attempt": 1, "kind": "api", "status": "rate_limited", "latency_ms": 12.4, "backoff_s": 0.83, "error": {"type": "LLMAPIError", "msg": "rate limited"}, "prompt_ref": null}
+{"v": 1, "t": 0.481, "type": "row_attempt", "step": "classify", "row": 1, "attempt": 1, "kind": "api", "status": "rate_limited", "latency_ms": 12.4, "backoff_s": 0.83, "error": {"type": "LLMAPIError", "msg": "rate limited", "retryable": true}, "prompt_ref": null}
 {"v": 1, "t": 1.402, "type": "row_attempt", "step": "classify", "row": 1, "attempt": 2, "kind": "parse", "status": "ok", "latency_ms": 640.2, "backoff_s": null, "error": null, "prompt_ref": {"off": 1276, "len": 1283}}
-{"v": 1, "t": 1.404, "type": "row_complete", "step": "classify", "row": 1, "key": "Globex", "status": "ok", "from_cache": false, "values": {"grade": "B"}, "error": null, "usage": {"in": 11, "out": 3, "cost": null}, "elapsed_ms": 652.8}
+{"v": 1, "t": 1.404, "type": "row_complete", "step": "classify", "row": 1, "key": "Globex", "status": "ok", "from_cache": false, "values": {"grade": "B"}, "error": null, "usage": {"in": 11, "out": 3, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost": null}, "elapsed_ms": 652.8}
 ```
 
 ### `row_complete` — per row, per step
@@ -140,8 +140,8 @@ A cell that is rate-limited once, then parses cleanly:
 | `status` | `string` | `"ok"`, `"error"`, or `"skipped"` (`run_if`/`skip_if`). |
 | `from_cache` | `bool` | Result served from the SQLite cache. |
 | `values` | `object \| null` | The row's output values, internal `__`-prefixed keys included — consumers filter those; the log stays complete. Non-JSON values (datetimes, etc.) degrade to strings; `NaN` / `±inf` become `null` (a bare `NaN` literal is not JSON). A value that cannot be encoded at all — non-string dict keys, a reference cycle — is replaced wholesale by `{"__unserializable__": true}` so the record is still emitted. `null` when the row errored or produced no values; skipped rows carry their skip-default values. |
-| `error` | `object \| null` | `{type, msg}` — exception class name and message, with known secret patterns redacted as `***REDACTED***`. `null` unless `status` is `"error"`. |
-| `usage` | `object \| null` | `{in, out, cost}` token usage for this row. `null` when unavailable: function steps, cache hits, skipped rows, and batch mode. |
+| `error` | `object \| null` | `{type, msg, retryable}` — exception class name and message, with known secret patterns redacted as `***REDACTED***`, and whether the error is [transient](#error-objects-and-retryable). `null` unless `status` is `"error"`. |
+| `usage` | `object \| null` | [Usage object](#usage-objects-and-cost) for this row. `null` when unavailable: function steps, cache hits, skipped rows, and batch mode. |
 | `elapsed_ms` | `float \| null` | Wall-clock milliseconds for this row (excludes queue/semaphore wait). `null` in batch mode. |
 
 ### `step_end` — per step, after all its rows
@@ -150,9 +150,10 @@ A cell that is rate-limited once, then parses cleanly:
 |-------|------|-------------|
 | `step` | `string` | Step name. |
 | `num_errors` | `int` | Row errors in this step. |
-| `usage` | `object` | `{in, out, cost}` aggregated over the step's rows. |
+| `usage` | `object` | [Usage object](#usage-objects-and-cost) aggregated over the step's rows. |
 | `elapsed_s` | `float` | Wall-clock seconds for the step. |
-| `batch_id` | `string \| null` | Provider batch job id (batch mode only). |
+| `batch_id` | `string \| null` | First provider batch job id (batch mode only). Kept for compatibility; read `batch_ids`. |
+| `batch_ids` | `array` | Every provider batch job id the step submitted, in submission order — several when the step's requests were [split by count or bytes](attachments.md#request-limits). `[]` for realtime steps and for a batch step that submitted nothing (every row cached, skipped or over-size). Additive within v1 (#169). |
 
 ### `pipeline_end` — once, always the last line
 
@@ -162,7 +163,7 @@ Fires even when the run errors.
 |-------|------|-------------|
 | `num_rows` | `int` | Rows processed. |
 | `total_errors` | `int` | Row errors across all steps. Equals the sum of `step_end.num_errors`. |
-| `cost` | `object` | `{in, out, cost}` aggregated over the whole run. |
+| `cost` | `object` | [Usage object](#usage-objects-and-cost) aggregated over the whole run. |
 | `elapsed_s` | `float` | Wall-clock seconds for the run. |
 
 ### `retry_start` / `retry_end` — a failed-only retry appended to the run
@@ -182,19 +183,38 @@ Fires even when the run errors.
 `retry_end` carries `pipeline_end`'s fields — `num_rows`, `total_errors`, `cost`, `elapsed_s` — plus `num_cells`. `total_errors` counts only the cells this retry executed; a cell that fails again appears as an ordinary `row_complete` with `status: "error"`.
 
 ```json
-{"v": 1, "t": 0.011385, "type": "pipeline_end", "num_rows": 12, "total_errors": 1, "cost": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.011243}
+{"v": 1, "t": 0.011385, "type": "pipeline_end", "num_rows": 12, "total_errors": 1, "cost": {"in": 0, "out": 0, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost": null}, "elapsed_s": 0.011243}
 {"v": 1, "t": 0.011385, "type": "retry_start", "run_id": "2026-08-20-080226-4f1c9a", "started_at": "2026-08-20T07:14:02.881904+00:00", "num_rows": 12, "num_cells": 1, "cells": [{"step": "score", "row": 7}]}
 {"v": 1, "t": 0.011502, "type": "step_start", "step": "score", "level": 1, "mode": "realtime", "num_rows": 1}
 {"v": 1, "t": 0.012219, "type": "row_complete", "step": "score", "row": 7, "key": "company-07", "status": "ok", "from_cache": false, "values": {"score": 70}, "error": null, "usage": null, "elapsed_ms": 0.281}
-{"v": 1, "t": 0.012884, "type": "step_end", "step": "score", "num_errors": 0, "usage": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.001204, "batch_id": null}
-{"v": 1, "t": 0.013001, "type": "retry_end", "num_rows": 12, "total_errors": 0, "cost": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.001616, "num_cells": 1}
+{"v": 1, "t": 0.012884, "type": "step_end", "step": "score", "num_errors": 0, "usage": {"in": 0, "out": 0, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost": null}, "elapsed_s": 0.001204, "batch_id": null, "batch_ids": []}
+{"v": 1, "t": 0.013001, "type": "retry_end", "num_rows": 12, "total_errors": 0, "cost": {"in": 0, "out": 0, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost": null}, "elapsed_s": 0.001616, "num_cells": 1}
 ```
 
 See the [checkpointing guide](caching.md#retrying-failed-cells) for what `retry_failed()` re-runs and what it reuses.
 
 ### Usage objects and `cost`
 
-Everywhere a `{in, out, cost}` object appears: `in` is prompt tokens, `out` is completion tokens, and `cost` is reserved for dollar cost. Accrue deliberately ships no model pricing data (see `compare.py`), so **current emitters always write `cost: null`** — consumers price the tokens themselves, and must tolerate a number appearing here from a future emitter.
+Everywhere a `{in, out, cache_read_tokens, cache_write_tokens, cost}` object appears (`row_complete.usage`, `step_end.usage`, `pipeline_end.cost`, `retry_end.cost`): `in` is prompt tokens, `out` is completion tokens, `cache_read_tokens` / `cache_write_tokens` are prompt-cache reads and writes, and `cost` is reserved for dollar cost. Accrue deliberately ships no model pricing data (see `compare.py`), so **current emitters always write `cost: null`** — consumers price the tokens themselves, and must tolerate a number appearing here from a future emitter.
+
+The cache counters (additive within v1, #169) are always ints, `0` when the provider reported none — never omitted, so a missing key means a log written before they existed. They are what makes a cost estimate right on a cached run: Anthropic bills 5-minute cache writes at 1.25x and reads at 0.1x the input rate. Which adapters fill them:
+
+| Adapter | `cache_read_tokens` | `cache_write_tokens` | Relation to `in` |
+|---------|---------------------|----------------------|------------------|
+| `AnthropicClient` | `cache_read_input_tokens` | `cache_creation_input_tokens` | Disjoint: `in` excludes both, so input billed = `in` + reads + writes. |
+| `OpenAIClient` | `0` (OpenAI's `cached_tokens` is not mapped yet) | `0` | — |
+| `GoogleClient` | `0` | `0` | — |
+
+A custom client reports whatever its `UsageInfo` carries.
+
+### Error objects and `retryable`
+
+`row_attempt.error` and `row_complete.error` are `{type, msg, retryable}`. `retryable` (additive within v1, #169) is accrue's verdict on whether the error is **transient** — whether sending the same request again, unchanged, could succeed. It is the `retryable` of the exception or of anything in its `__cause__` chain, which in practice is `LLMAPIError.retryable`:
+
+- `true` — rate limit (429), timeout (408), provider 5xx. A row whose API retries all ran out still reads `true`: its `StepError` is raised from the last API error.
+- `false` — everything else: a response truncated at `max_tokens`, a schema too complex for the provider to compile, a request over the size limit, other 4xx, a parse/validation failure that survived the self-correction retries, a function step raising. These fail the same way again until the step, its schema or the input changes.
+
+`retryable` says nothing about whether accrue *did* retry — read the `row_attempt` sequence for that. On a `parse` attempt it is `false` even though accrue goes on to re-ask the model: that loop corrects the output, it does not wait out a fault.
 
 ## Capture tiers
 
@@ -241,20 +261,20 @@ A 12-row, 3-step run — one row errors in `score`, one is skipped in `flag` (ab
 {"v": 1, "t": 0.0, "type": "pipeline_start", "run_id": "2026-08-20-080226-4f1c9a", "started_at": "2026-08-20T07:02:26.020167+00:00", "num_rows": 12, "display_key": "company", "steps": [{"name": "normalize", "level": 0, "mode": "realtime", "model": null}, {"name": "score", "level": 1, "mode": "realtime", "model": null}, {"name": "flag", "level": 2, "mode": "realtime", "model": null}], "manifest": {"accrue_version": "1.3.0", "config": {"max_workers": 1, "caching": false, "checkpointing": false, "batch": false, "capture": "metadata"}, "steps": [{"name": "normalize", "type": "FunctionStep", "model": null, "produces": ["name_upper"], "depends_on": [], "condition": null, "system_prompt": null}, {"name": "score", "type": "FunctionStep", "model": null, "produces": ["score"], "depends_on": ["normalize"], "condition": null, "system_prompt": null}, {"name": "flag", "type": "FunctionStep", "model": null, "produces": ["flagged"], "depends_on": ["score"], "condition": null, "system_prompt": null}], "fields": [{"name": "name_upper", "type": "unknown", "enum": null, "description": null, "step": "normalize", "internal": false}, {"name": "score", "type": "unknown", "enum": null, "description": null, "step": "score", "internal": false}, {"name": "flagged", "type": "unknown", "enum": null, "description": null, "step": "flag", "internal": false}]}, "plan": null}
 {"v": 1, "t": 0.00243, "type": "step_start", "step": "normalize", "level": 0, "mode": "realtime", "num_rows": 12}
 {"v": 1, "t": 0.003022, "type": "row_complete", "step": "normalize", "row": 0, "key": "company-00", "status": "ok", "from_cache": false, "values": {"name_upper": "COMPANY-00"}, "error": null, "usage": null, "elapsed_ms": 0.324}
-{"v": 1, "t": 0.005766, "type": "step_end", "step": "normalize", "num_errors": 0, "usage": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.003241, "batch_id": null}
+{"v": 1, "t": 0.005766, "type": "step_end", "step": "normalize", "num_errors": 0, "usage": {"in": 0, "out": 0, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost": null}, "elapsed_s": 0.003241, "batch_id": null, "batch_ids": []}
 {"v": 1, "t": 0.005797, "type": "step_start", "step": "score", "level": 1, "mode": "realtime", "num_rows": 12}
-{"v": 1, "t": 0.007665, "type": "row_complete", "step": "score", "row": 7, "key": "company-07", "status": "error", "from_cache": false, "values": null, "error": {"type": "ValueError", "msg": "cannot score company-07"}, "usage": null, "elapsed_ms": 0.214}
-{"v": 1, "t": 0.008748, "type": "step_end", "step": "score", "num_errors": 1, "usage": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.002896, "batch_id": null}
+{"v": 1, "t": 0.007665, "type": "row_complete", "step": "score", "row": 7, "key": "company-07", "status": "error", "from_cache": false, "values": null, "error": {"type": "ValueError", "msg": "cannot score company-07", "retryable": false}, "usage": null, "elapsed_ms": 0.214}
+{"v": 1, "t": 0.008748, "type": "step_end", "step": "score", "num_errors": 1, "usage": {"in": 0, "out": 0, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost": null}, "elapsed_s": 0.002896, "batch_id": null, "batch_ids": []}
 {"v": 1, "t": 0.008775, "type": "step_start", "step": "flag", "level": 2, "mode": "realtime", "num_rows": 12}
 {"v": 1, "t": 0.00968, "type": "row_complete", "step": "flag", "row": 3, "key": "company-03", "status": "skipped", "from_cache": false, "values": {"flagged": null}, "error": null, "usage": null, "elapsed_ms": 0.007}
-{"v": 1, "t": 0.011343, "type": "step_end", "step": "flag", "num_errors": 0, "usage": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.002512, "batch_id": null}
-{"v": 1, "t": 0.011385, "type": "pipeline_end", "num_rows": 12, "total_errors": 1, "cost": {"in": 0, "out": 0, "cost": null}, "elapsed_s": 0.011243}
+{"v": 1, "t": 0.011343, "type": "step_end", "step": "flag", "num_errors": 0, "usage": {"in": 0, "out": 0, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost": null}, "elapsed_s": 0.002512, "batch_id": null, "batch_ids": []}
+{"v": 1, "t": 0.011385, "type": "pipeline_end", "num_rows": 12, "total_errors": 1, "cost": {"in": 0, "out": 0, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost": null}, "elapsed_s": 0.011243}
 ```
 
 An LLM row looks like:
 
 ```json
-{"v": 1, "t": 3.412, "type": "row_complete", "step": "analyze", "row": 4, "key": "Initech", "status": "ok", "from_cache": false, "values": {"market_size": 12.5, "risk_level": "Low"}, "error": null, "usage": {"in": 512, "out": 64, "cost": null}, "elapsed_ms": 1841.2}
+{"v": 1, "t": 3.412, "type": "row_complete", "step": "analyze", "row": 4, "key": "Initech", "status": "ok", "from_cache": false, "values": {"market_size": 12.5, "risk_level": "Low"}, "error": null, "usage": {"in": 512, "out": 64, "cache_read_tokens": 0, "cache_write_tokens": 0, "cost": null}, "elapsed_ms": 1841.2}
 ```
 
 ## Guarantees

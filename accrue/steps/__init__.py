@@ -1,5 +1,6 @@
 """Composable pipeline steps for the Accrue enrichment engine."""
 
+from .attachments import Document
 from .base import Step, StepContext, StepResult
 from .function import FunctionStep
 from .llm import LLMStep
@@ -10,4 +11,5 @@ __all__ = [
     "StepResult",
     "FunctionStep",
     "LLMStep",
+    "Document",
 ]

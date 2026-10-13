@@ -13,7 +13,7 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from ..core.config import EnrichmentConfig
-from ..core.exceptions import PipelineError, RowError
+from ..core.exceptions import PipelineError, RowError, StepError
 from ..core.hooks import (
     EnrichmentHooks,
     PipelineEndEvent,
@@ -90,6 +90,31 @@ def _build_skip_values(step: Any) -> dict[str, Any]:
     return values
 
 
+def _record_row_status(
+    row_status: dict[str, list[str]],
+    step_name: str,
+    num_rows: int,
+    *,
+    ran: list[int] | None,
+    errored: set[int],
+    skipped: set[int],
+) -> None:
+    """Write the fresh outcome of the cells a step just executed into ``row_status``.
+
+    ``ran`` is the row subset a retry re-executed (``None`` = every row);
+    cells outside it keep whatever outcome ``row_status`` was seeded with.
+    """
+    cells = list(row_status.get(step_name) or ["ok"] * num_rows)
+    for idx in range(num_rows) if ran is None else ran:
+        if idx in errored:
+            cells[idx] = "error"
+        elif idx in skipped:
+            cells[idx] = "skipped"
+        else:
+            cells[idx] = "ok"
+    row_status[step_name] = cells
+
+
 def _dataset_columns(data: pd.DataFrame | list[dict[str, Any]]) -> list[Any]:
     """Column names of a DataFrame, or the first row's keys for ``list[dict]``.
 
@@ -99,6 +124,24 @@ def _dataset_columns(data: pd.DataFrame | list[dict[str, Any]]) -> list[Any]:
     if isinstance(data, pd.DataFrame):
         return list(data.columns)
     return list(data[0].keys()) if data else []
+
+
+def _result_column(values: list[Any], index: pd.Index) -> pd.Series:
+    """Build one enriched column, keeping a step's ``None`` as ``None``.
+
+    pandas 3 infers its ``str`` dtype for a column of strings, and that dtype
+    stores a missing value as ``NaN`` — so one row returning ``"x"`` turns
+    every other row's ``None`` into ``NaN``, which is truthy.  pandas 2 keeps
+    such a column as ``object`` with its ``None``s, and the ``list[dict]``
+    path never coerces at all.  Falling back to ``object`` exactly when the
+    ``str`` dtype would swallow a ``None`` makes the DataFrame output agree
+    across pandas versions and with the list path.  Numeric columns keep
+    their ``NaN`` (``[None, 3]`` is ``float64`` on both versions).
+    """
+    series = pd.Series(values, index=index)
+    if isinstance(series.dtype, pd.StringDtype) and any(v is None for v in values):
+        series = pd.Series(values, index=index, dtype=object)
+    return series
 
 
 def _merge_results_into_df(
@@ -113,7 +156,8 @@ def _merge_results_into_df(
     overwrite_fields: True => new value wins; False => existing non-null
                       DataFrame value wins.
     Filters out keys starting with "__" (internal fields).
-    Preserves df.index and untouched-column dtypes.
+    Preserves df.index and untouched-column dtypes, and keeps a step's
+    ``None`` as ``None`` in string columns (see :func:`_result_column`).
 
     Raises ValueError if df has duplicate column names.
     """
@@ -145,11 +189,9 @@ def _merge_results_into_df(
             if k in row_result:
                 new_cols[k][i] = row_result[k]
 
-    new_df = pd.DataFrame(new_cols, index=df.index)
-
     df_out = df.copy()
     for col in field_names:
-        new_series = new_df[col]
+        new_series = _result_column(new_cols[col], df.index)
         if col in df_out.columns and not overwrite_fields:
             # existing non-null, non-empty wins; use where to keep existing
             existing = df_out[col]
@@ -172,6 +214,17 @@ class PipelineResult:
         field_specs: Field-spec dicts collected from steps, used by
             :meth:`report` to drive heuristics (enum collapse, length
             anomaly, …).  Empty for FunctionStep-only pipelines.
+        row_status: How every ``(step, row)`` cell ended — a DataFrame with
+            one column per step (execution order), aligned to ``data``'s
+            index (a ``RangeIndex`` for ``list[dict]`` input).  Values are
+            ``"ok"`` (the step produced values, fresh or from cache or
+            checkpoint), ``"error"`` (it raised, or the checkpoint still
+            records it as failed), or ``"skipped"`` (``run_if`` /
+            ``skip_if``).  Covers the whole dataset, including after
+            :meth:`Pipeline.retry_failed`.  A row is trustworthy only when no
+            step errored — dependents still run on a failed upstream cell::
+
+                ok = ~result.row_status.eq("error").any(axis=1)
     """
 
     data: pd.DataFrame | list[dict[str, Any]]
@@ -180,6 +233,7 @@ class PipelineResult:
     pipeline_elapsed_seconds: float = 0.0
     step_elapsed_seconds: dict[str, float] = field(default_factory=dict)
     field_specs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    row_status: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     @property
     def success_rate(self) -> float:
@@ -809,8 +863,12 @@ class Pipeline:
             )
         prior_step_results: dict[str, list[dict[str, Any]]] | None = None
         retry_cells: dict[str, list[int]] | None = None
+        # Per-cell outcome, seeded with what the checkpoint recorded for the
+        # steps it already holds; execute() overwrites the cells it runs.
+        row_status: dict[str, list[str]] = {}
         if session is not None:
             prior_step_results = session.prior_step_results or None
+            row_status = session.prior_row_status(len(rows_data))
             # Resolve the requested cells into the work this run will really
             # do — dropping what has no prior result, adding the downstream
             # cells a healed value invalidates — before anything reports on
@@ -914,6 +972,7 @@ class Pipeline:
                 hooks=hooks,
                 retry_cells=retry_cells,
                 capture=capture,
+                row_status=row_status,
             )
         finally:
             if cache_manager is not None:
@@ -935,6 +994,11 @@ class Pipeline:
         if session is not None:
             session.finish()
 
+        status_index = data.index if not input_is_list else pd.RangeIndex(len(rows_data))
+        status_df = pd.DataFrame(
+            {name: row_status[name] for name in self.step_names}, index=status_index
+        )
+
         # Build output matching input type
         if input_is_list:
             result_rows: list[dict[str, Any]] = []
@@ -951,6 +1015,7 @@ class Pipeline:
                 pipeline_elapsed_seconds=elapsed,
                 step_elapsed_seconds=step_elapsed,
                 field_specs=all_fields,
+                row_status=status_df,
             )
         else:
             df_out = self._build_result_df(data, accumulated, config)
@@ -961,6 +1026,7 @@ class Pipeline:
                 pipeline_elapsed_seconds=elapsed,
                 step_elapsed_seconds=step_elapsed,
                 field_specs=all_fields,
+                row_status=status_df,
             )
 
         # Persist before returning so downstream user errors can't lose a
@@ -1252,6 +1318,7 @@ class Pipeline:
         hooks: EnrichmentHooks | None = None,
         retry_cells: dict[str, list[int]] | None = None,
         capture: str = "metadata",
+        row_status: dict[str, list[str]] | None = None,
     ) -> tuple[list[dict[str, Any]], list[RowError], CostSummary, dict[str, float]]:
         """Execute the pipeline across all rows (column-oriented).
 
@@ -1277,6 +1344,11 @@ class Pipeline:
                 broken one.  Every other row keeps its prior result without
                 re-invocation.  Steps absent from ``prior_step_results`` run
                 in full as usual.
+            row_status: Optional in/out mapping of step name to per-row
+                outcome (``"ok"`` / ``"error"`` / ``"skipped"``).  Seed it with
+                the recorded outcome of checkpointed steps; every cell this
+                call executes is overwritten with its fresh outcome, and a step
+                with no seed starts as all ``"ok"``.
 
         Returns:
             Tuple of (accumulated results, row errors, cost summary,
@@ -1400,6 +1472,15 @@ class Pipeline:
                     all_errors.extend(step_errors)
                     errors_by_step[step_name] = step_errors
                     step_elapsed[step_name] = elapsed_s
+                    if row_status is not None:
+                        _record_row_status(
+                            row_status,
+                            step_name,
+                            num_rows,
+                            ran=retry_map.get(step_name),
+                            errored={e.row_index for e in step_errors},
+                            skipped=skipped_by_step[step_name],
+                        )
                     if usage:
                         step_usage_map[step_name] = usage
 
@@ -1414,6 +1495,7 @@ class Pipeline:
                             elapsed_seconds=elapsed_s,
                             execution_mode=usage.execution_mode if usage else "realtime",
                             batch_id=usage.batch_id if usage else None,
+                            batch_ids=list(usage.batch_ids) if usage else [],
                         ),
                     )
 
@@ -1445,6 +1527,10 @@ class Pipeline:
                             break
 
         step_bar.close()
+
+        if row_status is not None:
+            for name in self.step_names:
+                row_status.setdefault(name, ["ok"] * num_rows)
 
         # Merge all step results in execution order
         accumulated: list[dict[str, Any]] = [{} for _ in range(num_rows)]
@@ -1879,6 +1965,12 @@ class Pipeline:
 
         from ..core.cache import _compute_step_cache_key
         from ..steps.providers.base import BatchRequest
+        from ..steps.providers.limits import (
+            chunk_by_size,
+            client_limit,
+            estimate_request_bytes,
+            oversize_error,
+        )
 
         hooks = hooks or EnrichmentHooks()
         step_start = _time.monotonic()
@@ -1909,13 +2001,21 @@ class Pipeline:
         poll_interval = 60.0
         batch_timeout = 86400.0
         batch_max_requests = 50000
+        batch_max_bytes: int | None = None
         if config is not None:
             poll_interval = config.batch_poll_interval
             batch_timeout = config.batch_timeout
             batch_max_requests = config.batch_max_requests
+            batch_max_bytes = config.batch_max_bytes
 
         # Get the batch-capable client
         client = step._resolve_client()
+
+        # Provider size limits: a batch item is a Messages request, so
+        # the per-request cap applies to it as well as the per-batch cap.
+        request_limit = client_limit(client, "max_request_bytes")
+        if batch_max_bytes is None:
+            batch_max_bytes = client_limit(client, "max_batch_bytes")
 
         row_bar = tqdm(
             total=len(target_rows),
@@ -1950,14 +2050,20 @@ class Pipeline:
             # Cache check
             cache_key = None
             if step_cache_enabled:
-                cache_key = _compute_step_cache_key(step, rows[idx], prior, step_fields)
-                cached = cache_manager.get(cache_key)
-                if cached is not None:
-                    cache_hits += 1
-                    row_from_cache[idx] = True
-                    results[idx] = cached
-                    row_bar.update(1)
-                    continue
+                try:
+                    cache_key = _compute_step_cache_key(step, rows[idx], prior, step_fields)
+                except StepError:
+                    # An unreadable attachment (#153): leave the row uncached so
+                    # Phase 2 records it as this row's error, not the step's.
+                    cache_key = None
+                if cache_key is not None:
+                    cached = cache_manager.get(cache_key)
+                    if cached is not None:
+                        cache_hits += 1
+                        row_from_cache[idx] = True
+                        results[idx] = cached
+                        row_bar.update(1)
+                        continue
 
             cache_keys[idx] = cache_key
             uncached_indices.append(idx)
@@ -2003,7 +2109,14 @@ class Pipeline:
             return errors, step_usage, elapsed
 
         # ── Phase 2: Build batch requests ──────────────────────────────
+        # Each request's size is estimated once and used for both the
+        # per-request preflight and byte-aware chunking.  An oversize row
+        # fails here on its own — it never reaches a batch it would sink.
         batch_requests: list[BatchRequest] = []
+        request_sizes: list[int] = []
+        # Rows that fail before submission: unbuildable request (#153) or
+        # over the request/batch size limit (#159).
+        request_failed: set[int] = set()
         for idx in uncached_indices:
             prior: dict[str, Any] = {}
             for dep_name in step.depends_on:
@@ -2016,7 +2129,40 @@ class Pipeline:
                 prior_results=prior,
                 config=config,
             )
-            messages, call_kwargs = step.build_messages(ctx)
+            try:
+                messages, call_kwargs = step.build_messages(ctx)
+            except StepError as exc:
+                # A row whose request cannot be built (e.g. an unreadable
+                # attachment, #153) fails alone, before anything is submitted,
+                # instead of aborting the whole step.
+                logger.warning("Row %d failed in step '%s': %s", idx, step.name, exc)
+                errors.append(RowError(row_index=idx, step_name=step.name, error=exc))
+                results[idx] = {f: None for f in step.fields}
+                request_failed.add(idx)
+                row_bar.update(1)
+                if on_error == "raise":
+                    step_values[step.name] = results
+                    row_bar.close()
+                    raise
+                continue
+            size = estimate_request_bytes(messages, **call_kwargs)
+            limit_hit = None
+            if request_limit is not None and size > request_limit:
+                limit_hit = oversize_error(step.name, size, request_limit, scope="request")
+            elif batch_max_bytes is not None and size > batch_max_bytes:
+                limit_hit = oversize_error(step.name, size, batch_max_bytes, scope="batch")
+            if limit_hit is not None:
+                logger.warning("Step '%s' row %d: %s", step.name, idx, limit_hit)
+                errors.append(RowError(row_index=idx, step_name=step.name, error=limit_hit))
+                results[idx] = {f: None for f in step.fields}
+                request_failed.add(idx)
+                row_bar.update(1)
+                if on_error == "raise":
+                    step_values[step.name] = results
+                    row_bar.close()
+                    raise limit_hit
+                continue
+            request_sizes.append(size)
             batch_requests.append(
                 BatchRequest(
                     custom_id=f"row-{idx}",
@@ -2030,6 +2176,9 @@ class Pipeline:
                 )
             )
 
+        if request_failed:
+            uncached_indices = [i for i in uncached_indices if i not in request_failed]
+
         logger.info(
             "Step '%s': batch mode — %d uncached, %d cached, %d skipped",
             step.name,
@@ -2039,17 +2188,21 @@ class Pipeline:
         )
 
         # ── Phase 3: Auto-chunk and submit ─────────────────────────────
-        chunks = [
-            batch_requests[i : i + batch_max_requests]
-            for i in range(0, len(batch_requests), batch_max_requests)
-        ]
+        chunks = chunk_by_size(
+            batch_requests,
+            request_sizes,
+            max_count=batch_max_requests,
+            max_bytes=batch_max_bytes,
+        )
         if len(chunks) > 1:
             logger.info(
-                "Step '%s': auto-chunking %d requests into %d batches (max %d per batch)",
+                "Step '%s': auto-chunking %d requests into %d batches "
+                "(max %d requests / %s bytes per batch)",
                 step.name,
                 len(batch_requests),
                 len(chunks),
                 batch_max_requests,
+                f"{batch_max_bytes:,}" if batch_max_bytes is not None else "unlimited",
             )
 
         batch_ids: list[str] = []
@@ -2246,6 +2399,7 @@ class Pipeline:
                 cache_misses=cache_misses,
                 execution_mode="batch",
                 batch_id=primary_batch_id,
+                batch_ids=list(batch_ids),
             )
 
         elapsed = _time.monotonic() - step_start

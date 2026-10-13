@@ -32,6 +32,7 @@ result = pipeline.run(data, config=config)
 | `batch_poll_interval` | `60.0` | Seconds between batch status checks |
 | `batch_timeout` | `86400.0` | Max batch wait time (default 24h) |
 | `batch_max_requests` | `50000` | Auto-chunk threshold for batch submissions |
+| `batch_max_bytes` | `None` | Byte threshold for batch submissions (`None` = provider default) |
 
 ## Presets
 
@@ -174,7 +175,7 @@ declared enum member. For run-level diagnosis reach for `result.report()` and
 `EnrichmentConfig` validates all fields on construction:
 
 - `temperature` must be between 0.0 and 2.0.
-- `max_tokens`, `max_workers`, `batch_poll_interval`, `batch_timeout`, and `batch_max_requests` must be positive.
+- `max_tokens`, `max_workers`, `batch_poll_interval`, `batch_timeout`, and `batch_max_requests` must be positive; `batch_max_bytes` must be positive when set.
 - `max_retries`, `cache_ttl`, and `checkpoint_interval` must be non-negative.
 
 Invalid values raise `ValueError` immediately.

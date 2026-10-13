@@ -420,7 +420,11 @@ class TestPermanentFailure:
         errored = [r for r in segment if r["type"] == "row_complete" and r["status"] == "error"]
         assert len(errored) == 1
         assert errored[0]["row"] == 2
-        assert errored[0]["error"] == {"type": "ValueError", "msg": "cannot score row 2"}
+        assert errored[0]["error"] == {
+            "type": "ValueError",
+            "msg": "cannot score row 2",
+            "retryable": False,
+        }
         assert segment[-1]["type"] == "retry_end"
         assert segment[-1]["total_errors"] == 1
 

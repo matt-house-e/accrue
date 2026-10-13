@@ -84,6 +84,117 @@ def build_json_schema(field_specs: dict[str, FieldSpec]) -> dict[str, Any]:
     }
 
 
+def build_json_schema_from_model(model: type[BaseModel]) -> dict[str, Any]:
+    """Build a strict ``response_format`` dict from a user-supplied Pydantic model.
+
+    Strict structured outputs require ``additionalProperties: false`` on *every*
+    object in the schema, not just the top level — nested models land in
+    ``$defs`` and would otherwise be rejected by the provider.
+
+    Args:
+        model: Any ``BaseModel`` subclass (a custom ``schema=`` on an LLMStep).
+
+    Returns:
+        ``{"type": "json_schema", "json_schema": {"name": ..., "schema": ..., "strict": True}}``
+    """
+    schema = model.model_json_schema()
+    _strictify(schema)
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": model.__name__,
+            "schema": schema,
+            "strict": True,
+        },
+    }
+
+
+def describe_from_specs(
+    model: type[BaseModel],
+    field_specs: dict[str, FieldSpec | str | dict[str, Any]],
+) -> type[BaseModel]:
+    """Return ``model`` with each field spec's prompt written into its property description.
+
+    With ``LLMStep(schema=..., structured_outputs=True)`` the constrained decoder
+    reads the JSON schema ``description`` next to each value, and a custom schema
+    does not get the spec text automatically.  This is the opt-in fix: every
+    top-level field whose name matches a spec gets the same description
+    ``build_json_schema`` would have written (prompt, format, examples).
+
+    A field that already carries a description containing the spec's prompt is left
+    alone; otherwise its description is set (an existing unrelated description is
+    replaced).  The input model is not modified: a subclass with the same name is
+    returned.  Names with no matching field are ignored.
+    """
+    from pydantic.fields import FieldInfo
+
+    overrides: dict[str, Any] = {}
+    for name, raw in field_specs.items():
+        info = model.model_fields.get(name)
+        if info is None:
+            continue
+        spec = (
+            raw
+            if isinstance(raw, FieldSpec)
+            else (FieldSpec(prompt=raw) if isinstance(raw, str) else FieldSpec.model_validate(raw))
+        )
+        if info.description and spec.prompt in info.description:
+            continue
+        merged = FieldInfo.merge_field_infos(info, description=_build_description(spec))
+        overrides[name] = (info.annotation, merged)
+
+    if not overrides:
+        return model
+    return create_model(model.__name__, __base__=model, __module__=model.__module__, **overrides)
+
+
+def undescribed_fields(
+    model: type[BaseModel],
+    field_specs: dict[str, FieldSpec],
+) -> list[str]:
+    """Top-level properties of ``model`` matching a spec whose schema description
+    is missing or does not contain the spec's prompt."""
+    properties = model.model_json_schema().get("properties", {})
+    missing: list[str] = []
+    for name, spec in field_specs.items():
+        prop = properties.get(name)
+        if prop is None:
+            continue
+        description = prop.get("description") or ""
+        if spec.prompt not in description:
+            missing.append(name)
+    return missing
+
+
+def _strictify(node: Any) -> None:
+    """Recursively set ``additionalProperties: false`` on every object node."""
+    if isinstance(node, list):
+        for item in node:
+            _strictify(item)
+        return
+    if not isinstance(node, dict):
+        return
+
+    if node.get("type") == "object" or "properties" in node:
+        if isinstance(node.get("additionalProperties"), dict):
+            # A dict[str, X] field.  Forcing it to false would make the
+            # provider decode it as an always-empty object — a silent drop.
+            # Leave it for the provider to accept or reject loudly.
+            _strictify(node["additionalProperties"])
+        else:
+            node["additionalProperties"] = False
+
+    for key in ("properties", "$defs", "definitions", "patternProperties"):
+        sub = node.get(key)
+        if isinstance(sub, dict):
+            for value in sub.values():
+                _strictify(value)
+
+    for key in ("items", "prefixItems", "anyOf", "oneOf", "allOf", "additionalItems", "not"):
+        if key in node:
+            _strictify(node[key])
+
+
 def _resolve_type(spec: FieldSpec) -> type:
     """Map a FieldSpec to a Python type annotation.
 
