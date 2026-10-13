@@ -153,6 +153,8 @@ accrue watch                                                # opens the latest r
 
 - **Web search and grounding** -- `web_search()` factory for search-then-analyze pipelines, or `grounding=True` for native provider web search with normalized citations. [Web search guide](docs/guides/web-search.md)
 
+- **Attachments** -- `LLMStep(attachments="documents")` sends each row's PDFs to the model as document blocks instead of making you extract the text first. Cached by content, placeholdered in run logs. Anthropic today. [Attachments guide](docs/guides/attachments.md)
+
 - **Conditional steps** -- `run_if` / `skip_if` predicates for per-row branching. Skipped rows get defaults, never hit the API. [Conditional steps guide](docs/guides/conditional-steps.md)
 
 - **Hooks** -- Typed lifecycle events for observability. Sync and async callables, never crash the pipeline. [Hooks guide](docs/guides/hooks.md)
@@ -182,7 +184,7 @@ With `batch=True`, halve the API costs. Cached steps re-run in seconds.
 |---------|-------------|
 | [Getting Started](docs/getting-started/quickstart.md) | Installation, first pipeline, core concepts |
 | [Claude Code Skill](docs/getting-started/claude-code-skill.md) | Interactive pipeline builder via `/accrue` |
-| [Guides](docs/guides/) | Field specs, providers, caching, batch API, grounding, hooks, run logs, errors, configuration |
+| [Guides](docs/guides/) | Field specs, providers, caching, batch API, grounding, attachments, hooks, run logs, errors, configuration |
 | [Cookbook](docs/cookbook/) | End-to-end examples: [company enrichment](docs/cookbook/company-enrichment.md), [lead scoring](docs/cookbook/lead-scoring.md), [content analysis](docs/cookbook/content-analysis.md), [batch processing](docs/cookbook/batch-processing.md) |
 | [API Reference](docs/reference/api.md) | Complete reference for every public export |
 

@@ -84,6 +84,60 @@ def build_json_schema(field_specs: dict[str, FieldSpec]) -> dict[str, Any]:
     }
 
 
+def build_json_schema_from_model(model: type[BaseModel]) -> dict[str, Any]:
+    """Build a strict ``response_format`` dict from a user-supplied Pydantic model.
+
+    Strict structured outputs require ``additionalProperties: false`` on *every*
+    object in the schema, not just the top level — nested models land in
+    ``$defs`` and would otherwise be rejected by the provider.
+
+    Args:
+        model: Any ``BaseModel`` subclass (a custom ``schema=`` on an LLMStep).
+
+    Returns:
+        ``{"type": "json_schema", "json_schema": {"name": ..., "schema": ..., "strict": True}}``
+    """
+    schema = model.model_json_schema()
+    _strictify(schema)
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": model.__name__,
+            "schema": schema,
+            "strict": True,
+        },
+    }
+
+
+def _strictify(node: Any) -> None:
+    """Recursively set ``additionalProperties: false`` on every object node."""
+    if isinstance(node, list):
+        for item in node:
+            _strictify(item)
+        return
+    if not isinstance(node, dict):
+        return
+
+    if node.get("type") == "object" or "properties" in node:
+        if isinstance(node.get("additionalProperties"), dict):
+            # A dict[str, X] field.  Forcing it to false would make the
+            # provider decode it as an always-empty object — a silent drop.
+            # Leave it for the provider to accept or reject loudly.
+            _strictify(node["additionalProperties"])
+        else:
+            node["additionalProperties"] = False
+
+    for key in ("properties", "$defs", "definitions", "patternProperties"):
+        sub = node.get(key)
+        if isinstance(sub, dict):
+            for value in sub.values():
+                _strictify(value)
+
+    for key in ("items", "prefixItems", "anyOf", "oneOf", "allOf", "additionalItems", "not"):
+        if key in node:
+            _strictify(node[key])
+
+
 def _resolve_type(spec: FieldSpec) -> type:
     """Map a FieldSpec to a Python type annotation.
 

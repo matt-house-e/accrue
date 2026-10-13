@@ -516,3 +516,52 @@ class TestAnthropicGroundingSchemaWarning:
         assert any("grounding" in msg and "structured output" in msg for msg in warning_messages), (
             f"Expected grounding+schema warning, got: {warning_messages}"
         )
+
+
+# -- attachments in batch params (#153) --------------------------------------
+
+
+class TestBatchAttachments:
+    @pytest.mark.asyncio
+    async def test_submit_batch_converts_document_blocks(self):
+        import base64
+
+        from accrue.steps.providers.anthropic import AnthropicClient
+
+        pdf = b"%PDF-1.4 batch"
+        req = BatchRequest(
+            custom_id="row-0",
+            messages=[
+                {"role": "system", "content": "sys"},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "document",
+                            "media_type": "application/pdf",
+                            "data": pdf,
+                            "title": "b.pdf",
+                        },
+                        {"type": "text", "text": "Analyse."},
+                    ],
+                },
+            ],
+            model="claude-sonnet-4-20250514",
+            temperature=0.2,
+            max_tokens=4000,
+        )
+
+        client = AnthropicClient(api_key="test")
+        mock_inner = MagicMock()
+        mock_inner.messages.batches.create = AsyncMock(return_value=SimpleNamespace(id="batch_1"))
+        client._client = mock_inner
+
+        await client.submit_batch([req])
+
+        sent = mock_inner.messages.batches.create.call_args.kwargs["requests"]
+        blocks = sent[0]["params"]["messages"][0]["content"]
+        assert blocks[0]["type"] == "document"
+        assert blocks[0]["source"]["data"] == base64.standard_b64encode(pdf).decode("ascii")
+        assert blocks[0]["source"]["media_type"] == "application/pdf"
+        assert blocks[0]["title"] == "b.pdf"
+        assert blocks[1] == {"type": "text", "text": "Analyse."}

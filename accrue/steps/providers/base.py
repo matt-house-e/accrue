@@ -230,3 +230,47 @@ def is_batch_capable(client: Any) -> bool:
     if not isinstance(client, BatchCapableLLMClient):
         return False
     return bool(getattr(client, "supports_batch", True))
+
+
+# ---------------------------------------------------------------------------
+# Attachments (#153)
+# ---------------------------------------------------------------------------
+
+
+def has_document_blocks(messages: list[dict[str, Any]]) -> bool:
+    """True when any message carries a ``{"type": "document"}`` content block.
+
+    Args:
+        messages: Chat messages in accrue's neutral format.  A message's
+            ``content`` is either a plain string or a list of content blocks.
+
+    Returns:
+        ``True`` if at least one document block is present.
+    """
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "document":
+                return True
+    return False
+
+
+def reject_document_blocks(messages: list[dict[str, Any]], provider: str) -> None:
+    """Raise if *messages* carry attachments and *provider* cannot send them.
+
+    Args:
+        messages: Chat messages in accrue's neutral format.
+        provider: Adapter class name, used in the error message.
+
+    Raises:
+        StepError: When a document block is present.
+    """
+    if has_document_blocks(messages):
+        # Late import: keeps this module free of a package-level import cycle.
+        from ...core.exceptions import StepError  # noqa: PLC0415
+
+        raise StepError(
+            f"{provider} does not support attachments= yet; use AnthropicClient (claude-* models)"
+        )
