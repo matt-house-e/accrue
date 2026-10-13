@@ -21,6 +21,7 @@ fabricate a value it cannot read.  Schema stays run-log **v1** (additive).
 
 from __future__ import annotations
 
+import dataclasses
 import enum as _enum
 import types as _types
 import typing
@@ -329,9 +330,9 @@ def _annotation_to_type(annotation: Any) -> tuple[str, list[str] | None]:
 
     Handles ``Optional[X]`` / ``X | None`` (unwrapped to X), ``Literal[...]``
     and ``enum.Enum`` subclasses (→ ``"enum"`` with members), list-like
-    containers (→ ``"list"``, whatever the item type), nested Pydantic models
-    and ``dict`` (→ ``"object"``), and the scalar types.  Unrecognised
-    annotations → ``"unknown"``.
+    containers (→ ``"list"``, whatever the item type), nested objects (a
+    Pydantic model, dataclass, ``dict`` or ``TypedDict`` → ``"object"``), and
+    the scalar types.  Unrecognised annotations → ``"unknown"``.
     """
     origin = typing.get_origin(annotation)
     args = typing.get_args(annotation)
@@ -351,9 +352,14 @@ def _annotation_to_type(annotation: Any) -> tuple[str, list[str] | None]:
 
     if origin in (list, tuple, set, frozenset) or annotation in (list, tuple, set, frozenset):
         return "list", None
-    if origin is dict or annotation is dict:
+    # Nested objects.  ``issubclass(.., dict)`` also catches a ``TypedDict``,
+    # whose runtime base is ``dict``.  A shape missed here maps to "unknown",
+    # and a step with a field spec then reports the spec's default ``String``.
+    if origin is dict:
         return "object", None
-    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+    if isinstance(annotation, type) and (
+        issubclass(annotation, (dict, BaseModel)) or dataclasses.is_dataclass(annotation)
+    ):
         return "object", None
 
     # ``bool`` before ``int`` — ``bool`` is a subclass of ``int``.  Identity

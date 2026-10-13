@@ -12,6 +12,7 @@ LLM steps are never executed, only introspected.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import warnings
 from pathlib import Path
@@ -19,6 +20,10 @@ from typing import Literal
 
 import pytest
 from pydantic import BaseModel, Field
+
+# Pydantic rejects ``typing.TypedDict`` on Python < 3.12; typing_extensions is
+# one of its own dependencies.
+from typing_extensions import TypedDict
 
 import accrue
 from accrue import EnrichmentConfig, FunctionStep, Pipeline
@@ -324,6 +329,17 @@ class _Sourced(BaseModel):
     source: str
 
 
+class _SourcedTD(TypedDict):
+    value: str
+    source: str
+
+
+@dataclasses.dataclass
+class _SourcedDC:
+    value: str
+    source: str
+
+
 class _SourcedSchema(BaseModel):
     """amana's shape (#170): every field a nested ``{value, source}`` object."""
 
@@ -331,6 +347,8 @@ class _SourcedSchema(BaseModel):
     notice: _Sourced | None = None
     clauses: list[_Sourced]
     extra: dict[str, str]
+    term_td: _SourcedTD
+    term_dc: _SourcedDC
     owner: str
     either: int | str
     status: str
@@ -348,6 +366,8 @@ class TestManifestCustomSchemaTypes:
                 "notice": "Notice period.",
                 "clauses": "Key clauses.",
                 "extra": "Anything else.",
+                "term_td": "Contract term.",
+                "term_dc": "Contract term.",
                 "owner": "Contract owner.",
                 "either": {"prompt": "Either.", "type": "Number"},
                 "status": {"prompt": "Status.", "enum": ["active", "expired"]},
@@ -371,6 +391,13 @@ class TestManifestCustomSchemaTypes:
 
     def test_dict_is_object(self):
         assert self._fields()["extra"]["type"] == "object"
+
+    def test_typeddict_and_dataclass_are_object(self):
+        # Not BaseModels, but nested objects all the same: neither may fall
+        # back to the shorthand spec's default String.
+        fields = self._fields()
+        assert fields["term_td"]["type"] == "object"
+        assert fields["term_dc"]["type"] == "object"
 
     def test_scalar_annotation_still_maps(self):
         assert self._fields()["owner"]["type"] == "str"
