@@ -1079,9 +1079,19 @@ class TestLLMStepAttachments:
         messages, _ = step.build_messages(ctx)
         assert isinstance(messages[1]["content"], str)
 
-    def test_missing_column_keeps_string_content(self):
+    def test_missing_column_raises(self):
+        # A misspelt column must not silently send every row without its
+        # documents (review of #156).
+        from accrue.core.exceptions import StepError
+
         step = LLMStep(name="llm", fields={"f1": "test"}, attachments="documents")
-        messages, _ = step.build_messages(_make_ctx())
+        with pytest.raises(StepError, match="attachments column 'documents'"):
+            step.build_messages(_make_ctx())
+
+    def test_column_present_but_none_keeps_string_content(self):
+        step = LLMStep(name="llm", fields={"f1": "test"}, attachments="documents")
+        ctx = _make_ctx(row={"company": "Acme", "documents": None})
+        messages, _ = step.build_messages(ctx)
         assert isinstance(messages[1]["content"], str)
 
     def test_without_attachments_param_column_stays_in_row_data(self):

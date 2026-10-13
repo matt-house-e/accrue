@@ -558,3 +558,57 @@ class TestBatchCancellationCleanup:
         assert "orphaned" in caplog.text.lower() or "billable" in caplog.text.lower(), (
             "A warning about orphaned/billable batches must be logged when cancel fails"
         )
+
+
+# -- Attachments on the batch path (#153) --------------------------------------
+
+
+class TestBatchUnbuildableRow:
+    """A row whose request cannot be built fails alone, before submission."""
+
+    @staticmethod
+    def _rows(tmp_path):
+        good = tmp_path / "good.pdf"
+        good.write_bytes(b"%PDF-good")
+        return [
+            {"company": "Acme", "documents": str(good)},
+            {"company": "Beta", "documents": str(tmp_path / "missing.pdf")},
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("caching", [True, False])
+    async def test_missing_attachment_is_a_row_error(self, tmp_path, caching):
+        client = _make_batch_client(responses={"row-0": '{"market_size": "$5B"}'})
+        step = _make_batch_step(client=client, attachments="documents")
+        config = EnrichmentConfig(enable_caching=caching, cache_dir=str(tmp_path / "cache"))
+
+        result = await Pipeline([step]).run_async(self._rows(tmp_path), config=config)
+
+        submitted = client.submit_batch.call_args.args[0]
+        assert [r.custom_id for r in submitted] == ["row-0"]
+        assert [e.row_index for e in result.errors] == [1]
+        assert isinstance(result.errors[0].error, StepError)
+        assert result.data[0]["market_size"] == "$5B"
+        client.complete.assert_not_called()  # no realtime retry of the bad row
+
+    @pytest.mark.asyncio
+    async def test_on_error_raise_aborts_before_submit(self, tmp_path):
+        client = _make_batch_client(responses={"row-0": '{"market_size": "$5B"}'})
+        step = _make_batch_step(client=client, attachments="documents")
+        config = EnrichmentConfig(enable_caching=False, on_error="raise")
+
+        with pytest.raises(StepError, match="could not be read"):
+            await Pipeline([step]).run_async(self._rows(tmp_path), config=config)
+        client.submit_batch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_every_row_unbuildable_submits_nothing(self, tmp_path):
+        client = _make_batch_client()
+        step = _make_batch_step(client=client, attachments="documents")
+        rows = [{"company": "Beta", "documents": str(tmp_path / "missing.pdf")}]
+
+        result = await Pipeline([step]).run_async(
+            rows, config=EnrichmentConfig(enable_caching=False)
+        )
+        client.submit_batch.assert_not_called()
+        assert [e.row_index for e in result.errors] == [0]
