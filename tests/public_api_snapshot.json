@@ -34,6 +34,7 @@
       "StepResult",
       "StepStartEvent",
       "compare",
+      "describe_from_specs",
       "is_batch_capable",
       "read_prompt_ref",
       "setup_logging",
@@ -496,6 +497,10 @@
       "compare": {
         "kind": "function",
         "signature": "(a: PipelineResult, b: PipelineResult, *, label_a: str = 'A', label_b: str = 'B') -> ComparisonResult"
+      },
+      "describe_from_specs": {
+        "kind": "function",
+        "signature": "(model: type[BaseModel], field_specs: dict[str, FieldSpec | str | dict[str, Any]]) -> type[BaseModel]"
       },
       "is_batch_capable": {
         "kind": "function",
