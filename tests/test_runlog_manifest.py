@@ -341,7 +341,8 @@ class _SourcedDC:
 
 
 class _SourcedSchema(BaseModel):
-    """amana's shape (#170): every field a nested ``{value, source}`` object."""
+    """amana's nested ``{value, source}`` fields (#170), beside the annotations
+    that have to share the field with a spec (scalar, ``Union``, ``Literal``)."""
 
     term: _Sourced
     notice: _Sourced | None = None
@@ -349,9 +350,11 @@ class _SourcedSchema(BaseModel):
     extra: dict[str, str]
     term_td: _SourcedTD
     term_dc: _SourcedDC
+    kind: _Sourced
     owner: str
     either: int | str
     status: str
+    tier: Literal["gold", "silver"]
 
 
 class TestManifestCustomSchemaTypes:
@@ -368,9 +371,11 @@ class TestManifestCustomSchemaTypes:
                 "extra": "Anything else.",
                 "term_td": "Contract term.",
                 "term_dc": "Contract term.",
+                "kind": {"prompt": "Contract kind.", "enum": ["lease", "service"]},
                 "owner": "Contract owner.",
                 "either": {"prompt": "Either.", "type": "Number"},
                 "status": {"prompt": "Status.", "enum": ["active", "expired"]},
+                "tier": "Customer tier.",
             },
             schema=_SourcedSchema,
             model="gpt-4.1-mini",
@@ -398,6 +403,20 @@ class TestManifestCustomSchemaTypes:
         fields = self._fields()
         assert fields["term_td"]["type"] == "object"
         assert fields["term_dc"]["type"] == "object"
+
+    def test_spec_enum_kept_on_a_nested_model(self):
+        # amana's enum fields: the options constrain the inner ``value``, so the
+        # field is still an object, and the options still reach the Overview.
+        kind = self._fields()["kind"]
+        assert kind["type"] == "object"
+        assert kind["enum"] == ["lease", "service"]
+        assert kind["description"] == "Contract kind."
+
+    def test_literal_annotation_supplies_the_enum_under_a_plain_spec(self):
+        tier = self._fields()["tier"]
+        assert tier["type"] == "enum"
+        assert tier["enum"] == ["gold", "silver"]
+        assert tier["description"] == "Customer tier."
 
     def test_scalar_annotation_still_maps(self):
         assert self._fields()["owner"]["type"] == "str"
