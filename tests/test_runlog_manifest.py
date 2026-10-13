@@ -12,6 +12,7 @@ LLM steps are never executed, only introspected.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import warnings
 from pathlib import Path
@@ -19,6 +20,10 @@ from typing import Literal
 
 import pytest
 from pydantic import BaseModel, Field
+
+# Pydantic rejects ``typing.TypedDict`` on Python < 3.12; typing_extensions is
+# one of its own dependencies.
+from typing_extensions import TypedDict
 
 import accrue
 from accrue import EnrichmentConfig, FunctionStep, Pipeline
@@ -317,6 +322,160 @@ class TestManifestFields:
         p = Pipeline([LLMStep("s", fields=["note"], model="gpt-4.1-mini")])
         fields = _fields_by_name(build_manifest(p, EnrichmentConfig(), "metadata"))
         assert fields["note"]["type"] == "unknown"
+
+
+class _Sourced(BaseModel):
+    value: str
+    source: str
+
+
+class _SourcedTD(TypedDict):
+    value: str
+    source: str
+
+
+@dataclasses.dataclass
+class _SourcedDC:
+    value: str
+    source: str
+
+
+class _SourcedSchema(BaseModel):
+    """amana's nested ``{value, source}`` fields (#170), beside the annotations
+    that have to share the field with a spec (scalar, ``Union``, ``Literal``)."""
+
+    term: _Sourced
+    notice: _Sourced | None = None
+    clauses: list[_Sourced]
+    extra: dict[str, str]
+    term_td: _SourcedTD
+    term_dc: _SourcedDC
+    kind: _Sourced
+    owner: str
+    either: int | str
+    status: str
+    tier: Literal["gold", "silver"]
+
+
+class TestManifestCustomSchemaTypes:
+    """A custom ``schema=`` owns the field type; the field spec keeps enum + description (#170)."""
+
+    @staticmethod
+    def _fields() -> dict[str, dict]:
+        step = LLMStep(
+            "extract",
+            fields={
+                "term": "Contract term.",
+                "notice": "Notice period.",
+                "clauses": "Key clauses.",
+                "extra": "Anything else.",
+                "term_td": "Contract term.",
+                "term_dc": "Contract term.",
+                "kind": {"prompt": "Contract kind.", "enum": ["lease", "service"]},
+                "owner": "Contract owner.",
+                "either": {"prompt": "Either.", "type": "Number"},
+                "status": {"prompt": "Status.", "enum": ["active", "expired"]},
+                "tier": "Customer tier.",
+            },
+            schema=_SourcedSchema,
+            model="gpt-4.1-mini",
+        )
+        return _fields_by_name(build_manifest(Pipeline([step]), EnrichmentConfig(), "metadata"))
+
+    def test_nested_model_is_object_not_the_spec_string(self):
+        term = self._fields()["term"]
+        assert term["type"] == "object"
+        assert term["enum"] is None
+        assert term["description"] == "Contract term."
+
+    def test_optional_nested_model_is_object(self):
+        assert self._fields()["notice"]["type"] == "object"
+
+    def test_list_of_models_is_list(self):
+        assert self._fields()["clauses"]["type"] == "list"
+
+    def test_dict_is_object(self):
+        assert self._fields()["extra"]["type"] == "object"
+
+    def test_typeddict_and_dataclass_are_object(self):
+        # Not BaseModels, but nested objects all the same: neither may fall
+        # back to the shorthand spec's default String.
+        fields = self._fields()
+        assert fields["term_td"]["type"] == "object"
+        assert fields["term_dc"]["type"] == "object"
+
+    def test_spec_enum_kept_on_a_nested_model(self):
+        # amana's enum fields: the options constrain the inner ``value``, so the
+        # field is still an object, and the options still reach the Overview.
+        kind = self._fields()["kind"]
+        assert kind["type"] == "object"
+        assert kind["enum"] == ["lease", "service"]
+        assert kind["description"] == "Contract kind."
+
+    def test_literal_annotation_supplies_the_enum_under_a_plain_spec(self):
+        tier = self._fields()["tier"]
+        assert tier["type"] == "enum"
+        assert tier["enum"] == ["gold", "silver"]
+        assert tier["description"] == "Customer tier."
+
+    def test_scalar_annotation_still_maps(self):
+        assert self._fields()["owner"]["type"] == "str"
+
+    def test_unknown_annotation_falls_back_to_the_spec_type(self):
+        # A multi-arm Union says less than the spec does.
+        assert self._fields()["either"]["type"] == "float"
+
+    def test_spec_enum_kept_on_a_str_annotation(self):
+        status = self._fields()["status"]
+        assert status["type"] == "enum"
+        assert status["enum"] == ["active", "expired"]
+        assert status["description"] == "Status."
+
+    def test_schema_only_nested_model_uses_the_pydantic_description(self):
+        class _Described(BaseModel):
+            term: _Sourced = Field(description="Term with its source.")
+
+        step = LLMStep("s", fields=["term"], schema=_Described, model="gpt-4.1-mini")
+        fields = _fields_by_name(build_manifest(Pipeline([step]), EnrichmentConfig(), "metadata"))
+        assert fields["term"]["type"] == "object"
+        assert fields["term"]["description"] == "Term with its source."
+
+    def test_plain_fieldspec_step_is_unchanged(self):
+        # No custom schema → exactly what the manifest reported before #170.
+        step = LLMStep(
+            "classify",
+            fields={
+                "category": "One short industry category.",
+                "icp_fit": {"prompt": "Fit as a customer.", "enum": ["strong", "good", "weak"]},
+                "employees": {"prompt": "Headcount.", "type": "Number"},
+                "public": {"prompt": "Listed?", "type": "Boolean"},
+                "tags": {"prompt": "Tags.", "type": "List[String]"},
+                "meta": {"prompt": "Extra.", "type": "JSON"},
+                "founded": {"prompt": "Founding date.", "type": "Date"},
+            },
+            model="gpt-4.1-mini",
+        )
+        manifest = build_manifest(Pipeline([step]), EnrichmentConfig(), "metadata")
+        expected = [
+            ("category", "str", None, "One short industry category."),
+            ("icp_fit", "enum", ["strong", "good", "weak"], "Fit as a customer."),
+            ("employees", "float", None, "Headcount."),
+            ("public", "bool", None, "Listed?"),
+            ("tags", "list", None, "Tags."),
+            ("meta", "json", None, "Extra."),
+            ("founded", "str", None, "Founding date."),
+        ]
+        assert manifest["fields"] == [
+            {
+                "name": name,
+                "type": type_str,
+                "enum": field_enum,
+                "description": description,
+                "step": "classify",
+                "internal": False,
+            }
+            for name, type_str, field_enum, description in expected
+        ]
 
 
 # ---------------------------------------------------------------------------
