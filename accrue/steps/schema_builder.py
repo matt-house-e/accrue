@@ -133,8 +133,10 @@ def describe_from_specs(
         info = model.model_fields.get(name)
         if info is None:
             continue
-        spec = raw if isinstance(raw, FieldSpec) else (
-            FieldSpec(prompt=raw) if isinstance(raw, str) else FieldSpec.model_validate(raw)
+        spec = (
+            raw
+            if isinstance(raw, FieldSpec)
+            else (FieldSpec(prompt=raw) if isinstance(raw, str) else FieldSpec.model_validate(raw))
         )
         if info.description and spec.prompt in info.description:
             continue
