@@ -284,6 +284,23 @@ class TestBuildJsonSchemaFromModel:
         assert node["additionalProperties"] is False
         assert node["properties"]["a"]["additionalProperties"] is False
 
+    def test_dict_field_value_schema_is_not_overwritten(self):
+        # dict[str, X] must not become an always-empty object (review of #156).
+        from pydantic import BaseModel
+
+        from accrue.steps.schema_builder import build_json_schema_from_model
+
+        class _Inner(BaseModel):
+            x: str
+
+        class _M(BaseModel):
+            tags: dict[str, int]
+            inner: dict[str, _Inner]
+
+        props = build_json_schema_from_model(_M)["json_schema"]["schema"]["properties"]
+        assert props["tags"]["additionalProperties"] == {"type": "integer"}
+        assert props["inner"]["additionalProperties"] == {"$ref": "#/$defs/_Inner"}
+
 
 class TestDescribeFromSpecs:
     def _model(self):
@@ -345,8 +362,10 @@ class TestCustomSchemaDescriptionWarning:
 
         with caplog.at_level(logging.WARNING, logger="accrue"):
             LLMStep(
-                "s", fields={"a": "Find the a", "b": "Find the b"},
-                schema=self._schema(False), structured_outputs=True,
+                "s",
+                fields={"a": "Find the a", "b": "Find the b"},
+                schema=self._schema(False),
+                structured_outputs=True,
             )
         warnings = [r for r in caplog.records if "field-spec prompt" in r.getMessage()]
         assert len(warnings) == 1
@@ -359,8 +378,12 @@ class TestCustomSchemaDescriptionWarning:
 
         fields = {"a": "Find the a", "b": "Find the b"}
         with caplog.at_level(logging.WARNING, logger="accrue"):
-            LLMStep("s", fields=fields, schema=describe_from_specs(self._schema(False), fields),
-                    structured_outputs=True)
+            LLMStep(
+                "s",
+                fields=fields,
+                schema=describe_from_specs(self._schema(False), fields),
+                structured_outputs=True,
+            )
         assert not [r for r in caplog.records if "field-spec prompt" in r.getMessage()]
 
     def test_no_warning_without_structured_outputs(self, caplog):

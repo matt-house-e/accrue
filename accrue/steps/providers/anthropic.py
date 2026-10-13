@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import re
@@ -237,6 +238,18 @@ class AnthropicClient:
 
         # Extract text from potentially multi-block response
         content = _extract_text(response)
+
+        # Output cut off at max_tokens: the JSON is incomplete, and LLMStep's
+        # parse retry would resend the identical request (every attachment
+        # included) only to be cut off again.  Fail the row once, loudly.
+        if getattr(response, "stop_reason", None) == "max_tokens" and not _is_json(content):
+            raise LLMAPIError(
+                f"Anthropic response for model '{model}' was truncated at "
+                f"max_tokens={max_tokens}; the JSON is incomplete. Raise the "
+                f"step's max_tokens (above ~21,000 also pass "
+                f"AnthropicClient(timeout=...)).",
+                retryable=False,
+            )
 
         # Extract citations from web_search_result_location blocks
         citations = _extract_citations(response) if anthropic_tools else []
@@ -535,6 +548,18 @@ def _temperature_hint(model: str, exc: Exception) -> str:
         f"Claude Opus 4.7/4.8); please report '{model}' at "
         "https://github.com/matt-house-e/accrue/issues so the check can cover it."
     )
+
+
+def _is_json(content: str) -> bool:
+    """True when *content* (optionally fenced) parses as JSON."""
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", text)
+    try:
+        json.loads(text)
+    except ValueError:
+        return False
+    return True
 
 
 def _to_anthropic_content(content: Any) -> Any:

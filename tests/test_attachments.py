@@ -90,6 +90,25 @@ class TestNormalizeAttachments:
 
         assert normalize_attachments(pd.NA) == []
 
+    def test_numpy_array_of_paths(self, tmp_path):
+        # pandas returns list columns read from Parquet as numpy arrays; a
+        # multi-element array used to be treated as blank (review of #156).
+        import numpy as np
+
+        a, b = tmp_path / "a.pdf", tmp_path / "b.pdf"
+        a.write_bytes(b"%PDF-a")
+        b.write_bytes(b"%PDF-b")
+        docs = normalize_attachments(np.array([str(a), str(b)], dtype=object))
+        assert [d.data for d in docs] == [b"%PDF-a", b"%PDF-b"]
+
+    def test_numpy_array_single_and_empty(self, tmp_path):
+        import numpy as np
+
+        a = tmp_path / "a.pdf"
+        a.write_bytes(b"%PDF-a")
+        assert [d.data for d in normalize_attachments(np.array([str(a)]))] == [b"%PDF-a"]
+        assert normalize_attachments(np.array([], dtype=object)) == []
+
     def test_empty_list(self):
         assert normalize_attachments([]) == []
 

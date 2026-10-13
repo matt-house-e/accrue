@@ -31,10 +31,10 @@ The named column is removed from the `<row_data>` JSON in the prompt and rendere
 | `"path/to/file.pdf"` or a `pathlib.Path` | one `Document` read from disk |
 | `b"%PDF-..."` | one `Document` with `media_type="application/pdf"` |
 | `Document(...)` | itself |
-| a `list`/`tuple` of any of the above | one `Document` each, in order |
+| a `list`/`tuple`/numpy array of any of the above | one `Document` each, in order |
 | `None`, `NaN`, `pd.NA`, `""`, `[]` | no attachments — a plain text prompt |
 
-Anything else raises `StepError` naming the offending type, as does a path that cannot be read.
+Anything else raises `StepError` naming the offending type, as does a path that cannot be read. A row that lacks the column altogether also raises, so a misspelt column name fails every row before any call instead of quietly sending prompts without their documents. On the batch path these are per-row errors raised before anything is submitted; the rest of the batch still goes out.
 
 ## `Document`
 
@@ -71,7 +71,9 @@ Enough to tell two attachments apart, without putting a megabyte of base64 into 
 
 ## Request limits
 
-Anthropic caps a single request at **32 MB** and **100 PDF pages**. The Message Batches API caps a batch at **256 MB** total, so a large PDF set has to be split across several runs for now — accrue does not chunk attachments automatically.
+Anthropic caps a single request at **32 MB** — measured after base64 encoding, which adds a third, so roughly 24 MB of raw PDF — and at **100 PDF pages** (600 on 1M-context models). The Message Batches API caps a batch at **256 MB** total, so a large PDF set has to be split, for example with a small `EnrichmentConfig(batch_max_requests=...)` — accrue does not size batches by attachment bytes automatically.
+
+A response cut off at `max_tokens` fails the row with an error naming the limit rather than being retried: every retry would resend the full request, documents included, and be cut off again. Raise `max_tokens` (above roughly 21,000 also pass `AnthropicClient(timeout=...)`, see [providers](providers.md)).
 
 Attachment bytes are input tokens: a long PDF is a real cost, and the cached system prefix does not cover them.
 
